@@ -1,45 +1,35 @@
-import re
-from typing import Optional, Tuple, Dict
+from services.gemini_service import GeminiService
+from typing import Dict
 
 class IntentService:
-    @staticmethod
-    def parse_intent(message_body: str) -> Dict:
+    def __init__(self):
+        self.gemini = GeminiService()
+
+    def parse_intent(self, message_body: str) -> Dict:
         """
-        Parses the incoming WhatsApp message body to determine user intent.
-        
-        Supported formats:
-        - help
-        - status
-        - invoice for <client> <month>
+        Parses intent using Gemini for natural language understanding.
         """
+        # Try Gemini first
+        ai_result = self.gemini.parse_user_message(message_body)
+        if ai_result.get("intent") != "unknown":
+            return ai_result
+
+        # Fallback to simple regex/string matches for robustness
         body = message_body.strip().lower()
         
-        if body == "help":
+        if "help" in body:
             return {"intent": "help"}
         
-        if body == "status":
+        if "status" in body:
             return {"intent": "status"}
-        
-        # Regex for 'invoice for <client> <month>'
-        # Matches: invoice for nikkunj july
-        invoice_match = re.match(r"^invoice for\s+([\w\s]+)\s+(\w+)$", body)
-        if invoice_match:
-            client_name = invoice_match.group(1).strip()
-            month = invoice_match.group(2).strip()
-            return {
-                "intent": "generate_invoice",
-                "client_name": client_name,
-                "month": month
-            }
         
         return {"intent": "unknown"}
 
     @staticmethod
     def get_help_text() -> str:
         return (
-            "Available Commands:\n"
-            "1. *help* - Show this message\n"
-            "2. *status* - Check system status\n"
-            "3. *invoice for <client> <month>* - Get invoice summary\n"
-            "\nExample: *invoice for nikkunj july*"
+            "You can talk to me naturally! Try saying:\n"
+            "- 'Send me the invoice for Nikkunj for July'\n"
+            "- 'Summarize Xiaomi records for April'\n"
+            "- 'status' or 'help'"
         )

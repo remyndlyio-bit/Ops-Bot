@@ -23,6 +23,7 @@ app.mount("/static", StaticFiles(directory="output"), name="static")
 sheets_service = SheetsService()
 whatsapp_service = WhatsAppService()
 invoice_gen_service = InvoiceGenerationService()
+intent_service = IntentService()
 
 @app.get("/health")
 def health_check():
@@ -79,36 +80,42 @@ async def whatsapp_webhook(
     """
     logger.info(f"Received message from {From}: {Body}")
 
-    intent_data = IntentService.parse_intent(Body)
+    intent_data = intent_service.parse_intent(Body)
     intent = intent_data.get("intent")
 
     if intent == "help":
-        whatsapp_service.send_text_message(From, IntentService.get_help_text())
+        whatsapp_service.send_text_message(From, intent_service.get_help_text())
     
     elif intent == "status":
         whatsapp_service.send_text_message(From, "✅ System is online and ready.")
 
-    elif intent == "generate_invoice":
+    elif intent in ["generate_invoice", "get_summary"]:
         client_name = intent_data.get("client_name")
         month = intent_data.get("month")
         
+        if not client_name or not month:
+            whatsapp_service.send_text_message(From, "I understood you want an invoice or summary, but I couldn't catch the client name or month. Could you please specify?")
+            return PlainTextResponse("OK")
+
         try:
-            # First, send the preview/summary immediately
+            # Fetch data
             data = sheets_service.get_invoice_data(client_name, month)
             summary = InvoiceService.process_invoice_data(data, client_name, month)
             response_text = InvoiceService.format_summary_message(summary)
+            
+            # Send text summary/preview
             whatsapp_service.send_text_message(From, response_text)
 
-            # Then, queue the PDF generation and media delivery
-            if summary.get("found"):
+            # If they specifically asked for an invoice PDF, queue it
+            if intent == "generate_invoice" and summary.get("found"):
                 background_tasks.add_task(process_and_send_invoice, From, client_name, month)
 
         except Exception as e:
-            logger.error(f"Error processing invoice request: {e}")
+            logger.error(f"Error processing invoice/summary request: {e}")
             whatsapp_service.send_text_message(From, "Error processing your request.")
 
     else:
-        whatsapp_service.send_text_message(From, "Command not recognized. Type 'help' for options.")
+        whatsapp_service.send_text_message(From, "I'm not sure how to help with that yet. Try asking for an invoice or a client summary!")
 
     return PlainTextResponse("OK")
 

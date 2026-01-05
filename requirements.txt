@@ -9,3 +9,4 @@ pandas
 openpyxl
 fpdf2
 num2words
+google-generativeai
