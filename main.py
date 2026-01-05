@@ -114,7 +114,7 @@ async def whatsapp_webhook(
         month = intent_data.get("month")
         
         if not client_name or not month:
-            whatsapp_service.send_text_message(From, "I understood you want an invoice, but I couldn't catch the client name or month. Could you specify?") # Updated message
+            whatsapp_service.send_text_message(From, "I understood you want an invoice, but I couldn't catch the client name or month. Could you specify?")
             return PlainTextResponse("OK")
 
         try:
@@ -128,14 +128,24 @@ async def whatsapp_webhook(
 
             # If they specifically asked for an invoice PDF, queue it
             if intent == "generate_invoice" and summary.get("found"):
-                background_tasks.add_task(process_and_send_invoice, From, client_name, month, platform="whatsapp") # Added platform argument
+                background_tasks.add_task(process_and_send_invoice, From, client_name, month, platform="whatsapp")
 
         except Exception as e:
-            logger.error(f"Error processing invoice/summary request: {e}") # Simplified error message
+            logger.error(f"Error processing invoice/summary request: {e}")
             whatsapp_service.send_text_message(From, "Error processing your request.")
 
+    elif intent == "general_query":
+        try:
+            # Fetch all data for analysis
+            all_data = sheets_service.get_all_raw_data()
+            analysis_result = intent_service.gemini.analyze_data(Body, all_data)
+            whatsapp_service.send_text_message(From, analysis_result)
+        except Exception as e:
+            logger.error(f"General query error: {e}")
+            whatsapp_service.send_text_message(From, "Sorry, I couldn't analyze the data right now.")
+
     else:
-        whatsapp_service.send_text_message(From, "I'm not sure how to help. Try asking for an invoice!") # Updated message
+        whatsapp_service.send_text_message(From, "I'm not sure how to help. Try asking for an invoice!")
 
     return PlainTextResponse("OK")
 
@@ -162,7 +172,7 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
             client_name = intent_data.get("client_name")
             month = intent_data.get("month")
             if not client_name or not month:
-                await telegram_service.send_text_message(chat_id, "I couldn't catch the client name or month. Could you specified?")
+                await telegram_service.send_text_message(chat_id, "I couldn't catch the client name or month. Could you specify?")
                 return {"status": "ok"}
             
             try:
@@ -174,6 +184,15 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
             except Exception as e:
                 logger.error(f"Error: {e}")
                 await telegram_service.send_text_message(chat_id, "Error processing your request.")
+        
+        elif intent == "general_query":
+            try:
+                all_data = sheets_service.get_all_raw_data()
+                analysis_result = intent_service.gemini.analyze_data(text, all_data)
+                await telegram_service.send_text_message(chat_id, analysis_result)
+            except Exception as e:
+                logger.error(f"General query error: {e}")
+                await telegram_service.send_text_message(chat_id, "Sorry, I couldn't analyze the data right now.")
         else:
             await telegram_service.send_text_message(chat_id, "I'm not sure how to help. Try asking for an invoice!")
 

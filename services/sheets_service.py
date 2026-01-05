@@ -104,3 +104,29 @@ class SheetsService:
         except Exception as e:
             logger.error(f"Error fetching data from sheet: {e}")
             return []
+
+    def _open_sheet(self):
+        if not self.client:
+            self.client = self._authenticate()
+        if not self.client:
+            return None
+        return self.client.open_by_url(self.sheet_url).sheet1
+
+    def get_all_raw_data(self) -> List[Dict]:
+        """
+        Fetches all records for broad data analysis.
+        """
+        try:
+            sheet = self._open_sheet()
+            if not sheet:
+                return []
+            
+            all_records = sheet.get_all_records()
+            # Clean keys (headers)
+            cleaned_records = []
+            for row in all_records:
+                cleaned_records.append({str(k).strip(): v for k, v in row.items()})
+            return cleaned_records
+        except Exception as e:
+            logger.error(f"Error fetching all raw data: {e}")
+            return []
