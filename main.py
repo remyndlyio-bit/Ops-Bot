@@ -48,9 +48,13 @@ async def process_and_send_invoice(to_number: str, client_name: str, month: str)
             return
 
         # 4. Construct Public URL
-        # For local testing, this won't work with Twilio unless you use ngrok
-        # For Railway, BASE_URL should be set to your domain
-        base_url = os.getenv("BASE_URL", "http://localhost:8080")
+        base_url = os.getenv("BASE_URL", "").strip()
+        if base_url and not base_url.startswith("http"):
+            base_url = f"https://{base_url}"
+        
+        if not base_url:
+            base_url = "http://localhost:8080" # Fallback
+
         filename = os.path.basename(pdf_path)
         media_url = f"{base_url}/static/{filename}"
 
