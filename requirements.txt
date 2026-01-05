@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+twilio
+gspread
+google-auth
+python-dotenv
+python-multipart
+pandas
+openpyxl
