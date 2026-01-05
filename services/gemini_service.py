@@ -16,10 +16,11 @@ class GeminiService:
     def _initialize_model(self):
         # List of models to try in order of preference
         models_to_try = [
+            'gemini-2.0-flash',
             'gemini-1.5-flash',
-            'gemini-1.5-flash-latest',
-            'gemini-pro',
-            'gemini-1.0-pro'
+            'gemini-flash-latest',
+            'gemini-2.0-flash-lite',
+            'gemini-pro'
         ]
         
         for model_name in models_to_try:
