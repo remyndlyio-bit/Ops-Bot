@@ -16,18 +16,27 @@ class SheetsService:
 
     def _authenticate(self):
         try:
-            if not self.credentials_path or not os.path.exists(self.credentials_path):
-                # Fallback for Railway where we might use a JSON string in env
-                import json
-                creds_json = os.getenv("GOOGLE_CREDS_JSON")
-                if creds_json:
-                    creds_dict = json.loads(creds_json)
-                    credentials = Credentials.from_service_account_info(creds_dict, scopes=self.scope)
-                else:
-                    logger.error("Google credentials not found.")
-                    return None
+            # Flexible detection: Check if the variable is a path or the actual JSON content
+            creds_raw = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.getenv("GOOGLE_CREDS_JSON")
+            
+            if not creds_raw:
+                logger.error("Google credentials not found in environment variables.")
+                return None
+
+            import json
+            # If it looks like JSON, parse it directly from the string
+            if creds_raw.strip().startswith("{"):
+                creds_dict = json.loads(creds_raw)
+                credentials = Credentials.from_service_account_info(creds_dict, scopes=self.scope)
+                logger.info("Authenticated using JSON content from environment.")
             else:
-                credentials = Credentials.from_service_account_file(self.credentials_path, scopes=self.scope)
+                # Otherwise, treat it as a file path
+                if os.path.exists(creds_raw):
+                    credentials = Credentials.from_service_account_file(creds_raw, scopes=self.scope)
+                    logger.info(f"Authenticated using file: {creds_raw}")
+                else:
+                    logger.error(f"Google credentials path does not exist: {creds_raw}")
+                    return None
             
             return gspread.authorize(credentials)
         except Exception as e:
