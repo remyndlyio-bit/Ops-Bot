@@ -8,12 +8,39 @@ class GeminiService:
         api_key = os.getenv("GEMINI_KEY")
         if api_key:
             genai.configure(api_key=api_key)
-            # Use 'gemini-1.5-flash-latest' for better compatibility
-            self.model_name = 'gemini-1.5-flash-latest'
-            self.model = genai.GenerativeModel(self.model_name)
+            self.model = self._initialize_model()
         else:
             logger.error("GEMINI_KEY not found in environment variables.")
             self.model = None
+
+    def _initialize_model(self):
+        # List of models to try in order of preference
+        models_to_try = [
+            'gemini-1.5-flash',
+            'gemini-1.5-flash-latest',
+            'gemini-pro',
+            'gemini-1.0-pro'
+        ]
+        
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                # Test the model with a tiny prompt to verify it exists and is accessible
+                model.generate_content("test", generation_config={"max_output_tokens": 1})
+                logger.info(f"Successfully initialized Gemini with model: {model_name}")
+                return model
+            except Exception as e:
+                logger.warning(f"Failed to initialize model '{model_name}': {e}")
+                continue
+        
+        # If all fail, try to list models for debugging
+        try:
+            available_models = [m.name for m in genai.list_models()]
+            logger.error(f"All preferred models failed. Available models for this key: {available_models}")
+        except Exception as list_err:
+            logger.error(f"Could not list models: {list_err}")
+            
+        return None
 
     def parse_user_message(self, message: str) -> dict:
         """
