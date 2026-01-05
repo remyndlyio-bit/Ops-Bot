@@ -8,7 +8,9 @@ class GeminiService:
         api_key = os.getenv("GEMINI_KEY")
         if api_key:
             genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel('gemini-1.5-flash')
+            # Use 'gemini-1.5-flash-latest' for better compatibility
+            self.model_name = 'gemini-1.5-flash-latest'
+            self.model = genai.GenerativeModel(self.model_name)
         else:
             logger.error("GEMINI_KEY not found in environment variables.")
             self.model = None
