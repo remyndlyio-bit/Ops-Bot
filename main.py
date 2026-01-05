@@ -1,11 +1,13 @@
-from fastapi import FastAPI, Request, Form, BackgroundTasks
+from fastapi import FastAPI, Form, BackgroundTasks
 from fastapi.responses import PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
 from services.intent_service import IntentService
 from services.sheets_service import SheetsService
 from services.invoice_service import InvoiceService
 from services.whatsapp_service import WhatsAppService
+from services.invoice_generation_service import InvoiceGenerationService
 from utils.logger import logger
 
 # Load environment variables
@@ -13,13 +15,54 @@ load_dotenv()
 
 app = FastAPI(title="WhatsApp Invoice Automation Bot")
 
+# Mount static files to serve generated PDFs
+os.makedirs("output", exist_ok=True)
+app.mount("/static", StaticFiles(directory="output"), name="static")
+
 # Initialize Services
 sheets_service = SheetsService()
 whatsapp_service = WhatsAppService()
+invoice_gen_service = InvoiceGenerationService()
 
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "version": "1.0.0"}
+
+async def process_and_send_invoice(to_number: str, client_name: str, month: str):
+    """
+    Background task to generate PDF and send it via WhatsApp.
+    """
+    try:
+        # 1. Fetch Data
+        data = sheets_service.get_invoice_data(client_name, month)
+        if not data:
+            return
+        
+        # 2. Process Summary
+        summary = InvoiceService.process_invoice_data(data, client_name, month)
+        
+        # 3. Generate PDF
+        pdf_path = invoice_gen_service.generate_pdf(summary, data)
+        if not pdf_path:
+            logger.error("Failed to generate PDF")
+            return
+
+        # 4. Construct Public URL
+        # For local testing, this won't work with Twilio unless you use ngrok
+        # For Railway, BASE_URL should be set to your domain
+        base_url = os.getenv("BASE_URL", "http://localhost:8080")
+        filename = os.path.basename(pdf_path)
+        media_url = f"{base_url}/static/{filename}"
+
+        # 5. Send Media Message
+        whatsapp_service.send_media_message(
+            to_number=to_number,
+            body=f"Here is the PDF invoice for {summary['client']} - {summary['month']} 📄",
+            media_url=media_url
+        )
+
+    except Exception as e:
+        logger.error(f"Error in process_and_send_invoice task: {e}")
 
 @app.post("/webhooks/whatsapp")
 async def whatsapp_webhook(
@@ -29,49 +72,40 @@ async def whatsapp_webhook(
 ):
     """
     Twilio WhatsApp Webhook
-    Body: The message text
-    From: The sender WhatsApp number (format: whatsapp:+<number>)
     """
     logger.info(f"Received message from {From}: {Body}")
 
-    # 1. Parse Intent
     intent_data = IntentService.parse_intent(Body)
     intent = intent_data.get("intent")
-    logger.info(f"Parsed intent: {intent}")
-
-    # 2. Handle Intent
-    response_text = ""
 
     if intent == "help":
-        response_text = IntentService.get_help_text()
+        whatsapp_service.send_text_message(From, IntentService.get_help_text())
     
     elif intent == "status":
-        response_text = "✅ System is online and ready to process invoices."
+        whatsapp_service.send_text_message(From, "✅ System is online and ready.")
 
     elif intent == "generate_invoice":
         client_name = intent_data.get("client_name")
         month = intent_data.get("month")
         
-        # Immediate processing to keep response < 5s
-        # Note: If sheet is large, we might want to move this to a background task
-        # But per requirements, we return the summary text.
         try:
+            # First, send the preview/summary immediately
             data = sheets_service.get_invoice_data(client_name, month)
             summary = InvoiceService.process_invoice_data(data, client_name, month)
             response_text = InvoiceService.format_summary_message(summary)
+            whatsapp_service.send_text_message(From, response_text)
+
+            # Then, queue the PDF generation and media delivery
+            if summary.get("found"):
+                background_tasks.add_task(process_and_send_invoice, From, client_name, month)
+
         except Exception as e:
             logger.error(f"Error processing invoice request: {e}")
-            response_text = "Sorry, I encountered an error while fetching invoice data. Please try again later."
+            whatsapp_service.send_text_message(From, "Error processing your request.")
 
     else:
-        response_text = "I didn't quite get 그. " + IntentService.get_help_text()
+        whatsapp_service.send_text_message(From, "Command not recognized. Type 'help' for options.")
 
-    # 3. Send Response via Twilio
-    # We use BackgroundTasks to ensure the webhook returns quickly (< 5s)
-    background_tasks.add_task(whatsapp_service.send_text_message, From, response_text)
-
-    # Twilio expects a 200 OK. We can return empty TwiML or plain text.
-    # Returning plain text is fine if we are sending the reply via Messaging API separately.
     return PlainTextResponse("OK")
 
 if __name__ == "__main__":

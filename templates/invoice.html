@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: 'Helvetica', 'Arial', sans-serif; color: #333; margin: 0; padding: 0; }
+        .invoice-box { max-width: 800px; margin: auto; padding: 30px; line-height: 24px; color: #555; }
+        .header { display: flex; justify-content: space-between; margin-bottom: 40px; }
+        .company-info h1 { margin: 0; color: #000; font-size: 28px; }
+        .details-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        .details-table td { padding: 5px; vertical-align: top; }
+        .invoice-header-info { text-align: right; }
+        
+        .items-table { width: 100%; border-collapse: collapse; margin-top: 30px; }
+        .items-table th { background: #f8f9fa; border-bottom: 2px solid #dee2e6; padding: 12px; text-align: left; font-size: 14px; text-transform: uppercase; }
+        .items-table td { padding: 12px; border-bottom: 1px solid #dee2e6; font-size: 14px; }
+        
+        .totals-section { margin-top: 30px; text-align: right; }
+        .total-row { font-size: 18px; font-weight: bold; color: #000; }
+        
+        .footer { margin-top: 50px; font-size: 12px; border-top: 1px solid #eee; padding-top: 20px; }
+        .bank-details { margin-top: 20px; background: #fdfdfd; padding: 15px; border: 1px solid #eee; }
+        .in-words { font-style: italic; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="invoice-box">
+        <table style="width: 100%">
+            <tr>
+                <td style="width: 50%">
+                    <div class="company-info">
+                        <h1>Darshit Mody</h1>
+                        <p>Voice Over Artist</p>
+                        <p>Residence Address: [Your Address]</p>
+                        <p>Email: [Your Email]</p>
+                        <p>PAN: [Your PAN]</p>
+                    </div>
+                </td>
+                <td style="width: 50%; text-align: right;">
+                    <div class="invoice-header-info">
+                        <h2>INVOICE</h2>
+                        <p><strong>Invoice #:</strong> {{ invoice_no }}</p>
+                        <p><strong>Date:</strong> {{ date }}</p>
+                        <p><strong>Terms:</strong> {{ terms }}</p>
+                    </div>
+                </td>
+            </tr>
+        </table>
+
+        <div style="margin-top: 30px;">
+            <h3>Invoice To:</h3>
+            <p><strong>{{ client_name }}</strong></p>
+            <p>{{ client_details }}</p>
+        </div>
+
+        <table class="items-table">
+            <thead>
+                <tr>
+                    <th style="width: 10%">Sr. No.</th>
+                    <th style="width: 15%">Date</th>
+                    <th style="width: 55%">Particulars / Job Description</th>
+                    <th style="width: 20%; text-align: right;">Fees (₹)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in items %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ item.date }}</td>
+                    <td>{{ item.job }}<br><small>{{ item.notes }}</small></td>
+                    <td style="text-align: right;">{{ "{:,.2f}".format(item.fees) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <div class="totals-section">
+            <p class="total-row">Total Amount: ₹ {{ "{:,.2f}".format(total) }}</p>
+            <p class="in-words"><strong>In Words:</strong> {{ total_words }} Only</p>
+        </div>
+
+        <div class="footer">
+            <div class="bank-details">
+                <strong>BANK ACCOUNT DETAILS:</strong><br>
+                Bank Name: [Bank Name]<br>
+                Account Holder: Darshit Mody<br>
+                Account Number: [Account Number]<br>
+                IFSC Code: [IFSC Code]
+            </div>
+            
+            <div style="margin-top: 20px;">
+                <strong>Terms and Conditions:</strong>
+                <ul>
+                    <li>Advance payments should be made within 2 working days from invoice date.</li>
+                    <li>Payment should be made in favor of 'Darshit Mody'.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

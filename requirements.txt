@@ -7,3 +7,6 @@ python-dotenv
 python-multipart
 pandas
 openpyxl
+jinja2
+xhtml2pdf
+num2words
