@@ -143,7 +143,12 @@ class IntentService:
             action_result = "I encountered an error accessing the data records."
 
         # 3. Final Response Phrasing (Only for business operations)
-        response = self.gemini.generate_response(message, action_result)
+        # Skip LLM if no data was found or error occurred
+        fallback = "I don’t see this information in my records yet."
+        if action_result in [fallback, "I encountered an error accessing the data records."]:
+            response = action_result
+        else:
+            response = self.gemini.generate_response(message, action_result)
 
         return {
             "operation": operation,

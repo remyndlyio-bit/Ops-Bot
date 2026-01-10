@@ -145,8 +145,11 @@ class GeminiService:
             }
 
     def generate_response(self, user_message: str, backend_result: str) -> str:
-        """Stage 3: Professional Phrasing."""
-        if not self.model: return str(backend_result)
+        """Stage 3: Professional Phrasing with safety guards."""
+        fallback = "I don't see this information in my records yet."
+        
+        if not self.model or not backend_result or backend_result == fallback:
+            return backend_result or fallback
         
         prompt = (
             "You are a professional business assistant. Phrase a response based ONLY on this result.\n"
@@ -156,13 +159,27 @@ class GeminiService:
         )
 
         try:
+            # Generate content synchronously (waits for full completion)
             response = self.model.generate_content(
                 prompt,
                 generation_config={"max_output_tokens": 150, "temperature": 0.2}
             )
-            return response.text.strip()
-        except Exception:
-            return "I don't see this information in my records yet."
+            
+            # Ensure generate_content fully completed by checking response.text
+            text = response.text.strip()
+            length = len(text)
+            
+            logger.info(f"LLM Response (len={length}): {text}")
+
+            # Minimum length guard (20 chars)
+            if length < 20:
+                logger.warning(f"LLM response discarded (too short: {length} chars). Using fallback.")
+                return backend_result
+
+            return text
+        except Exception as e:
+            logger.error(f"Response Generation failed (Stage 3): {e}")
+            return backend_result or fallback
 
     # Keep compatibility or legacy methods if needed, but the user wants a refactor.
     # The analyze_data and parse_user_message are replaced by this new flow.
