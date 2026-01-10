@@ -119,7 +119,8 @@ async def whatsapp_webhook(
         background_tasks.add_task(
             process_and_send_invoice, 
             From, data["client_name"], data["month"], 
-            platform="whatsapp"
+            platform="whatsapp",
+            bill_number=data.get("bill_number")
         )
 
     return PlainTextResponse("OK")
@@ -145,7 +146,8 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
             background_tasks.add_task(
                 process_and_send_invoice, 
                 None, data_inv["client_name"], data_inv["month"], 
-                platform="telegram", chat_id=chat_id
+                platform="telegram", chat_id=chat_id,
+                bill_number=data_inv.get("bill_number")
             )
 
         return {"status": "ok"}
