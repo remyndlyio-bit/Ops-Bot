@@ -97,55 +97,20 @@ async def whatsapp_webhook(
     Body: str = Form(...),
     From: str = Form(...)
 ):
-    """Twilio WhatsApp Webhook""" # Simplified docstring
+    """Twilio WhatsApp Webhook"""
     logger.info(f"Received message from {From}: {Body}")
 
-    intent_data = intent_service.parse_intent(Body)
-    intent = intent_data.get("intent")
+    # Use the new Three-Stage architecture
+    result = intent_service.process_request(user_id=From, message=Body)
+    whatsapp_service.send_text_message(From, result["response"])
 
-    if intent == "help":
-        whatsapp_service.send_text_message(From, intent_service.get_help_text())
-    
-    elif intent == "status":
-        whatsapp_service.send_text_message(From, "✅ System is online and ready.")
-
-    elif intent in ["generate_invoice", "get_summary"]:
-        client_name = intent_data.get("client_name")
-        month = intent_data.get("month")
-        
-        if not client_name or not month:
-            whatsapp_service.send_text_message(From, "I understood you want an invoice, but I couldn't catch the client name or month. Could you specify?")
-            return PlainTextResponse("OK")
-
-        try:
-            # Fetch data
-            data = sheets_service.get_invoice_data(client_name, month)
-            summary = InvoiceService.process_invoice_data(data, client_name, month)
-            response_text = InvoiceService.format_summary_message(summary)
-            
-            # Send text summary/preview
-            whatsapp_service.send_text_message(From, response_text)
-
-            # If they specifically asked for an invoice PDF, queue it
-            if intent == "generate_invoice" and summary.get("found"):
-                background_tasks.add_task(process_and_send_invoice, From, client_name, month, platform="whatsapp")
-
-        except Exception as e:
-            logger.error(f"Error processing invoice/summary request: {e}")
-            whatsapp_service.send_text_message(From, "Error processing your request.")
-
-    elif intent == "general_query":
-        try:
-            # Fetch all data for analysis
-            all_data = sheets_service.get_all_raw_data()
-            analysis_result = intent_service.gemini.analyze_data(Body, all_data)
-            whatsapp_service.send_text_message(From, analysis_result)
-        except Exception as e:
-            logger.error(f"General query error: {e}")
-            whatsapp_service.send_text_message(From, "Sorry, I couldn't analyze the data right now.")
-
-    else:
-        whatsapp_service.send_text_message(From, "I'm not sure how to help. Try asking for an invoice!")
+    if result.get("trigger_invoice"):
+        data = result["invoice_data"]
+        background_tasks.add_task(
+            process_and_send_invoice, 
+            From, data["client_name"], data["month"], 
+            platform="whatsapp"
+        )
 
     return PlainTextResponse("OK")
 
@@ -161,45 +126,24 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
         text = data["message"].get("text", "")
         logger.info(f"Received Telegram message from {chat_id}: {text}")
 
-        intent_data = intent_service.parse_intent(text)
-        intent = intent_data.get("intent")
+        user_id = str(chat_id)
+        result = intent_service.process_request(user_id=user_id, message=text)
+        await telegram_service.send_text_message(chat_id, result["response"])
 
-        if intent == "help":
-            await telegram_service.send_text_message(chat_id, intent_service.get_help_text())
-        elif intent == "status":
-            await telegram_service.send_text_message(chat_id, "✅ System is online and ready.")
-        elif intent in ["generate_invoice", "get_summary"]:
-            client_name = intent_data.get("client_name")
-            month = intent_data.get("month")
-            if not client_name or not month:
-                await telegram_service.send_text_message(chat_id, "I couldn't catch the client name or month. Could you specify?")
-                return {"status": "ok"}
-            
-            try:
-                sheet_data = sheets_service.get_invoice_data(client_name, month)
-                summary = InvoiceService.process_invoice_data(sheet_data, client_name, month)
-                await telegram_service.send_text_message(chat_id, InvoiceService.format_summary_message(summary))
-                if intent == "generate_invoice" and summary.get("found"):
-                    background_tasks.add_task(process_and_send_invoice, None, client_name, month, platform="telegram", chat_id=chat_id)
-            except Exception as e:
-                logger.error(f"Error: {e}")
-                await telegram_service.send_text_message(chat_id, "Error processing your request.")
-        
-        elif intent == "general_query":
-            try:
-                all_data = sheets_service.get_all_raw_data()
-                analysis_result = intent_service.gemini.analyze_data(text, all_data)
-                await telegram_service.send_text_message(chat_id, analysis_result)
-            except Exception as e:
-                logger.error(f"General query error: {e}")
-                await telegram_service.send_text_message(chat_id, "Sorry, I couldn't analyze the data right now.")
-        else:
-            await telegram_service.send_text_message(chat_id, "I'm not sure how to help. Try asking for an invoice!")
+        if result.get("trigger_invoice"):
+            data_inv = result["invoice_data"]
+            background_tasks.add_task(
+                process_and_send_invoice, 
+                None, data_inv["client_name"], data_inv["month"], 
+                platform="telegram", chat_id=chat_id
+            )
 
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Telegram webhook error: {e}")
         return {"status": "error", "message": str(e)}
+
+
 
 if __name__ == "__main__":
     import uvicorn

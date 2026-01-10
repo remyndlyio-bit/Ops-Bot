@@ -105,28 +105,56 @@ class SheetsService:
             logger.error(f"Error fetching data from sheet: {e}")
             return []
 
-    def _open_sheet(self):
-        if not self.client:
-            self.client = self._authenticate()
-        if not self.client:
-            return None
-        return self.client.open_by_url(self.sheet_url).sheet1
-
-    def get_all_raw_data(self) -> List[Dict]:
-        """
-        Fetches all records for broad data analysis.
-        """
+    def add_row(self, sheet_name: str, data: list):
+        """Adds a new row to the specified sheet."""
         try:
-            sheet = self._open_sheet()
-            if not sheet:
-                return []
-            
-            all_records = sheet.get_all_records()
-            # Clean keys (headers)
-            cleaned_records = []
-            for row in all_records:
-                cleaned_records.append({str(k).strip(): v for k, v in row.items()})
-            return cleaned_records
+            sheet = self.client.open_by_url(self.sheet_url).worksheet(sheet_name)
+            sheet.append_row(data)
+            return f"Successfully added row to {sheet_name}."
         except Exception as e:
-            logger.error(f"Error fetching all raw data: {e}")
-            return []
+            logger.error(f"Error adding row: {e}")
+            return f"Error adding row: {str(e)}"
+
+    def find_row(self, sheet_name: str, query: str):
+        """Finds rows matching a query string in any column."""
+        try:
+            sheet = self.client.open_by_url(self.sheet_url).worksheet(sheet_name)
+            all_records = sheet.get_all_records()
+            results = [row for row in all_records if any(query.lower() in str(val).lower() for val in row.values())]
+            return f"Found {len(results)} rows in {sheet_name}." if results else "No matching rows found."
+        except Exception as e:
+            logger.error(f"Error finding row: {e}")
+            return f"Error finding row: {str(e)}"
+
+    def update_row(self, sheet_name: str, query: str, data: dict):
+        """Updates the first row matching query with new data."""
+        try:
+            sheet = self.client.open_by_url(self.sheet_url).worksheet(sheet_name)
+            cell = sheet.find(query)
+            if cell:
+                # This is a simplified update logic for demonstration
+                # Real implementation would need to match keys to columns
+                headers = sheet.row_values(1)
+                for key, value in data.items():
+                    if key in headers:
+                        col_idx = headers.index(key) + 1
+                        sheet.update_cell(cell.row, col_idx, value)
+                return f"Updated row {cell.row} in {sheet_name}."
+            return "Row not found."
+        except Exception as e:
+            logger.error(f"Error updating row: {e}")
+            return f"Error updating row: {str(e)}"
+
+    def delete_row(self, sheet_name: str, query: str):
+        """Deletes the first row matching query."""
+        try:
+            sheet = self.client.open_by_url(self.sheet_url).worksheet(sheet_name)
+            cell = sheet.find(query)
+            if cell:
+                sheet.delete_rows(cell.row)
+                return f"Deleted row {cell.row} from {sheet_name}."
+            return "Row not found."
+        except Exception as e:
+            logger.error(f"Error deleting row: {e}")
+            return f"Error deleting row: {str(e)}"
+
