@@ -95,11 +95,15 @@ class GeminiService:
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
             
-            # Use structured messages with roles to separate instructions from user input
+            # Combine instructions and user input into a single 'user' block for API compatibility
             response = self.model.generate_content(
                 contents=[
-                    {"role": "system", "parts": [system_prompt]},
-                    {"role": "user", "parts": [message]}
+                    {
+                        "role": "user",
+                        "parts": [
+                            f"{system_prompt}\n\nUser message:\n{message}"
+                        ]
+                    }
                 ],
                 generation_config={
                     "response_mime_type": "application/json",
