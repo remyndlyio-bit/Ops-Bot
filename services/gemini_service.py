@@ -50,57 +50,33 @@ class GeminiService:
         logger.error(f"Failed all models. Errors: {errors}")
         return None
 
-    def classify_intent(self, message: str) -> str:
-        """Stage 1: Strict Intent Classification. Returns exactly one operation label."""
+    def parse_user_intent(self, message: str) -> dict:
+        """Single constrained call for Intent and Parameter parsing."""
         if not self.model: 
-            return "UNKNOWN"
+            return {"operation": "UNKNOWN", "entity": None, "parameters": {}}
         
         system_prompt = (
-            "Classify the message into EXACTLY ONE of these labels:\n"
-            "READ_ENTITY: Request to find or look up specific records/details.\n"
-            "AGGREGATE_ENTITY: Questions about totals, counts, billing, or outstanding sums.\n"
-            "CREATE_ENTITY: Adding new rows or jobs.\n"
-            "UPDATE_ENTITY: Updating existing jobs, payments, or records.\n"
-            "ACTION_TRIGGER: Generating invoices or specific system actions.\n"
-            "SCHEDULE_REMINDER: Setting dates/times for calls or follow-ups.\n"
-            "SMALL_TALK: Greetings, thanks, or general pleasantries.\n"
-            "UNKNOWN: If the intent is unclear.\n"
-            "Return ONLY the label."
-        )
-        
-        try:
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
-            
-            response = self.model.generate_content(
-                f"{system_prompt}\n\nMessage: {message}",
-                generation_config={"max_output_tokens": 10, "temperature": 0},
-                safety_settings=safety_settings
-            )
-            
-            label = response.text.strip().upper()
-            valid_labels = ["READ_ENTITY", "AGGREGATE_ENTITY", "CREATE_ENTITY", "UPDATE_ENTITY", "ACTION_TRIGGER", "SCHEDULE_REMINDER", "SMALL_TALK", "UNKNOWN"]
-            return label if label in valid_labels else "UNKNOWN"
-        except Exception as e:
-            logger.error(f"Classification failed: {e}")
-            return "UNKNOWN"
-
-    def extract_parameters(self, message: str) -> dict:
-        """Stage 2: Parameter Extraction. Returns clean JSON."""
-        if not self.model: return {}
-        
-        system_prompt = (
-            "Extract parameters from the message as JSON. "
-            "Fields: names (list), dates (ISO format if possible), time_ranges, amounts (numbers), invoice_numbers, entities (e.g., 'billing', 'invoice', 'gst').\n"
-            "Normalize time phrases:\n"
-            "- EOD -> 'end_of_day'\n"
-            "- tomorrow -> 'tomorrow'\n"
-            "- one week -> '7_days'\n"
-            "Return ONLY valid JSON."
+            "You are a specialized Intent and Parameter Parser. Return ONLY valid JSON.\n"
+            "SCHEMA:\n"
+            "{\n"
+            "  \"operation\": \"READ_ENTITY | AGGREGATE_ENTITY | CREATE_ENTITY | UPDATE_ENTITY | ACTION_TRIGGER | SCHEDULE_REMINDER | SMALL_TALK | UNKNOWN\",\n"
+            "  \"entity\": \"client | invoice | job | payment | project | bank_details | gst_details | reminder | communication_log | null\",\n"
+            "  \"parameters\": {\n"
+            "    \"client_name\": string | null,\n"
+            "    \"month\": string | null,\n"
+            "    \"year\": number | null,\n"
+            "    \"period\": \"day | month | quarter | year | null\",\n"
+            "    \"days\": number | null,\n"
+            "    \"amount\": number | null,\n"
+            "    \"invoice_number\": string | null,\n"
+            "    \"reminder_type\": \"normal | followup | serious | null\"\n"
+            "  }\n"
+            "}\n\n"
+            "RULES:\n"
+            "1. Return ONLY the JSON object.\n"
+            "2. Use null for missing fields.\n"
+            "3. Normalize months to full names (e.g. 'April').\n"
+            "4. operation must never be null."
         )
         
         try:
@@ -120,10 +96,12 @@ class GeminiService:
                 safety_settings=safety_settings
             )
             
-            return json.loads(response.text.strip())
+            raw_text = response.text.strip()
+            logger.info(f"Raw Gemini JSON: {raw_text}")
+            return json.loads(raw_text)
         except Exception as e:
-            logger.error(f"Extraction failed: {e}")
-            return {}
+            logger.error(f"Intent parsing failed: {e}")
+            return {"operation": "UNKNOWN", "entity": None, "parameters": {}}
 
     def generate_response(self, user_message: str, backend_result: str) -> str:
         """Stage 3: Professional Phrasing."""
