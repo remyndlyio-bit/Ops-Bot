@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import List, Dict
 from utils.logger import logger
+from utils.date_utils import parse_sheet_date
 
 class BusinessLogicService:
     @staticmethod
@@ -9,39 +10,40 @@ class BusinessLogicService:
         overdue = []
         now = datetime.now()
         for row in all_records:
-            # Assuming columns: 'Status', 'Due Date', 'Amount'
             status = str(row.get('Status', '')).lower()
             due_date_str = str(row.get('Due Date', ''))
             
             if status != 'paid' and due_date_str:
-                try:
-                    due_date = datetime.strptime(due_date_str, "%d/%m/%y")
-                    if due_date < now:
-                        overdue.append(row)
-                except:
-                    continue
+                due_date = parse_sheet_date(due_date_str)
+                if due_date and due_date < now:
+                    overdue.append(row)
         return overdue
 
     @staticmethod
     def calculate_total_billing(all_records: List[Dict], period: str = "month") -> float:
-        """Calculates total billing for a period (day/month/quarter/year)."""
-        # simplified logic for current month
+        """Calculates total billing for a period (day/month/year)."""
         total = 0
         now = datetime.now()
+        match_count = 0
+        
         for row in all_records:
             date_str = str(row.get('Date', ''))
-            try:
-                dt = datetime.strptime(date_str, "%d/%m/%y")
-                match = False
-                if period == "day" and dt.date() == now.date(): match = True
-                elif period == "month" and dt.month == now.month and dt.year == now.year: match = True
-                elif period == "year" and dt.year == now.year: match = True
-                
-                if match:
-                    fees_raw = str(row.get('Fees', '0')).replace('₹', '').replace(',', '').strip()
+            dt = parse_sheet_date(date_str)
+            if not dt: continue
+
+            match = False
+            if period == "day" and dt.date() == now.date(): match = True
+            elif period == "month" and dt.month == now.month and dt.year == now.year: match = True
+            elif period == "year" and dt.year == now.year: match = True
+            
+            if match:
+                fees_raw = str(row.get('Fees', '0')).replace('₹', '').replace(',', '').strip()
+                try:
                     total += float(fees_raw) if fees_raw else 0
-            except:
-                continue
+                    match_count += 1
+                except: continue
+        
+        logger.info(f"Billing Calc: Period={period} | Matches={match_count} | Total={total}")
         return total
 
     @staticmethod
@@ -53,12 +55,10 @@ class BusinessLogicService:
             status = str(row.get('Status', '')).lower()
             date_str = str(row.get('Date', ''))
             if status != 'paid' and date_str:
-                try:
-                    dt = datetime.strptime(date_str, "%d/%m/%y")
+                dt = parse_sheet_date(date_str)
+                if dt:
                     months_diff = (now.year - dt.year) * 12 + now.month - dt.month
                     if months_diff >= 3:
                         client = row.get('Production house') or row.get('Client name')
                         if client: blacklist.add(str(client))
-                except:
-                    continue
         return list(blacklist)

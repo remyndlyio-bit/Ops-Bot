@@ -77,7 +77,6 @@ class IntentService:
 
             elif operation == "AGGREGATE_ENTITY":
                 client = params.get("names", [None])[0]
-                # Try to get month from time_ranges or a specific month field if it exists
                 month = params.get("month") or (params.get("time_ranges", [])[0] if params.get("time_ranges") else None)
                 
                 period = "month"
@@ -88,11 +87,13 @@ class IntentService:
                     if client and month:
                         from services.invoice_service import InvoiceService
                         data = self.sheets.get_invoice_data(client, month)
-                        summary = InvoiceService.process_invoice_data(data, client, month)
-                        if summary.get("found"):
-                            action_result = f"Total billing for {client} in {month} is {summary['currency']}{summary['total']:,}."
+                        # We return "Not in records" only if No rows matched the filters
+                        if not data:
+                            action_result = f"I don’t see any billing records for {client} in {month} yet."
                         else:
-                            action_result = f"I couldn't find any billing records for {client} in {month}."
+                            summary = InvoiceService.process_invoice_data(data, client, month)
+                            # If rows exist, return the total even if it is 0
+                            action_result = f"Total billing for {client} in {month} is {summary['currency']}{summary['total']:,}."
                     else:
                         total_sum = logic.calculate_total_billing(all_records, period)
                         action_result = f"Total billing for this {period} is ₹{total_sum:,.2f}."

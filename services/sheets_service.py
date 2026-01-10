@@ -45,61 +45,51 @@ class SheetsService:
 
     def get_invoice_data(self, client_name: str, month_name: str) -> List[Dict]:
         """
-        Fetches rows from the sheet filtering by 'Production house' and deriving month from 'Date'.
+        Fetches rows from the sheet filtering by client and month.
+        Priority: 1. Normalize Client Name, 2. Filter by Date/Month.
         """
+        from utils.date_utils import parse_sheet_date, month_name_to_number
         if not self.client:
             self.client = self._authenticate()
-            if not self.client:
-                return []
+            if not self.client: return []
 
         try:
-            from datetime import datetime
             sheet = self.client.open_by_url(self.sheet_url).sheet1
             all_records = sheet.get_all_records()
-            if all_records:
-                logger.info(f"Sheet Headers found: {list(all_records[0].keys())}")
             
-            filtered_data = []
+            target_month = month_name_to_number(month_name)
+            search_term = client_name.strip().lower()
+            
+            # Step 1: Normalize and Filter by Client Name
+            client_matches = []
             for row in all_records:
-                # Create a normalized version of the row with stripped keys
                 clean_row = {str(k).strip(): v for k, v in row.items()}
+                col_client_name = next((v for k, v in clean_row.items() if "client" in k.lower()), "")
+                col_prod_house = next((v for k, v in clean_row.items() if "production" in k.lower()), "")
                 
-                # 1. Dynamic Header Discovery
-                # We search for keys that contain certain words to be extra safe
-                col_client_name = next((v for k, v in clean_row.items() if "client" in k.lower()), None)
-                col_prod_house = next((v for k, v in clean_row.items() if "production" in k.lower()), None)
+                row_client_name = str(col_client_name).strip().lower()
+                row_prod_house = str(col_prod_house).strip().lower()
+
+                if search_term in row_client_name or search_term in row_prod_house:
+                    client_matches.append(clean_row)
+
+            # Step 2: Filter by Date/Month
+            filtered_data = []
+            for row in client_matches:
+                row_date_str = str(row.get('Date', '')).strip()
+                dt = parse_sheet_date(row_date_str)
                 
-                row_client_name = str(col_client_name).strip().lower() if col_client_name else ""
-                row_prod_house = str(col_prod_house).strip().lower() if col_prod_house else ""
-                
-                # 2. Check Month (Derived from Date column DD/MM/YY)
-                row_date_str = str(clean_row.get('Date', '')).strip()
-                row_month = ""
-                try:
-                    if "/" in row_date_str:
-                        parts = row_date_str.split('/')
-                        if len(parts[2]) == 2:
-                            dt = datetime.strptime(row_date_str, "%d/%m/%y")
-                        else:
-                            dt = datetime.strptime(row_date_str, "%d/%m/%Y")
-                        row_month = dt.strftime("%B").lower()
-                except Exception as e:
-                    continue
+                if dt:
+                    row_month = dt.month
+                    # Match across all years if only month is provided
+                    if row_month == target_month:
+                        filtered_data.append(row)
+                        # Debug Log
+                        logger.info(f"MATCH: Raw='{row_date_str}' | Parsed={dt} | Month={row_month}")
+                else:
+                    logger.warning(f"SKIP: Invalid date format in sheet: '{row_date_str}'")
 
-                # Case-insensitive partial comparison
-                search_term = client_name.strip().lower()
-                month_term = month_name.strip().lower()
-
-                if (search_term in row_client_name or search_term in row_prod_house) and row_month == month_term:
-                    filtered_data.append(clean_row)
-            
-            if not filtered_data and all_records:
-                # Log first row sample to see why it didn't match
-                sample = {str(k).strip(): v for k, v in all_records[0].items()}
-                logger.info(f"No match found. Sample row keys: {list(sample.keys())}")
-                logger.info(f"Sample row values: {list(sample.values())}")
-
-            logger.info(f"Fetched {len(filtered_data)} rows for {client_name} in {month_name}")
+            logger.info(f"Result: {len(all_records)} total rows -> {len(client_matches)} client matches -> {len(filtered_data)} date matches")
             return filtered_data
         except Exception as e:
             logger.error(f"Error fetching data from sheet: {e}")
