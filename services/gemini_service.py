@@ -127,7 +127,7 @@ class GeminiService:
 
     def generate_response(self, user_message: str, backend_result: str) -> str:
         """Stage 3: Professional Phrasing."""
-        if not self.model: return "Result: " + str(backend_result)
+        if not self.model: return str(backend_result)
         
         prompt = (
             "You are a professional business assistant. Phrase a response based ONLY on this result.\n"

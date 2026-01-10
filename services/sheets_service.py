@@ -86,11 +86,11 @@ class SheetsService:
                 except Exception as e:
                     continue
 
-                # Case-insensitive comparison
+                # Case-insensitive partial comparison
                 search_term = client_name.strip().lower()
                 month_term = month_name.strip().lower()
 
-                if (row_client_name == search_term or row_prod_house == search_term) and row_month == month_term:
+                if (search_term in row_client_name or search_term in row_prod_house) and row_month == month_term:
                     filtered_data.append(clean_row)
             
             if not filtered_data and all_records:

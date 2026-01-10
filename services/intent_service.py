@@ -76,13 +76,26 @@ class IntentService:
                     action_result = "I don’t see specific lookup details in your request. Could you provide a name?"
 
             elif operation == "AGGREGATE_ENTITY":
+                client = params.get("names", [None])[0]
+                # Try to get month from time_ranges or a specific month field if it exists
+                month = params.get("month") or (params.get("time_ranges", [])[0] if params.get("time_ranges") else None)
+                
                 period = "month"
                 if "day" in message.lower(): period = "day"
                 elif "year" in message.lower(): period = "year"
                 
-                if "billing" in message.lower() or "sum" in message.lower():
-                    total_sum = logic.calculate_total_billing(all_records, period)
-                    action_result = f"Total billing for this {period} is ₹{total_sum:,.2f}."
+                if ("billing" in message.lower() or "sum" in message.lower() or "amount" in message.lower()):
+                    if client and month:
+                        from services.invoice_service import InvoiceService
+                        data = self.sheets.get_invoice_data(client, month)
+                        summary = InvoiceService.process_invoice_data(data, client, month)
+                        if summary.get("found"):
+                            action_result = f"Total billing for {client} in {month} is {summary['currency']}{summary['total']:,}."
+                        else:
+                            action_result = f"I couldn't find any billing records for {client} in {month}."
+                    else:
+                        total_sum = logic.calculate_total_billing(all_records, period)
+                        action_result = f"Total billing for this {period} is ₹{total_sum:,.2f}."
                 elif "outstanding" in message.lower():
                     # Simplified outstanding calculation
                     total_out = sum([float(str(r.get('Fees', '0')).replace('₹', '').replace(',', '').strip() or 0) 
