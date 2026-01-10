@@ -46,7 +46,7 @@ class SheetsService:
     def get_invoice_data(self, client_name: str, month_name: str) -> List[Dict]:
         """
         Fetches rows from the sheet filtering by client and month.
-        Priority: 1. Normalize Client Name, 2. Filter by Date/Month.
+        Primary match: 'Client Name' column.
         """
         from utils.date_utils import parse_sheet_date, month_name_to_number
         if not self.client:
@@ -60,17 +60,15 @@ class SheetsService:
             target_month = month_name_to_number(month_name)
             search_term = client_name.strip().lower()
             
-            # Step 1: Normalize and Filter by Client Name
+            # Step 1: Normalize and Filter by Client Name (Substring match)
             client_matches = []
             for row in all_records:
                 clean_row = {str(k).strip(): v for k, v in row.items()}
-                col_client_name = next((v for k, v in clean_row.items() if "client" in k.lower()), "")
-                col_prod_house = next((v for k, v in clean_row.items() if "production" in k.lower()), "")
-                
-                row_client_name = str(col_client_name).strip().lower()
-                row_prod_house = str(col_prod_house).strip().lower()
+                # Map to official column names: "Client Name" or "Production house"
+                row_client_name = str(clean_row.get('Client Name', '')).strip().lower()
+                row_prod_house = str(clean_row.get('Production house', '')).strip().lower()
 
-                if search_term in row_client_name or search_term in row_prod_house:
+                if search_term and (search_term in row_client_name or search_term in row_prod_house):
                     client_matches.append(clean_row)
 
             # Step 2: Filter by Date/Month
@@ -80,16 +78,11 @@ class SheetsService:
                 dt = parse_sheet_date(row_date_str)
                 
                 if dt:
-                    row_month = dt.month
-                    # Match across all years if only month is provided
-                    if row_month == target_month:
+                    if dt.month == target_month:
                         filtered_data.append(row)
-                        # Debug Log
-                        logger.info(f"MATCH: Raw='{row_date_str}' | Parsed={dt} | Month={row_month}")
-                else:
-                    logger.warning(f"SKIP: Invalid date format in sheet: '{row_date_str}'")
-
-            logger.info(f"Result: {len(all_records)} total rows -> {len(client_matches)} client matches -> {len(filtered_data)} date matches")
+                        logger.info(f"MATCH: Client='{row.get('Client Name')}' Date='{row_date_str}'")
+            
+            logger.info(f"Diag: Requested='{client_name}' ({month_name}) | Records={len(all_records)} | ClientMatches={len(client_matches)} | Final={len(filtered_data)}")
             return filtered_data
         except Exception as e:
             logger.error(f"Error fetching data from sheet: {e}")
