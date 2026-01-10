@@ -69,8 +69,13 @@ class GeminiService:
             "    \"days\": number | null\n"
             "  }\n"
             "}\n\n"
+            "EXAMPLES:\n"
+            "1. 'What is the total biling for April for Garnier?'\n"
+            "   -> {\"operation\": \"AGGREGATE_ENTITY\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
+            "2. 'Remind me to call John tomorrow'\n"
+            "   -> {\"operation\": \"SCHEDULE_REMINDER\", \"entity\": \"reminder\", \"parameters\": {\"client_name\": \"John\", \"month\": null, \"year\": null, \"period\": null, \"days\": null}}\n\n"
             "RULES:\n"
-            "1. NEVER return an empty object.\n"
+            "1. Handle common typos (e.g., 'biling' -> billing).\n"
             "2. NEVER omit any keys listed in the schema.\n"
             "3. Use null for any values you cannot extract.\n"
             "4. Return ONLY valid JSON."
@@ -94,6 +99,13 @@ class GeminiService:
             )
             
             raw_text = response.text.strip()
+            # Clean possible markdown code blocks
+            if raw_text.startswith("```"):
+                raw_text = raw_text.splitlines()
+                if raw_text[0].startswith("```"): raw_text = raw_text[1:]
+                if raw_text[-1].startswith("```"): raw_text = raw_text[:-1]
+                raw_text = "\n".join(raw_text).strip()
+
             logger.info(f"Raw Gemini Intent Response: {raw_text}")
             return json.loads(raw_text)
         except Exception as e:
