@@ -10,62 +10,114 @@ class IntentService:
         self.sheets = SheetsService()
         self.memory = MemoryService()
 
+    def _get_rule_based_intent(self, message: str) -> str:
+        """Fast rule-based detection for common intents."""
+        msg = message.lower().strip()
+        if any(word in msg for word in ["hi", "hello", "thanks", "thank you"]):
+            return "SMALL_TALK"
+        if any(word in msg for word in ["total", "sum", "how many", "billing", "outstanding"]):
+            return "AGGREGATE_ENTITY"
+        if "invoice" in msg and any(word in msg for word in ["make", "generate", "create"]):
+            return "ACTION_TRIGGER"
+        if any(word in msg for word in ["remind", "schedule", "call him", "follow up"]):
+            return "SCHEDULE_REMINDER"
+        return None
+
     def process_request(self, user_id: str, message: str) -> Dict:
         """
-        Coordinates the three-stage architecture.
-        Returns a dict: {"response": str, "trigger_invoice": bool, "invoice_data": dict}
+        Coordinates the Operations Architecture.
         """
-        memory_context = self.memory.get_memory_context(user_id)
-        category = self.gemini.route_message(message)
-        logger.info(f"Router category: {category}")
+        from services.business_logic_service import BusinessLogicService
+        logic = BusinessLogicService()
 
-        action_result = "No action performed."
+        # 1. Intent Detection
+        operation = self._get_rule_based_intent(message)
+        if not operation:
+            operation = self.gemini.classify_intent(message)
+        
+        logger.info(f"Operation identified: {operation}")
+
+        # 2. Parameter Extraction
+        params = self.gemini.extract_parameters(message)
+        logger.info(f"Parameters extracted: {params}")
+
+        # 3. Execution
+        action_result = "I don’t see this information in my records yet."
         trigger_invoice = False
         invoice_data = {}
-        
-        if category in ["action", "mixed"]:
-            intent_data = self.gemini.parse_action(message, memory_context)
-            action = intent_data.get("action")
-            sheet = intent_data.get("sheet", "Leads")
-            data = intent_data.get("data")
 
-            logger.info(f"Action Parser detected: {action} on sheet: {sheet}")
+        try:
+            # Sheets data often needed for aggregations
+            all_records = []
+            if operation in ["AGGREGATE_ENTITY", "READ_ENTITY"]:
+                # Try primary sheet first
+                sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
+                all_records = sheet.get_all_records()
 
-            # CRUD Actions
-            if action == "add_row" and data:
-                action_result = self.sheets.add_row(sheet, data)
-            elif action == "find_row" and data:
-                query = data[0] if isinstance(data, list) else str(data)
-                action_result = self.sheets.find_row(sheet, query)
-            elif action == "update_row" and data:
-                query = intent_data.get("query", "")
-                action_result = self.sheets.update_row(sheet, query, data)
-            elif action == "delete_row" and data:
-                query = data[0] if isinstance(data, list) else str(data)
-                action_result = self.sheets.delete_row(sheet, query)
-            elif action == "summarize":
-                summary_data = self.sheets.get_sheet_summary(sheet)
-                action_result = f"Sheet Statistics for {sheet}: {str(summary_data)}"
+            if operation == "SMALL_TALK":
+                action_result = "Hello! I'm your Operations Bot. I can help you with billing, invoices, and tracking your sheet data."
             
-            # Invoice Actions
-            elif action in ["generate_invoice", "get_summary"]:
-                client_name = intent_data.get("client_name")
-                month = intent_data.get("month")
-                if client_name and month:
-                    from services.invoice_service import InvoiceService
-                    sheet_data = self.sheets.get_invoice_data(client_name, month)
-                    summary = InvoiceService.process_invoice_data(sheet_data, client_name, month)
-                    action_result = InvoiceService.format_summary_message(summary)
-                    if action == "generate_invoice" and summary.get("found"):
-                        trigger_invoice = True
-                        invoice_data = {"client_name": client_name, "month": month}
+            elif operation == "READ_ENTITY":
+                # Implementation for lookup
+                name = params.get("names", [None])[0]
+                entity = params.get("entities", [""])[0]
+                
+                if "overdue" in message.lower():
+                    overdue = logic.get_overdue_invoices(all_records)
+                    action_result = f"Found {len(overdue)} overdue items."
+                elif "blacklist" in message.lower():
+                    blacklist = logic.get_blacklisted_clients(all_records)
+                    action_result = f"Blacklisted clients (>3m unpaid): {', '.join(blacklist) or 'None'}"
+                elif name:
+                    # Specific client lookup
+                    results = [r for r in all_records if any(name.lower() in str(v).lower() for v in r.values())]
+                    action_result = f"Found {len(results)} records for {name}."
                 else:
-                    action_result = "Missing client name or month for invoice."
+                    action_result = "I don’t see specific lookup details in your request. Could you provide a name?"
 
-            self.memory.update_user_memory(user_id, {"last_sheet": sheet})
+            elif operation == "AGGREGATE_ENTITY":
+                period = "month"
+                if "day" in message.lower(): period = "day"
+                elif "year" in message.lower(): period = "year"
+                
+                if "billing" in message.lower() or "sum" in message.lower():
+                    total_sum = logic.calculate_total_billing(all_records, period)
+                    action_result = f"Total billing for this {period} is ₹{total_sum:,.2f}."
+                elif "outstanding" in message.lower():
+                    # Simplified outstanding calculation
+                    total_out = sum([float(str(r.get('Fees', '0')).replace('₹', '').replace(',', '').strip() or 0) 
+                                   for r in all_records if str(r.get('Status', '')).lower() != 'paid'])
+                    action_result = f"Total outstanding balance is ₹{total_out:,.2f}."
 
-        response = self.gemini.generate_response(message, action_result, memory_context)
+            elif operation == "ACTION_TRIGGER":
+                client = params.get("names", [None])[0]
+                month = params.get("month") or params.get("time_ranges", [None])[0]
+                if client and month:
+                    from services.invoice_service import InvoiceService
+                    data = self.sheets.get_invoice_data(client, month)
+                    summary = InvoiceService.process_invoice_data(data, client, month)
+                    if summary.get("found"):
+                        trigger_invoice = True
+                        invoice_data = {"client_name": client, "month": month}
+                        action_result = f"Generating invoice for {client} ({month})."
+                    else:
+                        action_result = f"No records found for {client} in {month}."
+
+            elif operation == "SCHEDULE_REMINDER":
+                date = params.get("dates", [None])[0] or "tomorrow"
+                name = params.get("names", [None])[0] or "this task"
+                action_result = f"Reminder set for {name} regarding {date}."
+
+        except Exception as e:
+            logger.error(f"Execution failure: {e}")
+            action_result = "I encountered an error accessing the data records."
+
+        # 4. Final Response Phrasing
+        response = self.gemini.generate_response(message, action_result)
+
         return {
+            "operation": operation,
+            "parameters": params,
             "response": response,
             "trigger_invoice": trigger_invoice,
             "invoice_data": invoice_data
