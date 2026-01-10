@@ -158,3 +158,25 @@ class SheetsService:
             logger.error(f"Error deleting row: {e}")
             return f"Error deleting row: {str(e)}"
 
+    def get_sheet_summary(self, sheet_name: str):
+        """Returns a high-level summary of the sheet for metadata queries."""
+        try:
+            sheet = self.client.open_by_url(self.sheet_url).worksheet(sheet_name)
+            all_records = sheet.get_all_records()
+            count = len(all_records)
+            headers = sheet.row_values(1)
+            
+            # Extract unique client names if possible
+            client_col = next((h for h in headers if h.strip().lower() in ["client name", "production house", "client"]), None)
+            clients = list(set([str(r.get(client_col)) for r in all_records if r.get(client_col)])) if client_col else []
+            
+            return {
+                "total_rows": count,
+                "headers": headers,
+                "unique_clients_count": len(clients),
+                "unique_clients": clients[:15]
+            }
+        except Exception as e:
+            logger.error(f"Error getting sheet summary: {e}")
+            return f"Error accessing sheet metadata: {str(e)}"
+

@@ -29,6 +29,8 @@ class IntentService:
             sheet = intent_data.get("sheet", "Leads")
             data = intent_data.get("data")
 
+            logger.info(f"Action Parser detected: {action} on sheet: {sheet}")
+
             # CRUD Actions
             if action == "add_row" and data:
                 action_result = self.sheets.add_row(sheet, data)
@@ -41,6 +43,9 @@ class IntentService:
             elif action == "delete_row" and data:
                 query = data[0] if isinstance(data, list) else str(data)
                 action_result = self.sheets.delete_row(sheet, query)
+            elif action == "summarize":
+                summary_data = self.sheets.get_sheet_summary(sheet)
+                action_result = f"Sheet Statistics for {sheet}: {str(summary_data)}"
             
             # Invoice Actions
             elif action in ["generate_invoice", "get_summary"]:

@@ -68,7 +68,7 @@ class GeminiService:
         if not self.model: return {}
         system_prompt = (
             "You are an Action Parser. Return ONLY JSON. "
-            "Allowed actions: add_row, find_row, update_row, delete_row, generate_invoice, get_summary. "
+            "Allowed actions: add_row, find_row, update_row, delete_row, generate_invoice, get_summary, summarize. "
             "Extract: {action, sheet, data, client_name, month}. "
             f"Context: {memory_context}"
         )
@@ -87,17 +87,27 @@ class GeminiService:
         """Stage 3: Conversational Responder - Human-like reply."""
         if not self.model: return "Sorry, I'm having trouble connecting."
         prompt = (
-            "You are a friendly WhatsApp assistant. "
+            "You are a helpful, senior backend-assistant for a WhatsApp bot. "
             f"User Context: {memory_context}\n"
-            f"Action Result: {action_result}\n"
-            f"User: {user_message}\n"
-            "Respond concisely and naturally. Never mention APIs or internal logic."
+            f"Fact-based Backend Result: {action_result}\n"
+            f"User Message: {user_message}\n"
+            "INSTRUCTIONS:\n"
+            "1. Answer the user based ONLY on the Backend Result.\n"
+            "2. Be concise, friendly, and professional.\n"
+            "3. If the Backend Result says rows were found, mention it naturally.\n"
+            "4. NEVER mention APIs, models, or internal logic."
         )
         try:
-            response = self.model.generate_content(prompt, generation_config={"max_output_tokens": 150})
-            return response.text.strip()
-        except Exception:
-            return "I've processed that for you."
+            # Lower temperature for deterministic helpfulness
+            response = self.model.generate_content(
+                prompt, 
+                generation_config={"max_output_tokens": 200, "temperature": 0.2}
+            )
+            text = response.text.strip()
+            return text if text else "I've handled that for you. Is there anything else?"
+        except Exception as e:
+            logger.error(f"Responder failed: {e}")
+            return "I've processed your request. How else can I help?"
 
     # Keep compatibility or legacy methods if needed, but the user wants a refactor.
     # The analyze_data and parse_user_message are replaced by this new flow.
