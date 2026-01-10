@@ -53,7 +53,13 @@ class GeminiService:
     def parse_user_intent(self, message: str) -> dict:
         """Single constrained call for Intent and Parameter parsing."""
         if not self.model: 
-            return {"operation": "UNKNOWN", "entity": None, "parameters": {}}
+            logger.error("Gemini model not initialized.")
+            return {
+                "operation": "GEMINI_ERROR",
+                "entity": None,
+                "parameters": {},
+                "error_message": "Gemini model not initialized (check API key or quota)"
+            }
         
         system_prompt = (
             "You are a specialized Intent and Parameter Parser. Return ONLY valid JSON.\n"
@@ -103,24 +109,30 @@ class GeminiService:
             )
             
             raw_text = response.text.strip()
+            logger.info(f"Raw Gemini Intent Response: {raw_text}")
+
             # Clean possible markdown code blocks
             if raw_text.startswith("```"):
-                raw_text = raw_text.splitlines()
-                if raw_text[0].startswith("```"): raw_text = raw_text[1:]
-                if raw_text[-1].startswith("```"): raw_text = raw_text[:-1]
-                raw_text = "\n".join(raw_text).strip()
+                lines = raw_text.splitlines()
+                if lines[0].startswith("```"): lines = lines[1:]
+                if lines and lines[-1].startswith("```"): lines = lines[:-1]
+                raw_text = "\n".join(lines).strip()
 
-            logger.info(f"Raw Gemini Intent Response: {raw_text}")
             try:
                 parsed = json.loads(raw_text)
                 return parsed
             except json.JSONDecodeError as je:
                 logger.error(f"JSON Parsing failed: {je} | Raw: {raw_text}")
-                return {"operation": "UNKNOWN", "entity": None, "parameters": {}}
+                return {
+                    "operation": "GEMINI_ERROR",
+                    "entity": None,
+                    "parameters": {},
+                    "error_message": f"Failed to parse Gemini JSON response: {str(je)}"
+                }
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Gemini API error ({getattr(self.model, 'model_name', 'unknown')}): {error_msg}")
+            logger.error(f"Gemini Runtime Error: {error_msg}")
             return {
                 "operation": "GEMINI_ERROR",
                 "entity": None,
