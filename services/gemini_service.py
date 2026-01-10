@@ -111,10 +111,22 @@ class GeminiService:
                 raw_text = "\n".join(raw_text).strip()
 
             logger.info(f"Raw Gemini Intent Response: {raw_text}")
-            return json.loads(raw_text)
+            try:
+                parsed = json.loads(raw_text)
+                return parsed
+            except json.JSONDecodeError as je:
+                logger.error(f"JSON Parsing failed: {je} | Raw: {raw_text}")
+                return {"operation": "UNKNOWN", "entity": None, "parameters": {}}
+
         except Exception as e:
-            logger.error(f"Intent parsing failed: {e}")
-            return {"operation": "UNKNOWN", "entity": None, "parameters": {}}
+            error_msg = str(e)
+            logger.error(f"Gemini API error ({getattr(self.model, 'model_name', 'unknown')}): {error_msg}")
+            return {
+                "operation": "GEMINI_ERROR",
+                "entity": None,
+                "parameters": {},
+                "error_message": error_msg
+            }
 
     def generate_response(self, user_message: str, backend_result: str) -> str:
         """Stage 3: Professional Phrasing."""

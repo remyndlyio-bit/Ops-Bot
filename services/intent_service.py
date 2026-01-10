@@ -25,6 +25,15 @@ class IntentService:
         params = result.get("parameters")
         entity = result.get("entity")
 
+        # Handle explicit Gemini API errors
+        if operation == "GEMINI_ERROR":
+            error_msg = result.get("error_message", "Unknown Gemini API error")
+            return {
+                "operation": "GEMINI_ERROR",
+                "response": f"Gemini error: {error_msg}",
+                "trigger_invoice": False
+            }
+
         # Defensive Validation
         is_valid = True
         fail_reason = ""
