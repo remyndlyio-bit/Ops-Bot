@@ -161,22 +161,35 @@ class SheetsService:
     def get_sheet_summary(self, sheet_name: str):
         """Returns a high-level summary of the sheet for metadata queries."""
         try:
-            sheet = self.client.open_by_url(self.sheet_url).worksheet(sheet_name)
+            if not self.client: return "No sheet connection."
+            spr = self.client.open_by_url(self.sheet_url)
+            
+            # Try to find the worksheet, fallback to first one if not found
+            try:
+                sheet = spr.worksheet(sheet_name)
+            except:
+                logger.info(f"Worksheet '{sheet_name}' not found, falling back to sheet1")
+                sheet = spr.get_worksheet(0)
+                sheet_name = sheet.title
+
             all_records = sheet.get_all_records()
             count = len(all_records)
-            headers = sheet.row_values(1)
+            headers = [h.strip() for h in sheet.row_values(1)]
             
             # Extract unique client names if possible
-            client_col = next((h for h in headers if h.strip().lower() in ["client name", "production house", "client"]), None)
-            clients = list(set([str(r.get(client_col)) for r in all_records if r.get(client_col)])) if client_col else []
-            
+            client_col = next((h for h in headers if h.lower() in ["client name", "production house", "client", "customer"]), None)
+            clients = []
+            if client_col:
+                clients = sorted(list(set([str(r.get(client_col)).strip() for r in all_records if r.get(client_col)])))
+
             return {
+                "active_sheet": sheet_name,
                 "total_rows": count,
                 "headers": headers,
                 "unique_clients_count": len(clients),
-                "unique_clients": clients[:15]
+                "unique_clients_sample": clients[:20]
             }
         except Exception as e:
             logger.error(f"Error getting sheet summary: {e}")
-            return f"Error accessing sheet metadata: {str(e)}"
+            return f"Error accessing sheet '{sheet_name}'. Please ensure it exists."
 

@@ -97,9 +97,9 @@ class GeminiService:
             "You are an Action Parser for a business bot. Return ONLY JSON.\n"
             "Allowed actions: add_row, find_row, update_row, delete_row, generate_invoice, get_summary, summarize.\n"
             "Rules:\n"
-            "- 'summarize' is for general questions about total counts, statistics or specific sheets.\n"
-            "- 'generate_invoice' is for creating PDFs.\n"
-            "- 'get_summary' is for checking invoice details before generating.\n"
+            "- 'get_summary' is for questions about a SPECIFIC client's totals, billing, or records for a specific month (e.g., 'What is the billing for Garnier for April?').\n"
+            "- 'summarize' is for general statistics about the sheet (e.g., 'How many clients total?', 'How many rows?').\n"
+            "- 'generate_invoice' is for creating PDF invoices.\n"
             "Extract: {action, sheet, data, client_name, month}.\n"
             f"Context: {memory_context}"
         )
@@ -130,17 +130,19 @@ class GeminiService:
     def generate_response(self, user_message: str, action_result: str, memory_context: str) -> str:
         """Stage 3: Conversational Responder - Human-like reply."""
         if not self.model: return "Sorry, I'm having trouble connecting."
+        
         prompt = (
-            "You are a helpful, senior backend-assistant for a WhatsApp bot. "
-            f"User Context: {memory_context}\n"
-            f"Fact-based Backend Result: {action_result}\n"
-            f"User Message: {user_message}\n"
+            "You are a helpful business assistant for an Operations Bot. "
+            "Your job is to provide a natural, friendly response based on data from a backend system.\n\n"
+            f"SYSTEM DATA: {action_result}\n"
+            f"USER ASKED: \"{user_message}\"\n\n"
             "INSTRUCTIONS:\n"
-            "1. Answer the user based ONLY on the Backend Result.\n"
-            "2. Be concise, friendly, and professional.\n"
-            "3. If the Backend Result says rows were found, mention it naturally.\n"
-            "4. NEVER mention APIs, models, or internal logic."
+            "1. Answer based ONLY on the SYSTEM DATA provided.\n"
+            "2. If the data is empty or indicates an error, politely inform the user and suggest what they might try instead.\n"
+            "3. Be concise and professional. Do not use technical jargon.\n"
+            "4. Never reveal that you are an AI or mention internal identifiers."
         )
+
         try:
             # Relax safety settings for business bot context
             safety_settings = [
@@ -153,17 +155,22 @@ class GeminiService:
             # Lower temperature for deterministic helpfulness
             response = self.model.generate_content(
                 prompt, 
-                generation_config={"max_output_tokens": 200, "temperature": 0.2},
+                generation_config={"max_output_tokens": 300, "temperature": 0.2},
                 safety_settings=safety_settings
             )
             
             # Safely get text, handling block cases
             try:
+                # Some versions of the SDK use 'response.candidates[0].content.parts[0].text'
+                # but response.text is usually a safe alias if not blocked.
                 text = response.text.strip()
             except (ValueError, IndexError, AttributeError):
                 # This happens if Gemini blocks the response (finish_reason=2)
                 logger.warning(f"Gemini blocked response for message: {user_message}")
-                return "I've processed your request, but I'm having trouble phrasing it. How else can I help?"
+                # Analyze why it might have blocked OR provide a very safe fallback
+                if "error" in str(action_result).lower():
+                    return "I encountered an issue accessing the sheet. Could you please double-check the sheet name or your request?"
+                return "I've processed your request, but I'm having trouble phrasing it. Everything looks okay on my end, though!"
                 
             return text if text else "I've handled that for you. Is there anything else?"
         except Exception as e:
