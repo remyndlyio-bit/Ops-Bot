@@ -50,10 +50,17 @@ class IntentService:
 
         if not is_valid:
             logger.warning(f"Validation failed: {fail_reason} | Raw response: {result}")
-            # Only ask for clarification if the query was truly un-parseable
             return {
                 "operation": "UNKNOWN",
-                "response": "I'm not quite sure what you'd like me to do. Could you please rephrase that?",
+                "response": "Could you please clarify what you’d like me to do?",
+                "trigger_invoice": False
+            }
+
+        # Direct reply for Small Talk
+        if operation == "SMALL_TALK":
+            return {
+                "operation": "SMALL_TALK",
+                "response": "Hello! I'm your Operations Bot. How can I help you today?",
                 "trigger_invoice": False
             }
 
@@ -72,10 +79,7 @@ class IntentService:
                 sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
                 all_records = sheet.get_all_records()
 
-            if operation == "SMALL_TALK":
-                action_result = "Hello! I'm your Operations Bot. How can I help you today?"
-            
-            elif operation == "READ_ENTITY":
+            if operation == "READ_ENTITY":
                 name = params.get("client_name")
                 if entity == "bank_details":
                     action_result = "Our bank details: HDFC Bank, Acct: 12345678, IFSC: HDFC0001234." # Mock
@@ -86,7 +90,10 @@ class IntentService:
                     action_result = f"Found {len(overdue)} overdue items."
                 elif name:
                     results = [r for r in all_records if any(name.lower() in str(v).lower() for v in r.values())]
-                    action_result = f"Found {len(results)} records matching '{name}'."
+                    if results:
+                        action_result = f"Found {len(results)} records matching '{name}'."
+                    else:
+                        action_result = f"I don’t see any records for {name} in my current sheet."
                 else:
                     action_result = "I couldn’t find the specific record you’re looking for. Who is the client?"
 
@@ -135,7 +142,7 @@ class IntentService:
             logger.error(f"Execution failure: {e}")
             action_result = "I encountered an error accessing the data records."
 
-        # 3. Final Response Phrasing
+        # 3. Final Response Phrasing (Only for business operations)
         response = self.gemini.generate_response(message, action_result)
 
         return {
