@@ -6,30 +6,55 @@ from utils.logger import logger
 class GeminiService:
     def __init__(self):
         api_key = os.getenv("GEMINI_KEY")
+        if not api_key:
+            # Try a common alternative name
+            api_key = os.getenv("GOOGLE_API_KEY")
+        
         if api_key:
+            # Clean possible whitespace
+            api_key = api_key.strip()
             genai.configure(api_key=api_key)
             self.model = self._initialize_model()
+            if not self.model:
+                logger.error("Gemini model initialization failed after trying multiple models.")
         else:
-            logger.error("GEMINI_KEY not found in environment variables.")
+            logger.error("No Gemini API key found. Checked GEMINI_KEY and GOOGLE_API_KEY.")
             self.model = None
 
     def _initialize_model(self):
         # Prefer flash for cost and speed
-        models_to_try = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-pro']
+        models_to_try = [
+            'gemini-2.0-flash', 
+            'gemini-1.5-flash', 
+            'gemini-flash-latest',
+            'gemini-pro'
+        ]
+        errors = []
         for model_name in models_to_try:
             try:
                 model = genai.GenerativeModel(model_name)
                 # Verify accessibility
                 model.generate_content("hi", generation_config={"max_output_tokens": 1})
-                logger.info(f"Using Gemini model: {model_name}")
+                logger.info(f"Verified Gemini model: {model_name}")
                 return model
-            except Exception:
+            except Exception as e:
+                errors.append(f"{model_name}: {str(e)}")
                 continue
+        
+        try:
+            available = [m.name for m in genai.list_models()]
+            logger.error(f"Models failed. Available for this key: {available}")
+        except Exception as e:
+            logger.error(f"Could not list models: {e}")
+
+        logger.error(f"Failed all models. Errors: {errors}")
         return None
 
     def route_message(self, message: str) -> str:
         """Stage 1: Router - Classify message into action, chat, or mixed."""
-        if not self.model: return "chat"
+        if not self.model: 
+            logger.error("Router failed: No Gemini model initialized.")
+            return "chat"
         prompt = f"Classify this WhatsApp message as 'action', 'chat', or 'mixed'. Return ONLY one word.\n\nMessage: {message}"
         try:
             response = self.model.generate_content(prompt, generation_config={"max_output_tokens": 5})
