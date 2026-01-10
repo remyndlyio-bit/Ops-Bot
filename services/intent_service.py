@@ -25,16 +25,31 @@ class IntentService:
         params = result.get("parameters")
         entity = result.get("entity")
 
-        if not operation or operation == "UNKNOWN" or params is None:
-            logger.warning(f"Validation failed for Gemini output: {result}")
+        # Defensive Validation
+        is_valid = True
+        fail_reason = ""
+        
+        if not operation:
+            is_valid = False
+            fail_reason = "Missing 'operation' field"
+        elif operation == "UNKNOWN":
+            is_valid = False
+            fail_reason = "Operation is UNKNOWN"
+        elif params is None:
+            is_valid = False
+            fail_reason = "Missing 'parameters' object"
+
+        if not is_valid:
+            logger.warning(f"Validation failed: {fail_reason} | Raw response: {result}")
+            # Only ask for clarification if the query was truly un-parseable
             return {
                 "operation": "UNKNOWN",
                 "response": "I'm not quite sure what you'd like me to do. Could you please rephrase that?",
                 "trigger_invoice": False
             }
 
-        logger.info(f"Parsed Operation: {operation} | Entity: {entity}")
-        logger.info(f"Parsed Parameters: {params}")
+        logger.info(f"Valid Operation: {operation} | Entity: {entity}")
+        logger.info(f"Parameters: {params}")
 
         # 2. Execution
         action_result = "I don’t see this information in my records yet."

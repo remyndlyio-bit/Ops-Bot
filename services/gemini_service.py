@@ -57,7 +57,7 @@ class GeminiService:
         
         system_prompt = (
             "You are a specialized Intent and Parameter Parser. Return ONLY valid JSON.\n"
-            "SCHEMA:\n"
+            "STRICT SCHEMA (MUST RETURN ALL KEYS, NO OMISSIONS):\n"
             "{\n"
             "  \"operation\": \"READ_ENTITY | AGGREGATE_ENTITY | CREATE_ENTITY | UPDATE_ENTITY | ACTION_TRIGGER | SCHEDULE_REMINDER | SMALL_TALK | UNKNOWN\",\n"
             "  \"entity\": \"client | invoice | job | payment | project | bank_details | gst_details | reminder | communication_log | null\",\n"
@@ -66,17 +66,14 @@ class GeminiService:
             "    \"month\": string | null,\n"
             "    \"year\": number | null,\n"
             "    \"period\": \"day | month | quarter | year | null\",\n"
-            "    \"days\": number | null,\n"
-            "    \"amount\": number | null,\n"
-            "    \"invoice_number\": string | null,\n"
-            "    \"reminder_type\": \"normal | followup | serious | null\"\n"
+            "    \"days\": number | null\n"
             "  }\n"
             "}\n\n"
             "RULES:\n"
-            "1. Return ONLY the JSON object.\n"
-            "2. Use null for missing fields.\n"
-            "3. Normalize months to full names (e.g. 'April').\n"
-            "4. operation must never be null."
+            "1. NEVER return an empty object.\n"
+            "2. NEVER omit any keys listed in the schema.\n"
+            "3. Use null for any values you cannot extract.\n"
+            "4. Return ONLY valid JSON."
         )
         
         try:
@@ -97,7 +94,7 @@ class GeminiService:
             )
             
             raw_text = response.text.strip()
-            logger.info(f"Raw Gemini JSON: {raw_text}")
+            logger.info(f"Raw Gemini Intent Response: {raw_text}")
             return json.loads(raw_text)
         except Exception as e:
             logger.error(f"Intent parsing failed: {e}")
