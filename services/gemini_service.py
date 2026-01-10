@@ -69,6 +69,7 @@ class GeminiService:
             "  \"entity\": \"client | invoice | job | payment | project | bank_details | gst_details | reminder | communication_log | null\",\n"
             "  \"parameters\": {\n"
             "    \"client_name\": string | null,\n"
+            "    \"bill_number\": string | null,\n"
             "    \"month\": string | null,\n"
             "    \"year\": number | null,\n"
             "    \"period\": \"day | month | quarter | year | null\",\n"
@@ -77,9 +78,9 @@ class GeminiService:
             "}\n\n"
             "EXAMPLES:\n"
             "1. 'What is the total biling for April for Garnier?'\n"
-            "   -> {\"operation\": \"AGGREGATE_ENTITY\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
-            "2. 'Remind me to call John tomorrow'\n"
-            "   -> {\"operation\": \"SCHEDULE_REMINDER\", \"entity\": \"reminder\", \"parameters\": {\"client_name\": \"John\", \"month\": null, \"year\": null, \"period\": null, \"days\": null}}\n\n"
+            "   -> {\"operation\": \"AGGREGATE_ENTITY\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
+            "2. 'Send me invoice #101'\n"
+            "   -> {\"operation\": \"READ_ENTITY\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": null, \"bill_number\": \"101\", \"month\": null, \"year\": null, \"period\": null, \"days\": null}}\n\n"
             "RULES:\n"
             "1. Handle common typos (e.g., 'biling' -> billing).\n"
             "2. NEVER omit any keys listed in the schema.\n"
@@ -155,7 +156,7 @@ class GeminiService:
             "You are a professional business assistant. Phrase a response based ONLY on this result.\n"
             f"Result: {backend_result}\n"
             f"User asked: {user_message}\n"
-            "Rules: Concise, professional, human-like. NO technical jargon. If information is missing/error, say: 'I don’t see this information in my records yet.'"
+            "Rules: Concise, professional, human-like. NO technical jargon. If information is missing/error, say: 'I don't see this information in my records yet.'"
         )
 
         try:

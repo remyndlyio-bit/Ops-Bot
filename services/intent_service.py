@@ -68,7 +68,7 @@ class IntentService:
         logger.info(f"Parameters: {params}")
 
         # 2. Execution
-        action_result = "I don’t see this information in my records yet."
+        action_result = "I don't see this information in my records yet."
         trigger_invoice = False
         invoice_data = {}
 
@@ -81,7 +81,20 @@ class IntentService:
 
             if operation == "READ_ENTITY":
                 name = params.get("client_name")
-                if entity == "bank_details":
+                if entity == "invoice" and any(word in message.lower() for word in ["get", "download", "send", "give", "show", "retrieve"]):
+                    from services.invoice_service import InvoiceService
+                    resolved = InvoiceService.resolve_invoice_pdf(params, all_records)
+                    if resolved["status"] == "found":
+                        trigger_invoice = True
+                        invoice_data = {
+                            "client_name": resolved["client"],
+                            "month": resolved["month"],
+                            "bill_number": params.get("bill_number")
+                        }
+                        action_result = f"Here is the invoice for {resolved['client']} {resolved['month'] or ''}."
+                    else:
+                        action_result = resolved["message"]
+                elif entity == "bank_details":
                     action_result = "Our bank details: HDFC Bank, Acct: 12345678, IFSC: HDFC0001234." # Mock
                 elif entity == "gst_details":
                     action_result = "GST Details: 27AAAAA0000A1Z5." # Mock
@@ -93,7 +106,7 @@ class IntentService:
                     if results:
                         action_result = f"Found {len(results)} records matching '{name}'."
                     else:
-                        action_result = f"I don’t see any records for {name} in my current sheet."
+                        action_result = f"I don't see any records for {name} in my current sheet."
                 else:
                     action_result = "I couldn’t find the specific record you’re looking for. Who is the client?"
 
@@ -107,7 +120,7 @@ class IntentService:
                         from services.invoice_service import InvoiceService
                         data = self.sheets.get_invoice_data(client, month)
                         if not data:
-                            action_result = f"I don’t see any billing records for {client} in {month} yet."
+                            action_result = f"I don't see any billing records for {client} in {month} yet."
                         else:
                             summary = InvoiceService.process_invoice_data(data, client, month)
                             action_result = f"Total billing for {client} in {month} is {summary['currency']}{summary['total']:,}."
@@ -144,8 +157,8 @@ class IntentService:
 
         # 3. Final Response Phrasing (Only for business operations)
         # Skip LLM if no data was found or error occurred
-        fallback = "I don’t see this information in my records yet."
-        if action_result in [fallback, "I encountered an error accessing the data records."]:
+        fallback = "I don't see this information in my records yet."
+        if action_result.startswith("I don't see") or action_result == "I encountered an error accessing the data records.":
             response = action_result
         else:
             response = self.gemini.generate_response(message, action_result)

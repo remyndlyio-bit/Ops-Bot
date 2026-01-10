@@ -44,14 +44,16 @@ async def startup_event():
 def health_check():
     return {"status": "healthy", "version": "1.0.0"}
 
-async def process_and_send_invoice(to_number: str, client_name: str, month: str, platform: str = "whatsapp", chat_id: int = None): # Modified signature
+async def process_and_send_invoice(to_number: str, client_name: str, month: str, platform: str = "whatsapp", chat_id: int = None, bill_number: str = None):
     """
     Background task to generate PDF and send it via WhatsApp or Telegram.
+    Follows: Send PDF first, then confirmation message.
     """
     try:
         # 1. Fetch Data
         data = sheets_service.get_invoice_data(client_name, month)
         if not data:
+            logger.warning(f"No data found for invoice generation: {client_name} - {month}")
             return
         
         # 2. Process Summary
@@ -62,6 +64,8 @@ async def process_and_send_invoice(to_number: str, client_name: str, month: str,
         if not pdf_path:
             logger.error("Failed to generate PDF")
             return
+
+        confirmation_text = f"Here’s the invoice for {summary['client']} {summary['month']}."
 
         if platform == "whatsapp":
             # 4. Construct Public URL
@@ -75,18 +79,24 @@ async def process_and_send_invoice(to_number: str, client_name: str, month: str,
             filename = os.path.basename(pdf_path)
             media_url = f"{base_url}/static/{filename}"
 
-            # 5. Send Media Message
+            # 5. Send PDF first (no caption to ensure it's first)
             whatsapp_service.send_media_message(
                 to_number=to_number,
-                body=f"Here is the PDF invoice for {summary['client']} - {summary['month']} 📄",
+                body="",
                 media_url=media_url
             )
+            # 6. Then send confirmation
+            whatsapp_service.send_text_message(to_number, confirmation_text)
+
         elif platform == "telegram" and chat_id:
+            # 5. Send PDF first
             await telegram_service.send_document(
                 chat_id=chat_id,
                 file_path=pdf_path,
-                caption=f"Here is the PDF invoice for {summary['client']} - {summary['month']} 📄"
+                caption=""
             )
+            # 6. Then send confirmation
+            await telegram_service.send_text_message(chat_id, confirmation_text)
 
     except Exception as e:
         logger.error(f"Error in process_and_send_invoice task: {e}")
