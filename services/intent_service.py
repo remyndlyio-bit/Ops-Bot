@@ -79,9 +79,12 @@ class IntentService:
                 sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
                 all_records = sheet.get_all_records()
 
-            if operation == "READ_ENTITY":
+            if operation in ["READ_ENTITY", "AGGREGATE_ENTITY", "ACTION_TRIGGER"]:
                 name = params.get("client_name")
-                if entity == "invoice" and any(word in message.lower() for word in ["get", "download", "send", "give", "show", "retrieve"]):
+                
+                # Invoice Retrieval Priority (Trigger for any read/aggregation/action if 'get' intent is detected)
+                is_retrieval_query = any(word in message.lower() for word in ["get", "download", "send", "give", "show", "retrieve"])
+                if is_retrieval_query and (entity == "invoice" or "invoice" in message.lower()):
                     from services.invoice_service import InvoiceService
                     resolved = InvoiceService.resolve_invoice_pdf(params, all_records)
                     if resolved["status"] == "found":
@@ -94,6 +97,7 @@ class IntentService:
                         action_result = f"Here is the invoice for {resolved['client']} {resolved['month'] or ''}."
                     else:
                         action_result = resolved["message"]
+                
                 elif entity == "bank_details":
                     action_result = "Our bank details: HDFC Bank, Acct: 12345678, IFSC: HDFC0001234." # Mock
                 elif entity == "gst_details":
@@ -108,7 +112,8 @@ class IntentService:
                     else:
                         action_result = f"I don't see any records for {name} in my current sheet."
                 else:
-                    action_result = "I couldn’t find the specific record you’re looking for. Who is the client?"
+                    # Specific fallback if operation was READ but no specifics found
+                    action_result = "I couldn't find the specific information you're looking for. Could you please provide more details like a client name or bill number?"
 
             elif operation == "AGGREGATE_ENTITY":
                 client = params.get("client_name")
