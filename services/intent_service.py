@@ -30,7 +30,7 @@ class IntentService:
             error_msg = result.get("error_message", "Unknown Gemini API error")
             return {
                 "operation": "GEMINI_ERROR",
-                "response": f"Gemini error: {error_msg}",
+                "response": f"{error_msg}",
                 "trigger_invoice": False
             }
 
@@ -171,11 +171,11 @@ class IntentService:
             logger.error(traceback.format_exc())
 
         # 3. Final Response Phrasing (Only for business operations)
-        # Skip LLM if no data was found, error occurred, or an invoice retrieval is triggered
+        # Skip LLM if no data was found or error occurred
         fallback = "I don't see this information in my records yet."
         if trigger_invoice:
-            # Suppress response so the background task can send the PDF first
-            response = None
+            # Explicitly inform the user that generation is starting
+            response = f"Confirmed! I've found the record for {invoice_data.get('client_name')}. I'm generating the invoice now... 📄"
         elif action_result.startswith("I don't see") or action_result == "I encountered an error accessing the data records.":
             response = action_result
         else:

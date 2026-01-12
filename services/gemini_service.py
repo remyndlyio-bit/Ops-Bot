@@ -138,11 +138,17 @@ class GeminiService:
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Gemini Runtime Error: {error_msg}")
+            
+            # Clean up quota errors for the user
+            friendly_error = error_msg
+            if "quota" in error_msg.lower() or "429" in error_msg or "resource_exhausted" in error_msg.lower():
+                friendly_error = "Gemini API quota exceeded for the day. Please try again later or check your billing."
+
             return {
                 "operation": "GEMINI_ERROR",
                 "entity": None,
                 "parameters": {},
-                "error_message": error_msg
+                "error_message": friendly_error
             }
 
     def generate_response(self, user_message: str, backend_result: str) -> str:

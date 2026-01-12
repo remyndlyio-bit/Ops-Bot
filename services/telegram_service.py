@@ -9,10 +9,12 @@ class TelegramService:
 
     async def send_text_message(self, chat_id: int, text: str):
         url = f"{self.base_url}/sendMessage"
+        # Sanitize basic HTML tags if user-generated content is passed
+        safe_text = str(text).replace("<", "&lt;").replace(">", "&gt;") if text else ""
         payload = {
             "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
+            "text": safe_text,
+            "parse_mode": "HTML"
         }
         async with httpx.AsyncClient() as client:
             try:

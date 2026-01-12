@@ -88,6 +88,7 @@ class InvoiceService:
                 return {"status": "found", "data": matches, "client": res_client, "month": month or "Request"}
 
         # 2. Client + Month Search
+        client_exists = False
         if client and month:
             search_term = client.strip().lower()
             month_matches = []
@@ -107,6 +108,7 @@ class InvoiceService:
                 row_prod = str(row.get("Production house", "")).strip().lower()
                 
                 if search_term and (search_term in row_client or search_term in row_prod):
+                    client_exists = True # We found at least one client record
                     row_date = str(row.get("Date", "")).strip()
                     dt = parse_sheet_date(row_date)
                     if dt and dt.month == target_month and (dt.year % 100 == target_year):
@@ -116,7 +118,14 @@ class InvoiceService:
             if month_matches:
                 return {"status": "found", "data": month_matches, "client": client, "month": month}
 
-        # 3. Multiple Matches Guard
+        # 3. Decision Logic for Not Found
+        if not client_exists and client:
+            return {"status": "client_not_found", "message": f"I don't see any records for {client} in my current sheet."}
+        
+        if client_exists and client and month:
+             return {"status": "invoice_not_found", "message": f"I found records for {client}, but no invoice matching {month} {target_year + 2000 if target_year < 100 else target_year}."}
+
+        # 4. Multiple Matches Guard
         if len(matches) > 1:
             return {"status": "error", "message": "I found multiple invoices for these details. Could you specify the bill number or exact date?"}
 
