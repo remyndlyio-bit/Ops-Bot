@@ -66,40 +66,59 @@ class InvoiceService:
         client = params.get("client_name")
         month = params.get("month")
 
+        from utils.logger import logger
+        logger.info(f"Resolving Invoice: Bill={bill_no} | Client={client} | Month={month}")
+
         matches = []
+
+        # 0. Pre-clean all records to have stripped keys
+        clean_records = []
+        for row in all_records:
+            clean_records.append({str(k).strip(): v for k, v in row.items()})
 
         # 1. Bill No Search
         if bill_no:
-            for row in all_records:
-                if str(row.get("Bill No", "")).strip() == str(bill_no).strip():
+            bill_no_str = str(bill_no).strip()
+            for row in clean_records:
+                if str(row.get("Bill No", "")).strip() == bill_no_str:
                     matches.append(row)
             if matches:
-                return {"status": "found", "data": matches, "client": matches[0].get("Client Name"), "month": month or "Request"}
+                 # Resolve client name correctly for summary
+                res_client = str(matches[0].get("Client Name") or matches[0].get("Production house") or client or "Client")
+                return {"status": "found", "data": matches, "client": res_client, "month": month or "Request"}
 
         # 2. Client + Month Search
         if client and month:
-            from services.sheets_service import SheetsService
-            # We don't have direct access to SheetsService.get_invoice_data here without an instance,
-            # but we can filter the all_records we already have.
             search_term = client.strip().lower()
             month_matches = []
             from utils.date_utils import parse_sheet_date, month_name_to_number
             target_month = month_name_to_number(month)
+            from datetime import datetime
             
-            for row in all_records:
+            # Use provided year or current year (normalized to 2 digits for sheet comparison)
+            year_val = params.get("year")
+            target_year = year_val if (year_val and year_val != 0) else datetime.now().year
+            if target_year > 2000: target_year -= 2000
+            
+            logger.info(f"Searching for Client='{search_term}' | Month={target_month} | Year={target_year}")
+            
+            for row in clean_records:
                 row_client = str(row.get("Client Name", "")).strip().lower()
                 row_prod = str(row.get("Production house", "")).strip().lower()
-                if search_term in row_client or search_term in row_prod:
+                
+                if search_term and (search_term in row_client or search_term in row_prod):
                     row_date = str(row.get("Date", "")).strip()
                     dt = parse_sheet_date(row_date)
-                    if dt and dt.month == target_month:
+                    if dt and dt.month == target_month and (dt.year % 100 == target_year):
                         month_matches.append(row)
+                        logger.info(f"Found match: {row_client} on {row_date}")
             
             if month_matches:
                 return {"status": "found", "data": month_matches, "client": client, "month": month}
 
         # 3. Multiple Matches Guard
-        if len(matches) > 1 or (not bill_no and not (client and month)):
-            return {"status": "error", "message": "I found multiple invoices. Could you specify the bill number or date?"}
+        if len(matches) > 1:
+            return {"status": "error", "message": "I found multiple invoices for these details. Could you specify the bill number or exact date?"}
 
+        logger.warning(f"No invoice resolved for {client} in {month}")
         return {"status": "not_found", "message": "I couldn’t find an invoice matching those details."}

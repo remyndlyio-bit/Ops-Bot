@@ -43,9 +43,9 @@ class SheetsService:
             logger.error(f"Failed to authenticate with Google Sheets: {e}")
             return None
 
-    def get_invoice_data(self, client_name: str, month_name: str) -> List[Dict]:
+    def get_invoice_data(self, client_name: str, month_name: str, year: int = None) -> List[Dict]:
         """
-        Fetches rows from the sheet filtering by client and month.
+        Fetches rows from the sheet filtering by client, month and year.
         Primary match: 'Client Name' column.
         """
         from utils.date_utils import parse_sheet_date, month_name_to_number
@@ -58,6 +58,11 @@ class SheetsService:
             all_records = sheet.get_all_records()
             
             target_month = month_name_to_number(month_name)
+            from datetime import datetime
+            target_year = year if (year and year != 0) else datetime.now().year
+            # Support 2-digit year format common in sheets
+            if target_year > 2000: target_year -= 2000
+            
             search_term = client_name.strip().lower()
             
             # Step 1: Normalize and Filter by Client Name (Substring match)
@@ -78,11 +83,11 @@ class SheetsService:
                 dt = parse_sheet_date(row_date_str)
                 
                 if dt:
-                    if dt.month == target_month:
+                    if dt.month == target_month and (dt.year % 100 == target_year):
                         filtered_data.append(row)
                         logger.info(f"MATCH: Client='{row.get('Client Name')}' Date='{row_date_str}'")
             
-            logger.info(f"Diag: Requested='{client_name}' ({month_name}) | Records={len(all_records)} | ClientMatches={len(client_matches)} | Final={len(filtered_data)}")
+            logger.info(f"Diag: Requested='{client_name}' ({month_name}/{target_year}) | Records={len(all_records)} | ClientMatches={len(client_matches)} | Final={len(filtered_data)}")
             return filtered_data
         except Exception as e:
             logger.error(f"Error fetching data from sheet: {e}")
