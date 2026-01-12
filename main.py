@@ -112,7 +112,10 @@ async def whatsapp_webhook(
 
     # Use the new Three-Stage architecture
     result = intent_service.process_request(user_id=From, message=Body)
-    whatsapp_service.send_text_message(From, result["response"])
+    
+    # Only send immediate response if it's not a suppressed retrieval response
+    if result.get("response"):
+        whatsapp_service.send_text_message(From, result["response"])
 
     if result.get("trigger_invoice"):
         data = result["invoice_data"]
@@ -139,7 +142,8 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
 
         user_id = str(chat_id)
         result = intent_service.process_request(user_id=user_id, message=text)
-        await telegram_service.send_text_message(chat_id, result["response"])
+        if result.get("response"):
+            await telegram_service.send_text_message(chat_id, result["response"])
 
         if result.get("trigger_invoice"):
             data_inv = result["invoice_data"]

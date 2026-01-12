@@ -171,9 +171,12 @@ class IntentService:
             logger.error(traceback.format_exc())
 
         # 3. Final Response Phrasing (Only for business operations)
-        # Skip LLM if no data was found or error occurred
+        # Skip LLM if no data was found, error occurred, or an invoice retrieval is triggered
         fallback = "I don't see this information in my records yet."
-        if action_result.startswith("I don't see") or action_result == "I encountered an error accessing the data records.":
+        if trigger_invoice:
+            # Suppress response so the background task can send the PDF first
+            response = None
+        elif action_result.startswith("I don't see") or action_result == "I encountered an error accessing the data records.":
             response = action_result
         else:
             response = self.gemini.generate_response(message, action_result)
