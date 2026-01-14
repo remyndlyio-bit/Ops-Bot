@@ -119,18 +119,30 @@ class BusinessLogicService:
         # First try exact match (case-sensitive)
         for col_name in possible_names:
             if col_name in row:
-                val = str(row[col_name]).strip()
-                if val:
+                raw_val = row[col_name]
+                # Handle None, empty string, but allow 0 as valid value
+                if raw_val is None:
+                    continue
+                val = str(raw_val).strip()
+                # Return even if "0" (unpaid status) - only skip if truly empty
+                if val or val == "0":
                     return val
         
         # Then try case-insensitive match
-        row_keys_lower = {k.lower(): k for k in row.keys()}
+        row_keys_lower = {k.lower().strip(): k for k in row.keys()}
         for col_name in possible_names:
-            col_lower = col_name.lower()
-            if col_lower in row_keys_lower:
-                val = str(row[row_keys_lower[col_lower]]).strip()
-                if val:
-                    return val
+            col_lower = col_name.lower().strip()
+            # Also try matching with normalized punctuation (e.g., "paid?" matches "paid ?")
+            col_normalized = col_lower.replace("?", "").replace(" ", "").strip()
+            for row_key_lower, row_key_actual in row_keys_lower.items():
+                row_key_normalized = row_key_lower.replace("?", "").replace(" ", "").strip()
+                if col_lower == row_key_lower or col_normalized == row_key_normalized:
+                    raw_val = row[row_key_actual]
+                    if raw_val is None:
+                        continue
+                    val = str(raw_val).strip()
+                    if val or val == "0":
+                        return val
         
         return None
 
@@ -175,7 +187,7 @@ class BusinessLogicService:
         skipped_no_date = 0
         skipped_date_parse_fail = 0
         
-        for row in all_records:
+        for row_idx, row in enumerate(all_records, 1):
             checked_count += 1
             
             # Find status column - if empty/missing, treat as unpaid
@@ -184,20 +196,41 @@ class BusinessLogicService:
             # If no status column was detected, try direct lookup of common status column names
             if not status_val and len(column_map["status"]) == 0:
                 # Try common status column names directly
-                for status_col_name in ["Paid", "paid", "PAID", "Status", "status", "STATUS", "Payment Status"]:
+                for status_col_name in ["Paid", "paid", "PAID", "Status", "status", "STATUS", "Payment Status", "Paid?", "Paid ?"]:
                     if status_col_name in row:
-                        status_val = str(row[status_col_name]).strip()
+                        raw_val = row[status_col_name]
+                        status_val = str(raw_val).strip()
+                        logger.info(f"[QUERY] Row {row_idx}: Found status column '{status_col_name}' with raw value: {repr(raw_val)}, string value: '{status_val}'")
                         if status_val:
                             break
                 
                 # If still no status found, treat as unpaid (empty Paid = unpaid)
                 if not status_val:
-                    logger.debug(f"[QUERY] No status value found for row - treating as unpaid")
+                    logger.info(f"[QUERY] Row {row_idx}: No status value found - treating as unpaid")
+            elif status_val:
+                # Log what we found
+                logger.info(f"[QUERY] Row {row_idx}: Status value found: '{status_val}'")
             
-            # Check if paid
-            if status_val and BusinessLogicService.is_paid(status_val):
+            # Check if paid - also handle numeric 0/1 values
+            is_paid_status = False
+            if status_val:
+                # Handle numeric values: 0 = unpaid, 1 = paid
+                if status_val in ['0', 0]:
+                    is_paid_status = False
+                    logger.info(f"[QUERY] Row {row_idx}: Status is '0' (numeric) - UNPAID")
+                elif status_val in ['1', 1]:
+                    is_paid_status = True
+                    logger.info(f"[QUERY] Row {row_idx}: Status is '1' (numeric) - PAID")
+                else:
+                    is_paid_status = BusinessLogicService.is_paid(status_val)
+                    logger.info(f"[QUERY] Row {row_idx}: Status '{status_val}' -> is_paid check: {is_paid_status}")
+            
+            if is_paid_status:
                 skipped_paid += 1
+                logger.info(f"[QUERY] Row {row_idx}: Skipping as PAID")
                 continue
+            else:
+                logger.info(f"[QUERY] Row {row_idx}: Status indicates UNPAID - checking date")
             
             # Determine due date
             due_date = None
@@ -208,19 +241,25 @@ class BusinessLogicService:
                 due_date_str = BusinessLogicService._find_column_value(row, column_map["due_date"])
                 if due_date_str:
                     due_date = parse_sheet_date(due_date_str)
+                    logger.info(f"[QUERY] Row {row_idx}: Using explicit due date: '{due_date_str}' -> {due_date}")
             else:
                 # Calculate due date from invoice date + payment terms
                 invoice_date_str = BusinessLogicService._find_column_value(row, column_map.get("invoice_date", []))
+                logger.info(f"[QUERY] Row {row_idx}: Looking for invoice date in columns {column_map.get('invoice_date', [])}, found: '{invoice_date_str}'")
+                
                 if invoice_date_str:
                     invoice_date = parse_sheet_date(invoice_date_str)
                     if invoice_date:
                         from datetime import timedelta
                         due_date = invoice_date + timedelta(days=payment_terms_days)
                         due_date_str = f"{invoice_date_str} + {payment_terms_days} days"
+                        logger.info(f"[QUERY] Row {row_idx}: Calculated due date: {invoice_date.strftime('%Y-%m-%d')} + {payment_terms_days} days = {due_date.strftime('%Y-%m-%d')}")
                     else:
+                        logger.info(f"[QUERY] Row {row_idx}: Failed to parse invoice date '{invoice_date_str}'")
                         skipped_date_parse_fail += 1
                         continue
                 else:
+                    logger.info(f"[QUERY] Row {row_idx}: No invoice date found - checking available columns: {list(row.keys())}")
                     skipped_no_date += 1
                     continue
             
@@ -228,8 +267,11 @@ class BusinessLogicService:
             if due_date and due_date < now:
                 client = BusinessLogicService._find_column_value(row, column_map["client"])
                 overdue.append(row)
-                logger.info(f"[QUERY] Overdue invoice found - Client: {client or 'Unknown'}, Due Date: {due_date_str}, Calculated: {due_date.strftime('%Y-%m-%d')}")
-            elif not due_date:
+                logger.info(f"[QUERY] Row {row_idx}: ✅ OVERDUE invoice found - Client: {client or 'Unknown'}, Due Date: {due_date_str}, Calculated: {due_date.strftime('%Y-%m-%d')}, Today: {now.strftime('%Y-%m-%d')}")
+            elif due_date:
+                logger.info(f"[QUERY] Row {row_idx}: Not overdue - Due Date: {due_date.strftime('%Y-%m-%d')}, Today: {now.strftime('%Y-%m-%d')}")
+            else:
+                logger.info(f"[QUERY] Row {row_idx}: Could not determine due date")
                 skipped_date_parse_fail += 1
         
         logger.info(f"[QUERY] Overdue query results - Total checked: {checked_count}, Overdue: {len(overdue)}, Skipped (paid): {skipped_paid}, Skipped (no date): {skipped_no_date}, Skipped (date parse fail): {skipped_date_parse_fail}")
