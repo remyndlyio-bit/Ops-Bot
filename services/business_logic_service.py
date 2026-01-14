@@ -119,6 +119,7 @@ class BusinessLogicService:
         Uses configurable column names from COLUMN_NAMES env variable or auto-detects from sheet.
         """
         if not all_records:
+            logger.info("[QUERY] Overdue invoice query - No records to search")
             return []
         
         # Extract column names from the first record
@@ -127,26 +128,42 @@ class BusinessLogicService:
         now = datetime.now()
         column_map = BusinessLogicService._get_column_names(all_available_columns=available_columns)
         
+        logger.info(f"[QUERY] Overdue Invoice Query - Searching {len(all_records)} records")
+        logger.info(f"[QUERY] Using columns - Status: {column_map['status']}, Due Date: {column_map['due_date']}")
+        logger.info(f"[QUERY] Filter criteria - Status: NOT paid, Due Date: < {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        checked_count = 0
+        skipped_no_status = 0
+        skipped_paid = 0
+        skipped_no_due_date = 0
+        
         for row in all_records:
+            checked_count += 1
             # Find status column
             status_val = BusinessLogicService._find_column_value(row, column_map["status"])
             if not status_val:
+                skipped_no_status += 1
                 continue
             
             # Check if paid
             if BusinessLogicService.is_paid(status_val):
+                skipped_paid += 1
                 continue
             
             # Find due date column
             due_date_str = BusinessLogicService._find_column_value(row, column_map["due_date"])
             if not due_date_str:
+                skipped_no_due_date += 1
                 continue
             
             # Parse and check if overdue
             due_date = parse_sheet_date(due_date_str)
             if due_date and due_date < now:
+                client = BusinessLogicService._find_column_value(row, column_map["client"])
                 overdue.append(row)
+                logger.info(f"[QUERY] Overdue invoice found - Client: {client or 'Unknown'}, Due Date: {due_date_str}, Parsed: {due_date.strftime('%Y-%m-%d')}")
         
+        logger.info(f"[QUERY] Overdue query results - Total checked: {checked_count}, Overdue: {len(overdue)}, Skipped (no status): {skipped_no_status}, Skipped (paid): {skipped_paid}, Skipped (no due date): {skipped_no_due_date}")
         return overdue
 
     @staticmethod
@@ -155,19 +172,34 @@ class BusinessLogicService:
         Calculates total billing for a period (day/month/year).
         Uses 'Fees' column and 'Date' column (%d/%m/%y).
         """
+        logger.info(f"[QUERY] Billing Calculation Query - Period: {period}, Records: {len(all_records)}")
+        logger.info(f"[QUERY] Filtering by Date column, Aggregating Fees column")
+        
         total = 0
         now = datetime.now()
         match_count = 0
+        skipped_no_date = 0
+        skipped_date_parse_fail = 0
+        skipped_period_mismatch = 0
         
         for row in all_records:
             date_str = str(row.get('Date', '')).strip()
+            if not date_str:
+                skipped_no_date += 1
+                continue
+                
             dt = parse_sheet_date(date_str)
-            if not dt: continue
+            if not dt:
+                skipped_date_parse_fail += 1
+                continue
 
             match = False
-            if period == "day" and dt.date() == now.date(): match = True
-            elif period == "month" and dt.month == now.month and dt.year == now.year: match = True
-            elif period == "year" and dt.year == now.year: match = True
+            if period == "day" and dt.date() == now.date(): 
+                match = True
+            elif period == "month" and dt.month == now.month and dt.year == now.year: 
+                match = True
+            elif period == "year" and dt.year == now.year: 
+                match = True
             
             if match:
                 # Aggregate using Fees column ONLY
@@ -176,9 +208,12 @@ class BusinessLogicService:
                     val = float(fees_raw) if fees_raw else 0
                     total += val
                     match_count += 1
-                except: continue
+                except: 
+                    continue
+            else:
+                skipped_period_mismatch += 1
         
-        logger.info(f"Billing Calc: Period={period} | Matches={match_count} | Total={total}")
+        logger.info(f"[QUERY] Billing calculation results - Period: {period}, Matches: {match_count}, Total: {total}, Skipped (no date): {skipped_no_date}, Skipped (parse fail): {skipped_date_parse_fail}, Skipped (period mismatch): {skipped_period_mismatch}")
         return total
 
     @staticmethod
@@ -221,6 +256,7 @@ class BusinessLogicService:
     def get_blacklisted_clients(all_records: List[Dict]) -> List[str]:
         """Clients with unpaid bills > 3 months old."""
         if not all_records:
+            logger.info("[QUERY] Blacklist query - No records to search")
             return []
         
         # Extract column names from the first record
@@ -229,13 +265,26 @@ class BusinessLogicService:
         now = datetime.now()
         column_map = BusinessLogicService._get_column_names(all_available_columns=available_columns)
         
+        logger.info(f"[QUERY] Blacklist Query - Searching {len(all_records)} records")
+        logger.info(f"[QUERY] Using columns - Status: {column_map['status']}, Date: Date, Client: {column_map['client']}")
+        logger.info(f"[QUERY] Filter criteria - Status: NOT paid, Date: > 3 months old")
+        
+        checked_count = 0
+        skipped_paid = 0
+        skipped_no_date = 0
+        skipped_date_parse_fail = 0
+        skipped_too_recent = 0
+        
         for row in all_records:
+            checked_count += 1
             status_val = BusinessLogicService._find_column_value(row, column_map["status"])
             if not status_val or BusinessLogicService.is_paid(status_val):
+                skipped_paid += 1
                 continue
             
             date_str = str(row.get('Date', '')).strip()
             if not date_str:
+                skipped_no_date += 1
                 continue
                 
             dt = parse_sheet_date(date_str)
@@ -245,4 +294,11 @@ class BusinessLogicService:
                     client = BusinessLogicService._find_column_value(row, column_map["client"])
                     if client:
                         blacklist.add(str(client))
+                        logger.info(f"[QUERY] Blacklisted client found - Client: {client}, Date: {date_str}, Age: {months_diff} months")
+                else:
+                    skipped_too_recent += 1
+            else:
+                skipped_date_parse_fail += 1
+        
+        logger.info(f"[QUERY] Blacklist query results - Total checked: {checked_count}, Blacklisted clients: {len(blacklist)}, Skipped (paid): {skipped_paid}, Skipped (no date): {skipped_no_date}, Skipped (parse fail): {skipped_date_parse_fail}, Skipped (too recent): {skipped_too_recent}")
         return list(blacklist)

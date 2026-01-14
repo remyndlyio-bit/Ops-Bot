@@ -65,6 +65,10 @@ class SheetsService:
             
             search_term = client_name.strip().lower()
             
+            logger.info(f"[QUERY] Invoice Data Query - Client: '{client_name}', Month: {month_name}, Year: {target_year + 2000 if target_year < 100 else target_year}")
+            logger.info(f"[QUERY] Searching through {len(all_records)} total records")
+            logger.info(f"[QUERY] Filter Step 1: Client name match (columns: 'Client Name', 'Production house')")
+            
             # Step 1: Normalize and Filter by Client Name (Substring match)
             client_matches = []
             for row in all_records:
@@ -75,19 +79,34 @@ class SheetsService:
 
                 if search_term and (search_term in row_client_name or search_term in row_prod_house):
                     client_matches.append(clean_row)
+            
+            logger.info(f"[QUERY] Client name filter results: {len(client_matches)} matches")
+            logger.info(f"[QUERY] Filter Step 2: Date/Month match (column: 'Date', target: Month={target_month}, Year={target_year})")
 
             # Step 2: Filter by Date/Month
             filtered_data = []
+            skipped_no_date = 0
+            skipped_date_parse_fail = 0
+            skipped_month_mismatch = 0
+            
             for row in client_matches:
                 row_date_str = str(row.get('Date', '')).strip()
+                if not row_date_str:
+                    skipped_no_date += 1
+                    continue
+                    
                 dt = parse_sheet_date(row_date_str)
+                if not dt:
+                    skipped_date_parse_fail += 1
+                    continue
                 
-                if dt:
-                    if dt.month == target_month and (dt.year % 100 == target_year):
-                        filtered_data.append(row)
-                        logger.info(f"MATCH: Client='{row.get('Client Name')}' Date='{row_date_str}'")
+                if dt.month == target_month and (dt.year % 100 == target_year):
+                    filtered_data.append(row)
+                    logger.info(f"[QUERY] Match found - Client: '{row.get('Client Name')}', Date: {row_date_str}, Parsed: {dt.strftime('%Y-%m-%d')}")
+                else:
+                    skipped_month_mismatch += 1
             
-            logger.info(f"Diag: Requested='{client_name}' ({month_name}/{target_year}) | Records={len(all_records)} | ClientMatches={len(client_matches)} | Final={len(filtered_data)}")
+            logger.info(f"[QUERY] Invoice data query results - Total records: {len(all_records)}, Client matches: {len(client_matches)}, Final matches: {len(filtered_data)}, Skipped (no date): {skipped_no_date}, Skipped (parse fail): {skipped_date_parse_fail}, Skipped (month mismatch): {skipped_month_mismatch}")
             return filtered_data
         except Exception as e:
             logger.error(f"Error fetching data from sheet: {e}")

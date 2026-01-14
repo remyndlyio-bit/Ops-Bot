@@ -57,9 +57,12 @@ class IntentService:
                 # Fetch records for invoice retrieval
                 all_records = []
                 try:
+                    logger.info(f"[QUERY] Fetching dataset for invoice retrieval")
                     sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
                     all_records = sheet.get_all_records()
-                    logger.info(f"Fetched {len(all_records)} records from sheet for invoice retrieval.")
+                    logger.info(f"[QUERY] Dataset loaded - Total records: {len(all_records)}")
+                    if all_records:
+                        logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
                 except Exception as se:
                     logger.error(f"Sheet access failed: {se}")
                     return {
@@ -100,9 +103,12 @@ class IntentService:
                     # Fetch records for overdue query
                     all_records = []
                     try:
+                        logger.info(f"[QUERY] Fetching dataset for overdue invoice query")
                         sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
                         all_records = sheet.get_all_records()
-                        logger.info(f"Fetched {len(all_records)} records from sheet for overdue query.")
+                        logger.info(f"[QUERY] Dataset loaded - Total records: {len(all_records)}")
+                        if all_records:
+                            logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
                     except Exception as se:
                         logger.error(f"Sheet access failed: {se}")
                         return {
@@ -128,9 +134,12 @@ class IntentService:
                 all_records = []
                 if operation in ["AGGREGATE_ENTITY", "READ_ENTITY", "ACTION_TRIGGER"]:
                     try:
+                        logger.info(f"[QUERY] Fetching dataset for operation: {operation}")
                         sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
                         all_records = sheet.get_all_records()
-                        logger.info(f"Fetched {len(all_records)} records from sheet.")
+                        logger.info(f"[QUERY] Dataset loaded - Total records: {len(all_records)}")
+                        if all_records:
+                            logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
                     except Exception as se:
                         logger.error(f"Sheet access failed: {se}")
 
@@ -144,12 +153,15 @@ class IntentService:
                         # Handle client list requests
                         if not name:
                             # User wants a list of clients
+                            logger.info(f"[QUERY] Client List Query - Searching {len(all_records)} records")
+                            logger.info(f"[QUERY] Checking columns: 'Client Name', 'Production house'")
                             client_names = set()
                             for row in all_records:
                                 client = row.get("Client Name") or row.get("Production house")
                                 if client and str(client).strip():
                                     client_names.add(str(client).strip())
                             
+                            logger.info(f"[QUERY] Client list query results - Found {len(client_names)} unique clients")
                             if client_names:
                                 client_list = sorted(list(client_names))
                                 if len(client_list) <= 10:
@@ -160,7 +172,16 @@ class IntentService:
                                 action_result = "I don't see any client names in my current sheet."
                         else:
                             # User is searching for a specific client
-                            results = [r for r in all_records if any(name.lower() in str(v).lower() for v in r.values())]
+                            logger.info(f"[QUERY] Client Search Query - Searching for: '{name}' in {len(all_records)} records")
+                            logger.info(f"[QUERY] Searching across all columns for partial match")
+                            results = []
+                            for r in all_records:
+                                for v in r.values():
+                                    if name.lower() in str(v).lower():
+                                        results.append(r)
+                                        break
+                            
+                            logger.info(f"[QUERY] Client search results - Found {len(results)} records matching '{name}'")
                             if results:
                                 action_result = f"Found {len(results)} records matching '{name}'."
                             else:
@@ -169,13 +190,18 @@ class IntentService:
                 elif operation == "AGGREGATE_ENTITY":
                     client = params.get("client_name")
                     month = params.get("month")
+                    year = params.get("year")
+                    logger.info(f"[QUERY] Aggregate Query - Client: {client}, Month: {month}, Year: {year}")
                     if client and month:
                         from services.invoice_service import InvoiceService
-                        data = self.sheets.get_invoice_data(client, month, year=params.get("year"))
+                        logger.info(f"[QUERY] Fetching invoice data for aggregation")
+                        data = self.sheets.get_invoice_data(client, month, year=year)
+                        logger.info(f"[QUERY] Aggregate query results - Found {len(data) if data else 0} records")
                         if not data:
                             action_result = f"I don't see any billing records for {client} in {month} yet."
                         else:
                             summary = InvoiceService.process_invoice_data(data, client, month)
+                            logger.info(f"[QUERY] Aggregation complete - Total: {summary['currency']}{summary['total']:,}, Items: {summary['items']}")
                             action_result = f"Total billing for {client} in {month} is {summary['currency']}{summary['total']:,}."
                     else:
                          action_result = "I couldn't calculate the aggregate. Please specify a client and month."

@@ -67,7 +67,8 @@ class InvoiceService:
         month = params.get("month")
 
         from utils.logger import logger
-        logger.info(f"Resolving Invoice: Bill={bill_no} | Client={client} | Month={month}")
+        logger.info(f"[QUERY] Invoice Resolution Query - Bill={bill_no} | Client={client} | Month={month} | Year={params.get('year')}")
+        logger.info(f"[QUERY] Searching through {len(all_records)} total records")
 
         matches = []
 
@@ -79,12 +80,19 @@ class InvoiceService:
         # 1. Bill No Search
         if bill_no:
             bill_no_str = str(bill_no).strip()
+            logger.info(f"[QUERY] Filtering by Bill No: '{bill_no_str}'")
+            logger.info(f"[QUERY] Checking column: 'Bill No'")
             for row in clean_records:
-                if str(row.get("Bill No", "")).strip() == bill_no_str:
+                bill_value = str(row.get("Bill No", "")).strip()
+                if bill_value == bill_no_str:
                     matches.append(row)
+                    logger.info(f"[QUERY] Match found - Bill No: {bill_value}, Client: {row.get('Client Name', 'N/A')}")
+            
+            logger.info(f"[QUERY] Bill No search result: {len(matches)} match(es)")
             if matches:
                  # Resolve client name correctly for summary
                 res_client = str(matches[0].get("Client Name") or matches[0].get("Production house") or client or "Client")
+                logger.info(f"[QUERY] Invoice resolved successfully - Client: {res_client}, Matches: {len(matches)}")
                 return {"status": "found", "data": matches, "client": res_client, "month": month or "Request"}
 
         # 2. Client + Month Search
@@ -101,21 +109,27 @@ class InvoiceService:
             target_year = year_val if (year_val and year_val != 0) else datetime.now().year
             if target_year > 2000: target_year -= 2000
             
-            logger.info(f"Searching for Client='{search_term}' | Month={target_month} | Year={target_year}")
+            logger.info(f"[QUERY] Filtering by Client + Month - Client='{search_term}' | Month={target_month} | Year={target_year}")
+            logger.info(f"[QUERY] Checking columns: 'Client Name', 'Production house' for client match")
+            logger.info(f"[QUERY] Checking column: 'Date' for month/year match")
             
+            client_matches_count = 0
             for row in clean_records:
                 row_client = str(row.get("Client Name", "")).strip().lower()
                 row_prod = str(row.get("Production house", "")).strip().lower()
                 
                 if search_term and (search_term in row_client or search_term in row_prod):
                     client_exists = True # We found at least one client record
+                    client_matches_count += 1
                     row_date = str(row.get("Date", "")).strip()
                     dt = parse_sheet_date(row_date)
                     if dt and dt.month == target_month and (dt.year % 100 == target_year):
                         month_matches.append(row)
-                        logger.info(f"Found match: {row_client} on {row_date}")
+                        logger.info(f"[QUERY] Match found - Client: {row_client or row_prod}, Date: {row_date}, Month: {dt.month}, Year: {dt.year % 100}")
             
+            logger.info(f"[QUERY] Client matches: {client_matches_count} | Month+Year matches: {len(month_matches)}")
             if month_matches:
+                logger.info(f"[QUERY] Invoice resolved successfully - Client: {client}, Month: {month}, Matches: {len(month_matches)}")
                 return {"status": "found", "data": month_matches, "client": client, "month": month}
 
         # 3. Decision Logic for Not Found
