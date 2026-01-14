@@ -111,39 +111,35 @@ class IntentService:
 
             # 2. Standard Operation Path (only if not already handled by retrieval)
             if action_result == "I don't see this information in my records yet.":
-                from services.invoice_service import InvoiceService
-                resolved = InvoiceService.resolve_invoice_pdf(params, all_records)
-                
-                if resolved["status"] == "found":
-                    trigger_invoice = True
-                    invoice_data = {
-                        "client_name": resolved["client"],
-                        "month": resolved["month"],
-                        "bill_number": params.get("bill_number"),
-                        "year": params.get("year")
-                    }
-                    action_result = f"Confirmed! I've found the record for {resolved['client']}. I'm generating the invoice now... 📄"
-                else:
-                    action_result = resolved["message"]
-                    # If it's a retrieval query and we didn't find it, we stop here.
-                    return {
-                        "operation": operation,
-                        "response": action_result,
-                        "trigger_invoice": False
-                    }
-
-            # 2. Standard Operation Path
-            if action_result == "I don't see this information in my records yet.":
                 if operation == "READ_ENTITY":
                     name = params.get("client_name")
                     if entity == "bank_details":
                         action_result = "Our bank details: HDFC Bank, Acct: 12345678, IFSC: HDFC0001234."
-                    elif name:
-                        results = [r for r in all_records if any(name.lower() in str(v).lower() for v in r.values())]
-                        if results:
-                            action_result = f"Found {len(results)} records matching '{name}'."
+                    elif entity == "client":
+                        # Handle client list requests
+                        if not name:
+                            # User wants a list of clients
+                            client_names = set()
+                            for row in all_records:
+                                client = row.get("Client Name") or row.get("Production house")
+                                if client and str(client).strip():
+                                    client_names.add(str(client).strip())
+                            
+                            if client_names:
+                                client_list = sorted(list(client_names))
+                                if len(client_list) <= 10:
+                                    action_result = f"Here are the client names in my records:\n" + "\n".join(f"• {c}" for c in client_list)
+                                else:
+                                    action_result = f"I found {len(client_list)} clients. Here are some:\n" + "\n".join(f"• {c}" for c in client_list[:10]) + f"\n... and {len(client_list) - 10} more."
+                            else:
+                                action_result = "I don't see any client names in my current sheet."
                         else:
-                            action_result = f"I don't see any records for {name} in my current sheet."
+                            # User is searching for a specific client
+                            results = [r for r in all_records if any(name.lower() in str(v).lower() for v in r.values())]
+                            if results:
+                                action_result = f"Found {len(results)} records matching '{name}'."
+                            else:
+                                action_result = f"I don't see any records for {name} in my current sheet."
                 
                 elif operation == "AGGREGATE_ENTITY":
                     client = params.get("client_name")
