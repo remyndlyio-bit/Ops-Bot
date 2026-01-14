@@ -34,6 +34,8 @@ class BusinessLogicService:
         client_cols = []
         notes_cols = []
         invoice_date_cols = []
+        email_cols = []
+        first_reminder_cols = []
         
         for col in columns:
             col_lower = col.lower().strip()
@@ -67,6 +69,10 @@ class BusinessLogicService:
             # Check for notes columns (contains "notes" or "additional")
             elif "notes" in col_norm or "additional" in col_norm:
                 notes_cols.append(col)
+            elif "email" in col_norm:
+                email_cols.append(col)
+            elif "firstremindersent" in col_norm.replace(" ", "") or "first reminder sent" in col_norm:
+                first_reminder_cols.append(col)
         
         # Always ensure Notes and AdditionalNotes are in notes columns (case-insensitive check)
         for col in columns:
@@ -102,7 +108,8 @@ class BusinessLogicService:
         logger.info(
             "Column categorization - "
             f"Invoice Date: {invoice_date_cols}, Due Date: {due_date_cols}, "
-            f"Status: {status_cols}, Client: {client_cols}, Notes: {notes_cols}"
+            f"Status: {status_cols}, Client: {client_cols}, Notes: {notes_cols}, "
+            f"Email: {email_cols}, FirstReminderSent: {first_reminder_cols}"
         )
         
         return {
@@ -110,8 +117,95 @@ class BusinessLogicService:
             "due_date": due_date_cols,
             "status": status_cols,
             "client": client_cols,
-            "notes": notes_cols
+            "notes": notes_cols,
+            "email": email_cols,
+            "first_reminder_sent": first_reminder_cols,
         }
+
+    @staticmethod
+    def _is_truthy(val: any) -> bool:
+        s = str(val).strip().lower()
+        return s in {"1", "true", "yes", "y", "sent"}
+
+    @staticmethod
+    def get_approaching_due_reminder_targets(
+        all_records: List[Dict],
+        approaching_days: int = 7,
+        payment_terms_days: int = 30
+    ) -> List[Dict]:
+        """
+        Returns rows that should receive a first payment reminder:
+        - unpaid (Paid?/Paid/Status not truthy)
+        - has Email
+        - FirstReminderSent not truthy
+        - due date is within [now, now + approaching_days]
+        If no explicit due date column exists, uses invoice date + payment_terms_days.
+
+        Expected each record to include '_row' so we can update the sheet.
+        """
+        if not all_records:
+            return []
+
+        from datetime import timedelta
+        now = datetime.now()
+        window_end = now + timedelta(days=approaching_days)
+
+        available_columns = list(all_records[0].keys())
+        column_map = BusinessLogicService._get_column_names(all_available_columns=available_columns)
+        has_due_date_column = len(column_map["due_date"]) > 0
+
+        targets: List[Dict] = []
+
+        for row in all_records:
+            row_num = row.get("_row")
+            if not row_num:
+                continue
+
+            # Skip if reminder already sent
+            reminder_val = BusinessLogicService._find_column_value(row, column_map.get("first_reminder_sent", []))
+            if reminder_val and BusinessLogicService._is_truthy(reminder_val):
+                continue
+
+            # Determine paid/unpaid
+            status_val = BusinessLogicService._find_column_value(row, column_map["status"])
+            # Treat missing/empty as unpaid; treat 1/true/yes as paid
+            if status_val and BusinessLogicService.is_paid(status_val):
+                continue
+
+            # Email required
+            email_val = BusinessLogicService._find_column_value(row, column_map.get("email", [])) or str(row.get("Email", "")).strip()
+            if not email_val:
+                continue
+
+            client = BusinessLogicService._find_column_value(row, column_map["client"]) or "Unknown Client"
+
+            # Due date
+            due_date = None
+            if has_due_date_column:
+                due_raw = BusinessLogicService._find_column_value(row, column_map["due_date"])
+                if due_raw:
+                    due_date = parse_sheet_date(due_raw)
+            else:
+                invoice_date_raw = BusinessLogicService._find_column_value(row, column_map.get("invoice_date", []))
+                if invoice_date_raw:
+                    inv_dt = parse_sheet_date(invoice_date_raw)
+                    if inv_dt:
+                        due_date = inv_dt + timedelta(days=payment_terms_days)
+
+            if not due_date:
+                continue
+
+            if now <= due_date <= window_end:
+                targets.append(
+                    {
+                        "_row": int(row_num),
+                        "client": client,
+                        "email": email_val,
+                        "due_date": due_date,
+                    }
+                )
+
+        return targets
 
     @staticmethod
     def _find_column_value(row: Dict, possible_names: List[str]) -> Optional[str]:

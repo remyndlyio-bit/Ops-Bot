@@ -1,5 +1,6 @@
 from services.gemini_service import GeminiService
 from services.sheets_service import SheetsService
+from services.gmail_service import GmailService
 from utils.memory_service import MemoryService
 from utils.logger import logger
 from typing import Dict
@@ -9,6 +10,7 @@ class IntentService:
     def __init__(self):
         self.gemini = GeminiService()
         self.sheets = SheetsService()
+        self.email = GmailService()
         self.memory = MemoryService()
 
     def process_request(self, user_id: str, message: str) -> Dict:
@@ -44,6 +46,67 @@ class IntentService:
         invoice_data = {}
 
         try:
+            # Payment reminder intent (keyword-based, runs before normal ops)
+            reminder_keywords = [
+                "payment reminder",
+                "payment reminders",
+                "send reminder",
+                "send reminders",
+                "remind clients",
+                "approaching due",
+                "upcoming due",
+                "due soon",
+            ]
+            is_reminder_query = any(k in message.lower() for k in reminder_keywords)
+            if is_reminder_query:
+                logger.info("[REMINDER] Detected payment reminder query")
+                records = self.sheets.get_all_records_with_row_numbers()
+                logger.info(f"[REMINDER] Loaded {len(records)} records for reminder scan")
+
+                # Defaults; can be expanded later to parse days from params/message
+                approaching_days = 7
+                payment_terms_days = 30
+
+                targets = logic.get_approaching_due_reminder_targets(
+                    records,
+                    approaching_days=approaching_days,
+                    payment_terms_days=payment_terms_days,
+                )
+
+                sent = 0
+                failed = 0
+                for t in targets:
+                    to_email = t["email"]
+                    client = t["client"]
+                    due_date_str = t["due_date"].strftime("%Y-%m-%d")
+
+                    ok = self.email.send_payment_reminder(
+                        to_email=to_email,
+                        client_name=client,
+                        due_date_str=due_date_str,
+                    )
+                    if ok:
+                        # Mark FirstReminderSent as True
+                        upd_ok = self.sheets.update_cell_by_header(t["_row"], "FirstReminderSent", "True")
+                        if not upd_ok:
+                            logger.error(f"[REMINDER] Email sent but failed to mark FirstReminderSent for row {t['_row']}")
+                        sent += 1
+                    else:
+                        failed += 1
+
+                if not targets:
+                    return {
+                        "operation": "ACTION_TRIGGER",
+                        "response": f"I don’t see any clients with payments due in the next {approaching_days} days that need a first reminder.",
+                        "trigger_invoice": False,
+                    }
+
+                return {
+                    "operation": "ACTION_TRIGGER",
+                    "response": f"Sent {sent} payment reminder(s).{'' if failed == 0 else f' Failed: {failed}.'}",
+                    "trigger_invoice": False,
+                }
+
             # Check for invoice retrieval FIRST (before operation-based logic)
             # This ensures invoice requests are handled regardless of how Gemini categorizes them
             is_retrieval_query = any(word in message.lower() for word in ["get", "download", "send", "give", "show", "retrieve", "fetch", "can you get"])

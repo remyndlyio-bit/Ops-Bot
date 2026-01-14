@@ -20,7 +20,7 @@ Create a `.env` file based on `.env.example`:
 - `TWILIO_ACCOUNT_SID`: From Twilio Console.
 - `TWILIO_AUTH_TOKEN`: From Twilio Console.
 - `TWILIO_WHATSAPP_NUMBER`: Your Twilio WhatsApp Sandbox/Production number.
-- `GOOGLE_APPLICATION_CREDENTIALS`: Path to your Google Service Account JSON file.
+- `GOOGLE_CREDS_JSON`: Service Account JSON (either the full JSON string or a path to the JSON file).
 - `SHEET_URL`: The URL of your Google Sheet.
 
 ### 2. Google Sheets Configuration

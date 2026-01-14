@@ -1,7 +1,7 @@
 import gspread
 from google.oauth2.service_account import Credentials
 import os
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 from utils.logger import logger
 
 class SheetsService:
@@ -10,17 +10,16 @@ class SheetsService:
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
         ]
-        self.credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
         self.sheet_url = os.getenv("SHEET_URL")
         self.client = self._authenticate()
 
     def _authenticate(self):
         try:
             # Flexible detection: Check if the variable is a path or the actual JSON content
-            creds_raw = os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.getenv("GOOGLE_CREDS_JSON")
+            creds_raw = os.getenv("GOOGLE_CREDS_JSON")
             
             if not creds_raw:
-                logger.error("Google credentials not found in environment variables.")
+                logger.error("Google credentials not found in GOOGLE_CREDS_JSON.")
                 return None
 
             import json
@@ -115,6 +114,60 @@ class SheetsService:
         except Exception as e:
             logger.error(f"Error fetching data from sheet: {e}")
             return []
+
+    def get_all_records_with_row_numbers(self) -> List[Dict[str, Any]]:
+        """
+        Returns all records from sheet1 with normalized (stripped) keys and attaches the sheet row number
+        as '_row' (2-based because row 1 is headers).
+        """
+        if not self.client:
+            self.client = self._authenticate()
+            if not self.client:
+                return []
+
+        try:
+            sheet = self.client.open_by_url(self.sheet_url).sheet1
+            all_records_raw = sheet.get_all_records()
+            records: List[Dict[str, Any]] = []
+            for idx, row in enumerate(all_records_raw, start=2):
+                normalized = {str(k).strip(): v for k, v in row.items()}
+                normalized["_row"] = idx
+                records.append(normalized)
+            return records
+        except Exception as e:
+            logger.error(f"Error fetching records with row numbers: {e}")
+            return []
+
+    def update_cell_by_header(self, row_number: int, header_name: str, value: Any) -> bool:
+        """
+        Updates a single cell in sheet1 by matching header_name (case/space-insensitive) in row 1.
+        """
+        if not self.client:
+            self.client = self._authenticate()
+            if not self.client:
+                return False
+
+        try:
+            ws = self.client.open_by_url(self.sheet_url).sheet1
+            headers = ws.row_values(1)
+            # Map normalized header -> column index (1-based)
+            header_map = {}
+            for i, h in enumerate(headers, start=1):
+                norm = str(h).strip().lower().replace(" ", "").replace("\t", "")
+                header_map[norm] = i
+
+            target_norm = str(header_name).strip().lower().replace(" ", "").replace("\t", "")
+            col_idx: Optional[int] = header_map.get(target_norm)
+            if not col_idx:
+                logger.error(f"[SHEETS] Header not found: {header_name} (available={headers})")
+                return False
+
+            ws.update_cell(row_number, col_idx, value)
+            logger.info(f"[SHEETS] Updated row={row_number} col={col_idx} ({header_name}) -> {value}")
+            return True
+        except Exception as e:
+            logger.error(f"[SHEETS] Failed to update cell row={row_number} header={header_name}: {e}")
+            return False
 
     def add_row(self, sheet_name: str, data: list):
         """Adds a new row to the specified sheet."""
