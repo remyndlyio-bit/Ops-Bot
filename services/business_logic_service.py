@@ -37,12 +37,13 @@ class BusinessLogicService:
         for col in columns:
             col_lower = col.lower().strip()
             
-            # Check for due date columns (contains both "date" and ("due" or "payment"))
-            if "date" in col_lower and ("due" in col_lower or "payment" in col_lower):
-                due_date_cols.append(col)
-            # Check for status/paid columns (exact match for "paid" or contains "status")
-            elif col_lower == "paid" or "status" in col_lower:
+            # Check for status/paid columns FIRST (exact match for "paid" or contains "status")
+            # This must come before due date check to avoid conflicts
+            if col_lower == "paid" or col_lower == "payment status" or "status" in col_lower:
                 status_cols.append(col)
+            # Check for due date columns (contains "due" AND "date", but NOT "payment-date" which is when payment was received)
+            elif "due" in col_lower and "date" in col_lower:
+                due_date_cols.append(col)
             # Check for client columns (contains "client" or "production")
             elif "client" in col_lower or "production" in col_lower:
                 client_cols.append(col)
@@ -56,18 +57,16 @@ class BusinessLogicService:
             if col_lower in ["notes", "additionalnotes", "additional notes"] and col not in notes_cols:
                 notes_cols.append(col)
         
-        # Fallback: If no due date columns found, try to find any date-related columns with payment context
-        if not due_date_cols:
-            for col in columns:
-                col_lower = col.lower().strip()
-                if "date" in col_lower and ("payment" in col_lower or "due" in col_lower):
-                    due_date_cols.append(col)
-        
         # Fallback: If no status columns found, look for "Paid" specifically (case-insensitive)
         if not status_cols:
             for col in columns:
-                if col.lower().strip() == "paid":
+                col_lower = col.lower().strip()
+                if col_lower == "paid" or col_lower == "payment status":
                     status_cols.append(col)
+        
+        # Note: Payment-Date is NOT a due date - it's when payment was received
+        # If no explicit due date column exists, we'll use Date + payment terms (default 30 days)
+        # Don't add Payment-Date to due_date_cols
         
         # Fallback: If no client columns found, use common patterns
         if not client_cols:
@@ -113,10 +112,11 @@ class BusinessLogicService:
         return s in ['paid', 'yes', 'y', 'true', '1']
 
     @staticmethod
-    def get_overdue_invoices(all_records: List[Dict]) -> List[Dict]:
+    def get_overdue_invoices(all_records: List[Dict], payment_terms_days: int = 30) -> List[Dict]:
         """
         Returns invoices that are unpaid and past their due date.
         Uses configurable column names from COLUMN_NAMES env variable or auto-detects from sheet.
+        If no explicit due date column exists, calculates due date as invoice Date + payment_terms_days.
         """
         if not all_records:
             logger.info("[QUERY] Overdue invoice query - No records to search")
@@ -129,41 +129,78 @@ class BusinessLogicService:
         column_map = BusinessLogicService._get_column_names(all_available_columns=available_columns)
         
         logger.info(f"[QUERY] Overdue Invoice Query - Searching {len(all_records)} records")
-        logger.info(f"[QUERY] Using columns - Status: {column_map['status']}, Due Date: {column_map['due_date']}")
-        logger.info(f"[QUERY] Filter criteria - Status: NOT paid, Due Date: < {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"[QUERY] Using columns - Status: {column_map['status']}, Due Date: {column_map['due_date']}, Date: Date")
+        logger.info(f"[QUERY] Payment terms: {payment_terms_days} days (used if no due date column)")
+        
+        # Check if we have a due date column or need to calculate from Date
+        has_due_date_column = len(column_map["due_date"]) > 0
+        if not has_due_date_column:
+            logger.info(f"[QUERY] No explicit due date column found - will calculate due date as Date + {payment_terms_days} days")
         
         checked_count = 0
         skipped_no_status = 0
         skipped_paid = 0
-        skipped_no_due_date = 0
+        skipped_no_date = 0
+        skipped_date_parse_fail = 0
         
         for row in all_records:
             checked_count += 1
-            # Find status column
+            
+            # Find status column - if empty/missing, treat as unpaid
             status_val = BusinessLogicService._find_column_value(row, column_map["status"])
-            if not status_val:
-                skipped_no_status += 1
-                continue
+            
+            # If no status column was detected, try direct lookup of common status column names
+            if not status_val and len(column_map["status"]) == 0:
+                # Try common status column names directly
+                for status_col_name in ["Paid", "paid", "PAID", "Status", "status", "STATUS", "Payment Status"]:
+                    if status_col_name in row:
+                        status_val = str(row[status_col_name]).strip()
+                        if status_val:
+                            break
+                
+                # If still no status found, treat as unpaid (empty Paid = unpaid)
+                if not status_val:
+                    logger.debug(f"[QUERY] No status value found for row - treating as unpaid")
             
             # Check if paid
-            if BusinessLogicService.is_paid(status_val):
+            if status_val and BusinessLogicService.is_paid(status_val):
                 skipped_paid += 1
                 continue
             
-            # Find due date column
-            due_date_str = BusinessLogicService._find_column_value(row, column_map["due_date"])
-            if not due_date_str:
-                skipped_no_due_date += 1
-                continue
+            # Determine due date
+            due_date = None
+            due_date_str = None
             
-            # Parse and check if overdue
-            due_date = parse_sheet_date(due_date_str)
+            if has_due_date_column:
+                # Use explicit due date column
+                due_date_str = BusinessLogicService._find_column_value(row, column_map["due_date"])
+                if due_date_str:
+                    due_date = parse_sheet_date(due_date_str)
+            else:
+                # Calculate due date from invoice Date + payment terms
+                invoice_date_str = str(row.get("Date", "")).strip()
+                if invoice_date_str:
+                    invoice_date = parse_sheet_date(invoice_date_str)
+                    if invoice_date:
+                        from datetime import timedelta
+                        due_date = invoice_date + timedelta(days=payment_terms_days)
+                        due_date_str = f"{invoice_date_str} + {payment_terms_days} days"
+                    else:
+                        skipped_date_parse_fail += 1
+                        continue
+                else:
+                    skipped_no_date += 1
+                    continue
+            
+            # Check if overdue
             if due_date and due_date < now:
                 client = BusinessLogicService._find_column_value(row, column_map["client"])
                 overdue.append(row)
-                logger.info(f"[QUERY] Overdue invoice found - Client: {client or 'Unknown'}, Due Date: {due_date_str}, Parsed: {due_date.strftime('%Y-%m-%d')}")
+                logger.info(f"[QUERY] Overdue invoice found - Client: {client or 'Unknown'}, Due Date: {due_date_str}, Calculated: {due_date.strftime('%Y-%m-%d')}")
+            elif not due_date:
+                skipped_date_parse_fail += 1
         
-        logger.info(f"[QUERY] Overdue query results - Total checked: {checked_count}, Overdue: {len(overdue)}, Skipped (no status): {skipped_no_status}, Skipped (paid): {skipped_paid}, Skipped (no due date): {skipped_no_due_date}")
+        logger.info(f"[QUERY] Overdue query results - Total checked: {checked_count}, Overdue: {len(overdue)}, Skipped (paid): {skipped_paid}, Skipped (no date): {skipped_no_date}, Skipped (date parse fail): {skipped_date_parse_fail}")
         return overdue
 
     @staticmethod
