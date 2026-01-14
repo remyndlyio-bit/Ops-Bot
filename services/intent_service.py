@@ -91,8 +91,32 @@ class IntentService:
                         "trigger_invoice": False
                     }
             
-            # Handle SMALL_TALK only if not an invoice retrieval
-            elif operation == "SMALL_TALK":
+            # Check for overdue invoice queries (after invoice retrieval, before other operations)
+            if action_result == "I don't see this information in my records yet.":
+                overdue_keywords = ["overdue", "due date", "passed due", "past due", "past the due", "exceeded due", "late payment", "which.*passed", "have passed"]
+                is_overdue_query = any(keyword in message.lower() for keyword in overdue_keywords)
+                if is_overdue_query and (entity == "invoice" or entity == "client" or "invoice" in message.lower() or "client" in message.lower()):
+                    logger.info("Detected overdue invoice query")
+                    # Fetch records for overdue query
+                    all_records = []
+                    try:
+                        sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
+                        all_records = sheet.get_all_records()
+                        logger.info(f"Fetched {len(all_records)} records from sheet for overdue query.")
+                    except Exception as se:
+                        logger.error(f"Sheet access failed: {se}")
+                        return {
+                            "operation": operation,
+                            "response": "I encountered an error accessing the data records.",
+                            "trigger_invoice": False
+                        }
+                    
+                    overdue_invoices = logic.get_overdue_invoices(all_records)
+                    action_result = logic.format_overdue_invoices_response(overdue_invoices)
+                    logger.info(f"Found {len(overdue_invoices)} overdue invoices")
+            
+            # Handle SMALL_TALK only if not an invoice retrieval or overdue query
+            if operation == "SMALL_TALK" and action_result == "I don't see this information in my records yet.":
                 return {
                     "operation": "SMALL_TALK",
                     "response": "Hello! I'm your Operations Bot. How can I help you today?",
@@ -100,16 +124,17 @@ class IntentService:
                 }
 
             # Sheets data often needed for other operations
-            all_records = []
-            if operation in ["AGGREGATE_ENTITY", "READ_ENTITY", "ACTION_TRIGGER"]:
-                try:
-                    sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
-                    all_records = sheet.get_all_records()
-                    logger.info(f"Fetched {len(all_records)} records from sheet.")
-                except Exception as se:
-                    logger.error(f"Sheet access failed: {se}")
+            if action_result == "I don't see this information in my records yet.":
+                all_records = []
+                if operation in ["AGGREGATE_ENTITY", "READ_ENTITY", "ACTION_TRIGGER"]:
+                    try:
+                        sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
+                        all_records = sheet.get_all_records()
+                        logger.info(f"Fetched {len(all_records)} records from sheet.")
+                    except Exception as se:
+                        logger.error(f"Sheet access failed: {se}")
 
-            # 2. Standard Operation Path (only if not already handled by retrieval)
+            # 2. Standard Operation Path (only if not already handled by retrieval or overdue)
             if action_result == "I don't see this information in my records yet.":
                 if operation == "READ_ENTITY":
                     name = params.get("client_name")
