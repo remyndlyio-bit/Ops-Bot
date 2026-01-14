@@ -33,22 +33,39 @@ class BusinessLogicService:
         status_cols = []
         client_cols = []
         notes_cols = []
+        invoice_date_cols = []
         
         for col in columns:
             col_lower = col.lower().strip()
+            # normalize to help detect headers like "Paid ?", "Payment-Date", "Date\t"
+            col_norm = (
+                col_lower.replace("\t", " ")
+                .replace("-", " ")
+                .replace("_", " ")
+                .replace("?", " ")
+            )
+            col_norm = " ".join(col_norm.split())
             
-            # Check for status/paid columns FIRST (exact match for "paid" or contains "status")
-            # This must come before due date check to avoid conflicts
-            if col_lower == "paid" or col_lower == "payment status" or "status" in col_lower:
+            # Check for status/paid columns FIRST.
+            # Accept variants like "Paid ?", "Paid?", "Payment status", etc.
+            if (
+                col_norm == "paid"
+                or col_norm.startswith("paid ")
+                or " paid" in f" {col_norm} "
+                or "status" in col_norm
+            ):
                 status_cols.append(col)
-            # Check for due date columns (contains "due" AND "date", but NOT "payment-date" which is when payment was received)
-            elif "due" in col_lower and "date" in col_lower:
+            # Check for due date columns (contains "due" AND "date")
+            elif "due" in col_norm and "date" in col_norm:
                 due_date_cols.append(col)
+            # Check for invoice date column (contains "date" but NOT due date and NOT payment date)
+            elif "date" in col_norm and "payment" not in col_norm and "due" not in col_norm:
+                invoice_date_cols.append(col)
             # Check for client columns (contains "client" or "production")
-            elif "client" in col_lower or "production" in col_lower:
+            elif "client" in col_norm or "production" in col_norm:
                 client_cols.append(col)
             # Check for notes columns (contains "notes" or "additional")
-            elif "notes" in col_lower or "additional" in col_lower:
+            elif "notes" in col_norm or "additional" in col_norm:
                 notes_cols.append(col)
         
         # Always ensure Notes and AdditionalNotes are in notes columns (case-insensitive check)
@@ -68,6 +85,13 @@ class BusinessLogicService:
         # If no explicit due date column exists, we'll use Date + payment terms (default 30 days)
         # Don't add Payment-Date to due_date_cols
         
+        # Fallback: If no invoice date column found, use a literal "Date" if present (any case)
+        if not invoice_date_cols:
+            for col in columns:
+                if col.lower().strip().replace("\t", " ") == "date":
+                    invoice_date_cols.append(col)
+                    break
+
         # Fallback: If no client columns found, use common patterns
         if not client_cols:
             for col in columns:
@@ -75,9 +99,14 @@ class BusinessLogicService:
                 if "client" in col_lower or ("production" in col_lower and "house" in col_lower):
                     client_cols.append(col)
         
-        logger.info(f"Column categorization - Due Date: {due_date_cols}, Status: {status_cols}, Client: {client_cols}, Notes: {notes_cols}")
+        logger.info(
+            "Column categorization - "
+            f"Invoice Date: {invoice_date_cols}, Due Date: {due_date_cols}, "
+            f"Status: {status_cols}, Client: {client_cols}, Notes: {notes_cols}"
+        )
         
         return {
+            "invoice_date": invoice_date_cols,
             "due_date": due_date_cols,
             "status": status_cols,
             "client": client_cols,
@@ -129,7 +158,10 @@ class BusinessLogicService:
         column_map = BusinessLogicService._get_column_names(all_available_columns=available_columns)
         
         logger.info(f"[QUERY] Overdue Invoice Query - Searching {len(all_records)} records")
-        logger.info(f"[QUERY] Using columns - Status: {column_map['status']}, Due Date: {column_map['due_date']}, Date: Date")
+        logger.info(
+            f"[QUERY] Using columns - Status: {column_map['status']}, "
+            f"Due Date: {column_map['due_date']}, Invoice Date: {column_map.get('invoice_date', [])}"
+        )
         logger.info(f"[QUERY] Payment terms: {payment_terms_days} days (used if no due date column)")
         
         # Check if we have a due date column or need to calculate from Date
@@ -177,8 +209,8 @@ class BusinessLogicService:
                 if due_date_str:
                     due_date = parse_sheet_date(due_date_str)
             else:
-                # Calculate due date from invoice Date + payment terms
-                invoice_date_str = str(row.get("Date", "")).strip()
+                # Calculate due date from invoice date + payment terms
+                invoice_date_str = BusinessLogicService._find_column_value(row, column_map.get("invoice_date", []))
                 if invoice_date_str:
                     invoice_date = parse_sheet_date(invoice_date_str)
                     if invoice_date:
