@@ -11,3 +11,5 @@ fpdf2
 num2words
 google-generativeai
 httpx
+google-api-python-client
+google-auth-httplib2
