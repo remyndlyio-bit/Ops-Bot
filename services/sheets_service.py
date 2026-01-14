@@ -46,7 +46,8 @@ class SheetsService:
     def get_invoice_data(self, client_name: str, month_name: str, year: int = None) -> List[Dict]:
         """
         Fetches rows from the sheet filtering by client, month and year.
-        Primary match: 'Client Name' column.
+        If client_name is None, returns all rows that match month/year.
+        Primary match: 'Client Name' or 'Production house' columns.
         """
         from utils.date_utils import parse_sheet_date, month_name_to_number
         if not self.client:
@@ -55,7 +56,9 @@ class SheetsService:
 
         try:
             sheet = self.client.open_by_url(self.sheet_url).sheet1
-            all_records = sheet.get_all_records()
+            # Normalize column names to handle trailing spaces (e.g., "Date ")
+            all_records_raw = sheet.get_all_records()
+            all_records = [{str(k).strip(): v for k, v in row.items()} for row in all_records_raw]
             
             target_month = month_name_to_number(month_name)
             from datetime import datetime
@@ -63,24 +66,24 @@ class SheetsService:
             # Support 2-digit year format common in sheets
             if target_year > 2000: target_year -= 2000
             
-            search_term = client_name.strip().lower()
+            search_term = client_name.strip().lower() if client_name else None
             
             logger.info(f"[QUERY] Invoice Data Query - Client: '{client_name}', Month: {month_name}, Year: {target_year + 2000 if target_year < 100 else target_year}")
-            logger.info(f"[QUERY] Searching through {len(all_records)} total records")
-            logger.info(f"[QUERY] Filter Step 1: Client name match (columns: 'Client Name', 'Production house')")
+            logger.info(f"[QUERY] Searching through {len(all_records)} total records (normalized column names)")
+            logger.info(f"[QUERY] Filter Step 1: Client name match (columns: 'Client Name', 'Production house') - skipped if client is None")
             
-            # Step 1: Normalize and Filter by Client Name (Substring match)
-            client_matches = []
-            for row in all_records:
-                clean_row = {str(k).strip(): v for k, v in row.items()}
-                # Map to official column names: "Client Name" or "Production house"
-                row_client_name = str(clean_row.get('Client Name', '')).strip().lower()
-                row_prod_house = str(clean_row.get('Production house', '')).strip().lower()
-
-                if search_term and (search_term in row_client_name or search_term in row_prod_house):
-                    client_matches.append(clean_row)
-            
-            logger.info(f"[QUERY] Client name filter results: {len(client_matches)} matches")
+            # Step 1: Filter by Client Name (Substring match) if provided
+            if search_term:
+                client_matches = []
+                for row in all_records:
+                    row_client_name = str(row.get('Client Name', '')).strip().lower()
+                    row_prod_house = str(row.get('Production house', '')).strip().lower()
+                    if search_term in row_client_name or search_term in row_prod_house:
+                        client_matches.append(row)
+                logger.info(f"[QUERY] Client name filter results: {len(client_matches)} matches")
+            else:
+                client_matches = all_records
+                logger.info(f"[QUERY] Client name filter skipped (no client specified). Using all records: {len(client_matches)}")
             logger.info(f"[QUERY] Filter Step 2: Date/Month match (column: 'Date', target: Month={target_month}, Year={target_year})")
 
             # Step 2: Filter by Date/Month
@@ -90,7 +93,8 @@ class SheetsService:
             skipped_month_mismatch = 0
             
             for row in client_matches:
-                row_date_str = str(row.get('Date', '')).strip()
+                # Handle potential trailing spaces in column name "Date "
+                row_date_str = str(row.get('Date', '') or row.get('Date ', '') or row.get('date', '')).strip()
                 if not row_date_str:
                     skipped_no_date += 1
                     continue

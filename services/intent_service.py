@@ -192,19 +192,23 @@ class IntentService:
                     month = params.get("month")
                     year = params.get("year")
                     logger.info(f"[QUERY] Aggregate Query - Client: {client}, Month: {month}, Year: {year}")
-                    if client and month:
+                    if not month:
+                        action_result = "Please specify a month to calculate the total billing."
+                    else:
                         from services.invoice_service import InvoiceService
                         logger.info(f"[QUERY] Fetching invoice data for aggregation")
                         data = self.sheets.get_invoice_data(client, month, year=year)
                         logger.info(f"[QUERY] Aggregate query results - Found {len(data) if data else 0} records")
                         if not data:
-                            action_result = f"I don't see any billing records for {client} in {month} yet."
+                            if client:
+                                action_result = f"I don't see any billing records for {client} in {month} yet."
+                            else:
+                                action_result = f"I don't see any billing records for {month} yet."
                         else:
-                            summary = InvoiceService.process_invoice_data(data, client, month)
-                            logger.info(f"[QUERY] Aggregation complete - Total: {summary['currency']}{summary['total']:,}, Items: {summary['items']}")
-                            action_result = f"Total billing for {client} in {month} is {summary['currency']}{summary['total']:,}."
-                    else:
-                         action_result = "I couldn't calculate the aggregate. Please specify a client and month."
+                            summary_client = client if client else "All Clients"
+                            summary = InvoiceService.process_invoice_data(data, summary_client, month)
+                            logger.info(f"[QUERY] Aggregation complete - Total: {summary['currency']}{summary['total']:,}, Items: {summary['items']}, Client: {summary_client}")
+                            action_result = f"Total billing for {summary_client} in {month} is {summary['currency']}{summary['total']:,}."
 
         except Exception as e:
             logger.error(f"Execution failure: {e}")
