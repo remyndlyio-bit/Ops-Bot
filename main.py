@@ -44,16 +44,16 @@ async def startup_event():
 def health_check():
     return {"status": "healthy", "version": "1.0.0"}
 
-async def process_and_send_invoice(to_number: str, client_name: str, month: str, platform: str = "whatsapp", chat_id: int = None, bill_number: str = None):
+async def process_and_send_invoice(to_number: str, client_name: str, month: str, platform: str = "whatsapp", chat_id: int = None, bill_number: str = None, year: int = None):
     """
     Background task to generate PDF and send it via WhatsApp or Telegram.
     Follows: Send PDF first, then confirmation message.
     """
     try:
         # 1. Fetch Data
-        data = sheets_service.get_invoice_data(client_name, month)
+        data = sheets_service.get_invoice_data(client_name, month, year=year)
         if not data:
-            logger.warning(f"No data found for invoice generation: {client_name} - {month}")
+            logger.warning(f"No data found for invoice generation: {client_name} - {month} (Year: {year})")
             return
         
         # 2. Process Summary
@@ -123,7 +123,8 @@ async def whatsapp_webhook(
             process_and_send_invoice, 
             From, data["client_name"], data["month"], 
             platform="whatsapp",
-            bill_number=data.get("bill_number")
+            bill_number=data.get("bill_number"),
+            year=data.get("year")
         )
 
     return PlainTextResponse("OK")
@@ -151,7 +152,8 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
                 process_and_send_invoice, 
                 None, data_inv["client_name"], data_inv["month"], 
                 platform="telegram", chat_id=chat_id,
-                bill_number=data_inv.get("bill_number")
+                bill_number=data_inv.get("bill_number"),
+                year=data_inv.get("year")
             )
 
         return {"status": "ok"}
