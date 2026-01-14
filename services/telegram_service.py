@@ -18,6 +18,7 @@ class TelegramService:
         }
         async with httpx.AsyncClient() as client:
             try:
+                logger.info(f"[TELEGRAM] Sending text -> ChatID={chat_id}, Text={safe_text}")
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 return response.json()
@@ -36,6 +37,7 @@ class TelegramService:
                 with open(file_path, "rb") as f:
                     files = {"document": f}
                     data = {"chat_id": chat_id, "caption": caption}
+                    logger.info(f"[TELEGRAM] Sending document -> ChatID={chat_id}, FilePath={file_path}, Caption={caption}")
                     response = await client.post(url, data=data, files=files)
                     response.raise_for_status()
                     return response.json()

@@ -131,7 +131,7 @@ class BusinessLogicService:
     def get_approaching_due_reminder_targets(
         all_records: List[Dict],
         approaching_days: int = 7,
-        payment_terms_days: int = 30
+        payment_terms_days: int = 0
     ) -> List[Dict]:
         """
         Returns rows that should receive a first payment reminder:
@@ -139,7 +139,8 @@ class BusinessLogicService:
         - has Email
         - FirstReminderSent not truthy
         - due date is within [now, now + approaching_days]
-        If no explicit due date column exists, uses invoice date + payment_terms_days.
+        If no explicit due date column exists, uses Date column as the due date
+        (optionally shifted by payment_terms_days if configured, default 0).
 
         Expected each record to include '_row' so we can update the sheet.
         """

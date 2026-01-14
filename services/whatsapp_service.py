@@ -27,12 +27,13 @@ class WhatsAppService:
             if not to_number.startswith("whatsapp:"):
                 to_number = f"whatsapp:{to_number}"
 
+            logger.info(f"[WHATSAPP] Sending text -> To={to_number}, Body={body}")
             message = self.client.messages.create(
                 from_=self.from_number,
                 body=body,
                 to=to_number
             )
-            logger.info(f"Message sent successfully. SID: {message.sid}")
+            logger.info(f"[WHATSAPP] Message sent successfully. SID: {message.sid}")
             return message.sid
         except Exception as e:
             logger.error(f"Failed to send WhatsApp message: {e}")
@@ -49,12 +50,14 @@ class WhatsAppService:
             if not to_number.startswith("whatsapp:"):
                 to_number = f"whatsapp:{to_number}"
 
+            logger.info(f"[WHATSAPP] Sending media -> To={to_number}, MediaURL={media_url}, Body={body}")
             message = self.client.messages.create(
                 from_=self.from_number,
                 body=body,
                 media_url=[media_url],
                 to=to_number
             )
+            logger.info(f"[WHATSAPP] Media message sent successfully. SID: {message.sid}")
             return message.sid
         except Exception as e:
             logger.error(f"Failed to send PDF message: {e}")

@@ -63,9 +63,11 @@ class IntentService:
                 records = self.sheets.get_all_records_with_row_numbers()
                 logger.info(f"[REMINDER] Loaded {len(records)} records for reminder scan")
 
-                # Defaults; can be expanded later to parse days from params/message
-                approaching_days = 7
-                payment_terms_days = 30
+                # Use 'days' from intent parameters if provided, else default to 7
+                days_param = params.get("days")
+                approaching_days = int(days_param) if isinstance(days_param, int) and days_param > 0 else 7
+                # For now we treat sheet 'Date' as the due date (no extra payment terms shift)
+                payment_terms_days = 0
 
                 targets = logic.get_approaching_due_reminder_targets(
                     records,
