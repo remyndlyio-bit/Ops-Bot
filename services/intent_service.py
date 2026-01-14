@@ -12,178 +12,66 @@ class IntentService:
 
     def process_request(self, user_id: str, message: str) -> Dict:
         """
-        Coordinates the Operations Architecture using single-call Gemini parsing.
+        Coordinates the Three-Stage Architecture:
+        1. Router: Classify message (action, chat, mixed)
+        2. Action Parser: Extract intent JSON
+        3. Backend Execution: Execute Sheets/Invoices
+        4. Conversational Responder: Friendly reply
         """
-        from services.business_logic_service import BusinessLogicService
-        logic = BusinessLogicService()
-
-        # 1. Single-call Intent & Parameter Parsing
-        result = self.gemini.parse_user_intent(message)
+        memory_context = self.memory.get_memory_context(user_id)
         
-        # Validation Layer
-        operation = result.get("operation")
-        params = result.get("parameters")
-        entity = result.get("entity")
+        # Stage 1: Router
+        category = self.gemini.route_message(message)
+        logger.info(f"Router category: {category}")
 
-        # Handle explicit Gemini API errors
-        if operation == "GEMINI_ERROR":
-            error_msg = result.get("error_message", "Unknown Gemini API error")
-            return {
-                "operation": "GEMINI_ERROR",
-                "response": f"{error_msg}",
-                "trigger_invoice": False
-            }
-
-        # Defensive Validation
-        is_valid = True
-        fail_reason = ""
-        
-        if not operation:
-            is_valid = False
-            fail_reason = "Missing 'operation' field"
-        elif operation == "UNKNOWN":
-            is_valid = False
-            fail_reason = "Operation is UNKNOWN"
-        elif params is None:
-            is_valid = False
-            fail_reason = "Missing 'parameters' object"
-
-        if not is_valid:
-            logger.warning(f"Validation failed: {fail_reason} | Raw response: {result}")
-            return {
-                "operation": "UNKNOWN",
-                "response": "Could you please clarify what you’d like me to do?",
-                "trigger_invoice": False
-            }
-
-        # Direct reply for Small Talk
-        if operation == "SMALL_TALK":
-            return {
-                "operation": "SMALL_TALK",
-                "response": "Hello! I'm your Operations Bot. How can I help you today?",
-                "trigger_invoice": False
-            }
-
-        logger.info(f"Valid Operation: {operation} | Entity: {entity}")
-        logger.info(f"Parameters: {params}")
-
-        # 2. Execution
-        action_result = "I don't see this information in my records yet."
+        action_result = "No specific action was required."
         trigger_invoice = False
         invoice_data = {}
+        
+        # Stage 2: Action Parser
+        if category in ["action", "mixed"]:
+            intent_data = self.gemini.parse_action(message, memory_context)
+            action = intent_data.get("action")
+            sheet = intent_data.get("sheet", "Leads")
+            data = intent_data.get("data")
 
-        try:
-            # Sheets data often needed for READ and AGGREGATE operations
-            all_records = []
-            if operation in ["AGGREGATE_ENTITY", "READ_ENTITY", "ACTION_TRIGGER"]:
-                try:
-                    sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
-                    all_records = sheet.get_all_records()
-                    logger.info(f"Fetched {len(all_records)} records from sheet.")
-                except Exception as se:
-                    logger.error(f"Sheet access failed: {se}")
-
-            # 1. High-Priority Retrieval Path (Handle "Get me X Invoice")
-            is_retrieval_query = any(word in message.lower() for word in ["get", "download", "send", "give", "show", "retrieve", "fetch"])
-            if is_retrieval_query and (entity == "invoice" or "invoice" in message.lower()):
-                logger.info("Retrying Invoice Retrieval Path...")
-                from services.invoice_service import InvoiceService
-                resolved = InvoiceService.resolve_invoice_pdf(params, all_records)
-                if resolved["status"] == "found":
-                    trigger_invoice = True
-                    invoice_data = {
-                        "client_name": resolved["client"],
-                        "month": resolved["month"],
-                        "bill_number": params.get("bill_number")
-                    }
-                    action_result = f"Here is the invoice for {resolved['client']} {resolved['month'] or ''}."
-                    # We found the invoice, so we can return early or set it as result
-                    logger.info(f"Invoice resolved: {action_result}")
+            # Stage 3: Backend Execution
+            if action == "add_row" and data:
+                action_result = self.sheets.add_row(sheet, data)
+            elif action == "find_row" and data:
+                query = data[0] if isinstance(data, list) else str(data)
+                action_result = self.sheets.find_row(sheet, query)
+            elif action == "update_row" and data:
+                query = intent_data.get("query", "")
+                action_result = self.sheets.update_row(sheet, query, data)
+            elif action == "delete_row" and data:
+                query = data[0] if isinstance(data, list) else str(data)
+                action_result = self.sheets.delete_row(sheet, query)
+            elif action == "summarize":
+                # Handle general questions like "total number of clients"
+                summary = self.sheets.get_sheet_summary(sheet)
+                action_result = f"Data Summary: {json.dumps(summary)}"
+            elif action in ["generate_invoice", "get_summary"]:
+                client_name = intent_data.get("client_name")
+                month = intent_data.get("month")
+                if client_name and month:
+                    from services.invoice_service import InvoiceService
+                    sheet_data = self.sheets.get_invoice_data(client_name, month)
+                    summary = InvoiceService.process_invoice_data(sheet_data, client_name, month)
+                    action_result = InvoiceService.format_summary_message(summary)
+                    if action == "generate_invoice" and summary.get("found"):
+                        trigger_invoice = True
+                        invoice_data = {"client_name": client_name, "month": month}
                 else:
-                    action_result = resolved["message"]
-                    logger.warning(f"Invoice not resolved: {action_result}")
+                    action_result = "I couldn't identify the client or month for the invoice."
 
-            # 2. Standard Operation Path (If not already handled or fallback needed)
-            if action_result == "I don't see this information in my records yet.":
-                if operation == "READ_ENTITY":
-                    name = params.get("client_name")
-                    if entity == "bank_details":
-                        action_result = "Our bank details: HDFC Bank, Acct: 12345678, IFSC: HDFC0001234." # Mock
-                    elif entity == "gst_details":
-                        action_result = "GST Details: 27AAAAA0000A1Z5." # Mock
-                    elif "overdue" in message.lower():
-                        overdue = logic.get_overdue_invoices(all_records)
-                        action_result = f"Found {len(overdue)} overdue items."
-                    elif name:
-                        results = [r for r in all_records if any(name.lower() in str(v).lower() for v in r.values())]
-                        if results:
-                            action_result = f"Found {len(results)} records matching '{name}'."
-                        else:
-                            action_result = f"I don't see any records for {name} in my current sheet."
-                    else:
-                        action_result = "I couldn't find the specific information you're looking for. Could you please provide more details like a client name or bill number?"
+            # Update last used sheet in memory
+            self.memory.update_user_memory(user_id, {"last_sheet": sheet})
 
-                elif operation == "AGGREGATE_ENTITY":
-                    client = params.get("client_name")
-                    month = params.get("month")
-                    period = params.get("period") or "month"
-                    
-                    if entity in ["payment", "invoice", "client"] or "billing" in message.lower() or "amount" in message.lower():
-                        if client and month:
-                            from services.invoice_service import InvoiceService
-                            data = self.sheets.get_invoice_data(client, month, year=params.get("year"))
-                            if not data:
-                                action_result = f"I don't see any billing records for {client} in {month} yet."
-                            else:
-                                summary = InvoiceService.process_invoice_data(data, client, month)
-                                action_result = f"Total billing for {client} in {month} is {summary['currency']}{summary['total']:,}."
-                        else:
-                            total_sum = logic.calculate_total_billing(all_records, period)
-                            action_result = f"Total billing for this {period} is ₹{total_sum:,.2f}."
-                    elif "outstanding" in message.lower():
-                        total_out = sum([float(str(r.get('Fees', '0')).replace('₹', '').replace(',', '').strip() or 0) 
-                                       for r in all_records if str(r.get('Status', '')).lower() != 'paid'])
-                        action_result = f"Total outstanding balance is ₹{total_out:,.2f}."
-
-                elif operation == "ACTION_TRIGGER":
-                    client = params.get("client_name")
-                    month = params.get("month")
-                    if client and month:
-                        from services.invoice_service import InvoiceService
-                        data = self.sheets.get_invoice_data(client, month, year=params.get("year"))
-                        summary = InvoiceService.process_invoice_data(data, client, month)
-                        if summary.get("found"):
-                            trigger_invoice = True
-                            invoice_data = {"client_name": client, "month": month}
-                            action_result = f"Generating invoice for {client} ({month})."
-                        else:
-                            action_result = f"No records found for {client} in {month}."
-
-                elif operation == "SCHEDULE_REMINDER":
-                    name = params.get("client_name") or "the user"
-                    month = params.get("month") or "as requested"
-                    action_result = f"Reminder set for {name} regarding {month}."
-
-        except Exception as e:
-            logger.error(f"Execution failure: {e}")
-            action_result = "I encountered an error accessing the data records."
-            import traceback
-            logger.error(traceback.format_exc())
-
-        # 3. Final Response Phrasing (Only for business operations)
-        # Skip LLM if no data was found or error occurred
-        fallback = "I don't see this information in my records yet."
-        if trigger_invoice:
-            # Explicitly inform the user that generation is starting
-            response = f"Confirmed! I've found the record for {invoice_data.get('client_name')}. I'm generating the invoice now... 📄"
-        elif action_result.startswith("I don't see") or action_result == "I encountered an error accessing the data records.":
-            response = action_result
-        else:
-            response = self.gemini.generate_response(message, action_result)
-
+        # Stage 4: Conversational Response
+        response = self.gemini.generate_response(message, action_result, memory_context)
+        
         return {
-            "operation": operation,
-            "parameters": params,
             "response": response,
             "trigger_invoice": trigger_invoice,
             "invoice_data": invoice_data

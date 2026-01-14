@@ -50,144 +50,54 @@ class GeminiService:
         logger.error(f"Failed all models. Errors: {errors}")
         return None
 
-    def parse_user_intent(self, message: str) -> dict:
-        """Single constrained call for Intent and Parameter parsing."""
-        if not self.model: 
-            logger.error("Gemini model not initialized.")
-            return {
-                "operation": "GEMINI_ERROR",
-                "entity": None,
-                "parameters": {},
-                "error_message": "Gemini model not initialized (check API key or quota)"
-            }
-        
+    def route_message(self, message: str) -> str:
+        """Stage 1: Router - Classify message into action, chat, or mixed."""
+        if not self.model: return "chat"
+        prompt = f"Classify this WhatsApp/Telegram message as 'action', 'chat', or 'mixed'. Return ONLY one word.\n\nMessage: {message}"
+        try:
+            response = self.model.generate_content(prompt, generation_config={"max_output_tokens": 5})
+            category = response.text.strip().lower()
+            return category if category in ["action", "chat", "mixed"] else "chat"
+        except Exception:
+            return "chat"
+
+    def parse_action(self, message: str, memory_context: str) -> dict:
+        """Stage 2: Action Parser - Extract structured intent."""
+        if not self.model: return {}
         system_prompt = (
-            "You are a specialized Intent and Parameter Parser. Return ONLY valid JSON.\n"
-            "STRICT SCHEMA (MUST RETURN ALL KEYS, NO OMISSIONS):\n"
-            "{\n"
-            "  \"operation\": \"READ_ENTITY | AGGREGATE_ENTITY | CREATE_ENTITY | UPDATE_ENTITY | ACTION_TRIGGER | SCHEDULE_REMINDER | SMALL_TALK | UNKNOWN\",\n"
-            "  \"entity\": \"client | invoice | job | payment | project | bank_details | gst_details | reminder | communication_log | null\",\n"
-            "  \"parameters\": {\n"
-            "    \"client_name\": string | null,\n"
-            "    \"bill_number\": string | null,\n"
-            "    \"month\": string | null,\n"
-            "    \"year\": number | null,\n"
-            "    \"period\": \"day | month | quarter | year | null\",\n"
-            "    \"days\": number | null\n"
-            "  }\n"
-            "}\n\n"
-            "EXAMPLES:\n"
-            "1. 'What is the total biling for April for Garnier?'\n"
-            "   -> {\"operation\": \"AGGREGATE_ENTITY\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
-            "2. 'Send me invoice #101'\n"
-            "   -> {\"operation\": \"READ_ENTITY\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": null, \"bill_number\": \"101\", \"month\": null, \"year\": null, \"period\": null, \"days\": null}}\n\n"
-            "RULES:\n"
-            "1. Handle common typos (e.g., 'biling' -> billing).\n"
-            "2. NEVER omit any keys listed in the schema.\n"
-            "3. Use null for any values you cannot extract.\n"
-            "4. Return ONLY valid JSON."
+            "You are an Action Parser. Return ONLY JSON. "
+            "Allowed actions: add_row, find_row, update_row, delete_row, generate_invoice, get_summary, summarize. "
+            "Extract: {action, sheet, data, client_name, month}. "
+            f"Context: {memory_context}"
         )
-        
         try:
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
-            
-            # Combine instructions and user input into a single 'user' block for API compatibility
             response = self.model.generate_content(
-                contents=[
-                    {
-                        "role": "user",
-                        "parts": [
-                            f"{system_prompt}\n\nUser message:\n{message}"
-                        ]
-                    }
-                ],
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "temperature": 0
-                },
-                safety_settings=safety_settings
+                f"{system_prompt}\n\nMessage: {message}",
+                generation_config={"response_mime_type": "application/json"}
             )
-            
-            raw_text = response.text.strip()
-            logger.info(f"Raw Gemini Intent Response: {raw_text}")
-
-            # Clean possible markdown code blocks
-            if raw_text.startswith("```"):
-                lines = raw_text.splitlines()
-                if lines[0].startswith("```"): lines = lines[1:]
-                if lines and lines[-1].startswith("```"): lines = lines[:-1]
-                raw_text = "\n".join(lines).strip()
-
-            try:
-                parsed = json.loads(raw_text)
-                return parsed
-            except json.JSONDecodeError as je:
-                logger.error(f"JSON Parsing failed: {je} | Raw: {raw_text}")
-                return {
-                    "operation": "GEMINI_ERROR",
-                    "entity": None,
-                    "parameters": {},
-                    "error_message": f"Failed to parse Gemini JSON response: {str(je)}"
-                }
-
+            return json.loads(response.text.strip())
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"Gemini Runtime Error: {error_msg}")
-            
-            # Clean up quota errors for the user
-            friendly_error = error_msg
-            if "quota" in error_msg.lower() or "429" in error_msg or "resource_exhausted" in error_msg.lower():
-                friendly_error = "Gemini API quota exceeded for the day. Please try again later or check your billing."
+            logger.error(f"Action parsing failed: {e}")
+            return {}
 
-            return {
-                "operation": "GEMINI_ERROR",
-                "entity": None,
-                "parameters": {},
-                "error_message": friendly_error
-            }
-
-    def generate_response(self, user_message: str, backend_result: str) -> str:
-        """Stage 3: Professional Phrasing with safety guards."""
-        fallback = "I don't see this information in my records yet."
-        
-        if not self.model or not backend_result or backend_result == fallback:
-            return backend_result or fallback
-        
+    def generate_response(self, user_message: str, action_result: str, memory_context: str) -> str:
+        """Stage 3: Conversational Responder - Human-like reply."""
+        if not self.model: return "Sorry, I'm having trouble connecting."
         prompt = (
-            "You are a professional business assistant. Phrase a response based ONLY on this result.\n"
-            f"Result: {backend_result}\n"
-            f"User asked: {user_message}\n"
-            "Rules: Concise, professional, human-like. NO technical jargon. If information is missing/error, say: 'I don't see this information in my records yet.'"
+            "You are a friendly senior assistant for an Ops Bot. "
+            f"User Context: {memory_context}\n"
+            f"Fact-based Backend Result: {action_result}\n"
+            f"User Message: {user_message}\n"
+            "Instructions: Respond concisely and naturally based on the result. Never mention APIs, JSON, or internal logic."
         )
-
         try:
-            # Generate content synchronously (waits for full completion)
             response = self.model.generate_content(
-                prompt,
-                generation_config={"max_output_tokens": 150, "temperature": 0.2}
+                prompt, 
+                generation_config={"max_output_tokens": 150, "temperature": 0.3}
             )
-            
-            # Ensure generate_content fully completed by checking response.text
-            text = response.text.strip()
-            length = len(text)
-            
-            logger.info(f"LLM Response (len={length}): {text}")
-
-            # Minimum length guard (20 chars)
-            if length < 20:
-                logger.warning(f"LLM response discarded (too short: {length} chars). Using fallback.")
-                return backend_result
-
-            return text
-        except Exception as e:
-            logger.error(f"Response Generation failed (Stage 3): {e}")
-            return backend_result or fallback
+            return response.text.strip()
+        except Exception:
+            return str(action_result)
 
     # Keep compatibility or legacy methods if needed, but the user wants a refactor.
     # The analyze_data and parse_user_message are replaced by this new flow.
-
