@@ -328,7 +328,7 @@ class BusinessLogicService:
         return total
 
     @staticmethod
-    def format_overdue_invoices_response(overdue_invoices: List[Dict]) -> str:
+    def format_overdue_invoices_response(overdue_invoices: List[Dict], payment_terms_days: int = 30) -> str:
         """
         Formats overdue invoices into a readable response.
         Includes client names, due dates, and notes if available.
@@ -339,16 +339,57 @@ class BusinessLogicService:
         # Extract column names from the first invoice
         available_columns = list(overdue_invoices[0].keys())
         column_map = BusinessLogicService._get_column_names(all_available_columns=available_columns)
-        response_parts = [f"I found {len(overdue_invoices)} invoice(s) that have passed their due date:\n"]
+        
+        # Determine if we need to calculate due dates
+        has_due_date_column = len(column_map["due_date"]) > 0
+        
+        if len(overdue_invoices) == 1:
+            response_parts = [f"One invoice is past due:\n"]
+        else:
+            response_parts = [f"I found {len(overdue_invoices)} invoices that have passed their due date:\n"]
         
         for idx, invoice in enumerate(overdue_invoices, 1):
-            # Get client name
+            # Get client name - try multiple column variations
             client = BusinessLogicService._find_column_value(invoice, column_map["client"])
+            if not client:
+                # Fallback: try direct column access with various name formats
+                for col_name in ["Client Name", "Production-House", "Production house", "Client", "client"]:
+                    if col_name in invoice:
+                        client = str(invoice[col_name]).strip()
+                        if client:
+                            break
+            
             client_display = client if client else "Unknown Client"
             
-            # Get due date
-            due_date_str = BusinessLogicService._find_column_value(invoice, column_map["due_date"])
-            due_date_display = due_date_str if due_date_str else "Unknown Date"
+            # Get due date - calculate if needed
+            due_date_display = None
+            invoice_date_str = None
+            
+            if has_due_date_column:
+                # Use explicit due date column
+                due_date_str = BusinessLogicService._find_column_value(invoice, column_map["due_date"])
+                if due_date_str:
+                    from utils.date_utils import parse_sheet_date
+                    due_date = parse_sheet_date(due_date_str)
+                    if due_date:
+                        due_date_display = due_date.strftime('%Y-%m-%d')
+            else:
+                # Calculate due date from invoice date + payment terms
+                invoice_date_str = BusinessLogicService._find_column_value(invoice, column_map.get("invoice_date", []))
+                if not invoice_date_str:
+                    # Fallback: try direct "Date" column
+                    invoice_date_str = invoice.get("Date") or invoice.get("date")
+                
+                if invoice_date_str:
+                    from utils.date_utils import parse_sheet_date
+                    from datetime import timedelta
+                    invoice_date = parse_sheet_date(str(invoice_date_str))
+                    if invoice_date:
+                        due_date = invoice_date + timedelta(days=payment_terms_days)
+                        due_date_display = due_date.strftime('%Y-%m-%d')
+            
+            if not due_date_display:
+                due_date_display = "Unknown Date"
             
             # Get bill number if available
             bill_no = invoice.get("Bill-No") or invoice.get("Bill No") or invoice.get("BillNo")
@@ -358,8 +399,15 @@ class BusinessLogicService:
             notes = BusinessLogicService._find_column_value(invoice, column_map["notes"])
             notes_display = f"\n   Notes: {notes}" if notes else ""
             
-            response_parts.append(f"{idx}. {client_display}{bill_display}")
-            response_parts.append(f"   Due Date: {due_date_display}{notes_display}")
+            # Format response with client name prominently displayed
+            if len(overdue_invoices) == 1:
+                # Single invoice - show client name in the main message
+                response_parts[0] = f"One invoice is past due for {client_display}:\n"
+                response_parts.append(f"   Due Date: {due_date_display}{bill_display}{notes_display}")
+            else:
+                # Multiple invoices - list format
+                response_parts.append(f"{idx}. {client_display}{bill_display}")
+                response_parts.append(f"   Due Date: {due_date_display}{notes_display}")
         
         return "\n".join(response_parts)
 

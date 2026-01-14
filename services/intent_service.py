@@ -118,7 +118,7 @@ class IntentService:
                         }
                     
                     overdue_invoices = logic.get_overdue_invoices(all_records)
-                    action_result = logic.format_overdue_invoices_response(overdue_invoices)
+                    action_result = logic.format_overdue_invoices_response(overdue_invoices, payment_terms_days=30)
                     logger.info(f"Found {len(overdue_invoices)} overdue invoices")
             
             # Handle SMALL_TALK only if not an invoice retrieval or overdue query
