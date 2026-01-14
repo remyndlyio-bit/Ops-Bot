@@ -1,13 +1,11 @@
 import os
 import json
 import base64
-from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from utils.logger import logger
@@ -19,17 +17,15 @@ class GmailService:
 
     Env (required):
     - GOOGLE_OAUTH_CLIENT_JSON  (stringified OAuth client JSON; must include client_id, client_secret, auth_uri, token_uri)
+    - GOOGLE_TOKEN  (stringified OAuth token JSON from gmail_token.json)
 
     Optional:
     - GMAIL_FROM_EMAIL (defaults to the Gmail account associated with the token)
     - GMAIL_FROM_NAME
     - EMAIL_DRY_RUN ("true"/"1" to log instead of sending)
-
-    Tokens are stored in a local file: gmail_token.json
     """
 
     GMAIL_SCOPE = ["https://www.googleapis.com/auth/gmail.send"]
-    TOKEN_PATH = Path("gmail_token.json")
 
     def __init__(self):
         self.from_email = (os.getenv("GMAIL_FROM_EMAIL") or "").strip()
@@ -61,18 +57,22 @@ class GmailService:
 
     def _get_creds(self) -> Credentials:
         """
-        Load creds from token file if valid; otherwise run local OAuth flow and save.
+        Load creds from GOOGLE_TOKEN env variable and refresh if needed.
         """
         if not self.client_config:
             return None
 
-        creds = None
-        if self.TOKEN_PATH.exists():
-            try:
-                creds = Credentials.from_authorized_user_file(str(self.TOKEN_PATH), scopes=self.GMAIL_SCOPE)
-            except Exception as e:
-                logger.warning(f"[GMAIL] Failed to load existing token file: {e}")
-                creds = None
+        token_json = os.getenv("GOOGLE_TOKEN")
+        if not token_json:
+            logger.error("[GMAIL] Missing env GOOGLE_TOKEN")
+            return None
+
+        try:
+            token_data = json.loads(token_json)
+            creds = Credentials.from_authorized_user_info(token_data, scopes=self.GMAIL_SCOPE)
+        except Exception as e:
+            logger.error(f"[GMAIL] Failed to parse GOOGLE_TOKEN: {e}")
+            return None
 
         if creds and creds.valid:
             return creds
@@ -80,27 +80,14 @@ class GmailService:
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                self._save_token(creds)
+                logger.info("[GMAIL] Token refreshed successfully")
                 return creds
             except Exception as e:
-                logger.warning(f"[GMAIL] Token refresh failed: {e}")
+                logger.error(f"[GMAIL] Token refresh failed: {e}")
+                return None
 
-        # Run OAuth flow
-        try:
-            flow = InstalledAppFlow.from_client_config(self.client_config, self.GMAIL_SCOPE)
-            creds = flow.run_local_server(port=0)
-            self._save_token(creds)
-            return creds
-        except Exception as e:
-            logger.error(f"[GMAIL] OAuth flow failed: {e}")
-            return None
-
-    def _save_token(self, creds: Credentials):
-        try:
-            self.TOKEN_PATH.write_text(creds.to_json())
-            logger.info(f"[GMAIL] Saved token to {self.TOKEN_PATH}")
-        except Exception as e:
-            logger.error(f"[GMAIL] Failed to save token: {e}")
+        logger.error("[GMAIL] Token is invalid and cannot be refreshed")
+        return None
 
     def _get_service(self):
         if self._service:
