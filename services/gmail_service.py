@@ -21,7 +21,8 @@ class GmailService:
 
     Optional:
     - GMAIL_FROM_EMAIL (defaults to the Gmail account associated with the token)
-    - GMAIL_FROM_NAME
+    - GMAIL_FROM_NAME (defaults to "FIRST_USER")
+    - REMINDER_BCC (semicolon-separated email addresses to BCC on all reminder emails)
     - EMAIL_DRY_RUN ("true"/"1" to log instead of sending)
     """
 
@@ -29,7 +30,8 @@ class GmailService:
 
     def __init__(self):
         self.from_email = (os.getenv("GMAIL_FROM_EMAIL") or "").strip()
-        self.from_name = (os.getenv("GMAIL_FROM_NAME") or "Ops Bot").strip()
+        self.from_name = (os.getenv("GMAIL_FROM_NAME") or "FIRST_USER").strip()
+        self.reminder_bcc = (os.getenv("REMINDER_BCC") or "").strip()
         self.dry_run = (os.getenv("EMAIL_DRY_RUN") or "").strip().lower() in {"1", "true", "yes", "y"}
 
         self.client_config = self._load_client_config()
@@ -109,18 +111,25 @@ class GmailService:
         raw_bytes = msg.as_bytes()
         return base64.urlsafe_b64encode(raw_bytes).decode("utf-8")
 
-    def send_payment_reminder(self, to_email: str, client_name: str, due_date_str: str, details: str = "") -> bool:
-        subject = f"Payment Reminder - {client_name}"
+    def send_payment_reminder(
+        self, 
+        to_email: str, 
+        client_name: str, 
+        invoice_number: str,
+        amount_due: str,
+        due_date_str: str
+    ) -> bool:
+        subject = f"Payment Reminder – {invoice_number}"
         body = (
             f"Hi {client_name},\n\n"
-            f"This is a friendly reminder that your payment is due on {due_date_str}.\n"
+            f"This is a friendly reminder that payment for {invoice_number} in the amount of {amount_due} is due on {due_date_str}.\n\n"
+            f"Should you have any questions or require additional information, feel free to reach out.\n\n"
+            f"Thank you for your cooperation.\n\n"
+            f"Best regards,\n{self.from_name}\n"
         )
-        if details:
-            body += f"\nDetails:\n{details}\n"
-        body += "\nIf you’ve already paid, please ignore this message.\n\nThanks,\nOperations\n"
-        return self.send_email(to_email=to_email, subject=subject, body=body)
+        return self.send_email(to_email=to_email, subject=subject, body=body, bcc=self.reminder_bcc)
 
-    def send_email(self, to_email: str, subject: str, body: str) -> bool:
+    def send_email(self, to_email: str, subject: str, body: str, bcc: str = None) -> bool:
         if not to_email:
             logger.error("[GMAIL] Missing recipient email")
             return False
@@ -129,13 +138,18 @@ class GmailService:
         if not svc:
             return False
 
-        logger.info(f"[GMAIL] Preparing email -> To={to_email} | Subject={subject} | DryRun={self.dry_run}")
+        bcc_list = [email.strip() for email in bcc.split(";")] if bcc else []
+        bcc_str = ", ".join(bcc_list) if bcc_list else None
+
+        logger.info(f"[GMAIL] Preparing email -> To={to_email} | BCC={bcc_str} | Subject={subject} | DryRun={self.dry_run}")
         if self.dry_run:
             logger.info(f"[GMAIL] DRY RUN BODY:\n{body}")
             return True
 
         msg = MIMEMultipart()
         msg["To"] = to_email
+        if bcc_str:
+            msg["Bcc"] = bcc_str
         from_addr = self.from_email or "me"
         msg["From"] = f"{self.from_name} <{from_addr}>"
         msg["Subject"] = subject
@@ -144,7 +158,7 @@ class GmailService:
         try:
             raw = self._encode_message(msg)
             svc.users().messages().send(userId="me", body={"raw": raw}).execute()
-            logger.info(f"[GMAIL] Sent email -> To={to_email}")
+            logger.info(f"[GMAIL] Sent email -> To={to_email} | BCC={bcc_str}")
             return True
         except Exception as e:
             logger.error(f"[GMAIL] Failed to send email -> To={to_email} | Error={e}")

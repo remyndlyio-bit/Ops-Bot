@@ -77,14 +77,20 @@ class IntentService:
 
                 sent = 0
                 failed = 0
+                sent_details = []
+                
                 for t in targets:
                     to_email = t["email"]
                     client = t["client"]
+                    invoice_number = t.get("invoice_number", "N/A")
+                    amount_due = t.get("amount_due", "₹0.00")
                     due_date_str = t["due_date"].strftime("%Y-%m-%d")
 
                     ok = self.email.send_payment_reminder(
                         to_email=to_email,
                         client_name=client,
+                        invoice_number=invoice_number,
+                        amount_due=amount_due,
                         due_date_str=due_date_str,
                     )
                     if ok:
@@ -93,19 +99,28 @@ class IntentService:
                         if not upd_ok:
                             logger.error(f"[REMINDER] Email sent but failed to mark FirstReminderSent for row {t['_row']}")
                         sent += 1
+                        sent_details.append(f"{client} ({invoice_number}) - {to_email}")
                     else:
                         failed += 1
 
                 if not targets:
                     return {
                         "operation": "ACTION_TRIGGER",
-                        "response": f"I don’t see any clients with payments due in the next {approaching_days} days that need a first reminder.",
+                        "response": f"I don't see any clients with payments due in the next {approaching_days} days that need a first reminder.",
                         "trigger_invoice": False,
                     }
 
+                response_parts = [f"Sent {sent} payment reminder(s)."]
+                if sent_details:
+                    response_parts.append("\n\nClients notified:")
+                    for detail in sent_details:
+                        response_parts.append(f"• {detail}")
+                if failed > 0:
+                    response_parts.append(f"\nFailed: {failed}.")
+                
                 return {
                     "operation": "ACTION_TRIGGER",
-                    "response": f"Sent {sent} payment reminder(s).{'' if failed == 0 else f' Failed: {failed}.'}",
+                    "response": "\n".join(response_parts),
                     "trigger_invoice": False,
                 }
 

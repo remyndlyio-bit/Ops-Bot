@@ -197,12 +197,32 @@ class BusinessLogicService:
                 continue
 
             if now <= due_date <= window_end:
+                # Get invoice number (Bill-No, Bill No, or BillNo)
+                invoice_number = (
+                    str(row.get("Bill-No", "")).strip() or 
+                    str(row.get("Bill No", "")).strip() or 
+                    str(row.get("BillNo", "")).strip() or 
+                    "N/A"
+                )
+                
+                # Get amount due (Fees column)
+                fees_raw = str(row.get("Fees", "0")).strip()
+                # Remove currency symbols and commas
+                fees_clean = fees_raw.replace("₹", "").replace(",", "").replace("$", "").strip()
+                try:
+                    amount = float(fees_clean) if fees_clean else 0.0
+                    amount_due = f"₹{amount:,.2f}" if amount > 0 else "₹0.00"
+                except (ValueError, TypeError):
+                    amount_due = fees_raw if fees_raw else "₹0.00"
+                
                 targets.append(
                     {
                         "_row": int(row_num),
                         "client": client,
                         "email": email_val,
                         "due_date": due_date,
+                        "invoice_number": invoice_number,
+                        "amount_due": amount_due,
                     }
                 )
 
