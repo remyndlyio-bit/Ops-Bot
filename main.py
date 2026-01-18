@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Form, BackgroundTasks, Request # Added Request for Telegram webhook
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
@@ -20,6 +20,11 @@ app = FastAPI(title="Ops Bot - WhatsApp & Telegram") # Updated FastAPI title
 # Mount static files to serve generated PDFs
 os.makedirs("output", exist_ok=True)
 app.mount("/static", StaticFiles(directory="output"), name="static")
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Return empty response to remove favicon from browser tab."""
+    return Response(status_code=204)
 
 # Initialize Services
 sheets_service = SheetsService()
