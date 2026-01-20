@@ -4,20 +4,31 @@ from typing import Optional
 
 def parse_sheet_date(date_str: str) -> Optional[datetime]:
     """
-    Centrally parses Google Sheet dates formatted as DD/MM/YY.
+    Centrally parses Google Sheet dates.
+    Primary format: YYYY-MM-DD
+    Fallback formats: DD/MM/YY, DD/MM/YYYY (for backward compatibility)
     Returns a datetime object or None if parsing fails.
     """
     if not date_str:
         return None
     
     date_str = str(date_str).strip()
+    
+    # Try YYYY-MM-DD format first (new format)
     try:
-        # Enforce exact format %d/%m/%y
+        parsed_date = datetime.strptime(date_str, "%Y-%m-%d")
+        return parsed_date
+    except ValueError:
+        pass
+    
+    # Fallback to old formats for backward compatibility
+    try:
+        # Try DD/MM/YY format
         parsed_date = datetime.strptime(date_str, "%d/%m/%y")
         return parsed_date
     except ValueError:
         try:
-            # Fallback for %d/%m/%Y if user uses 4-digit year occasionally
+            # Try DD/MM/YYYY format
             return datetime.strptime(date_str, "%d/%m/%Y")
         except ValueError:
             logger.warning(f"Failed to parse date string: {date_str}")
