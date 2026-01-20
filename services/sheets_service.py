@@ -72,33 +72,42 @@ class SheetsService:
             logger.info(f"[QUERY] Searching through {len(all_records)} total records (normalized column names)")
             logger.info(f"[QUERY] Filter Step 1: Client name match (columns: 'Client Name', 'Production house') - skipped if client is None")
             
+            # Get column mappings from BusinessLogicService (respects COLUMN_NAMES env variable)
+            from services.business_logic_service import BusinessLogicService
+            available_columns = list(all_records[0].keys()) if all_records else []
+            column_map = BusinessLogicService._get_column_names(all_available_columns=available_columns)
+            
             # Step 1: Filter by Client Name (Substring match) if provided
             if search_term:
                 client_matches = []
+                client_cols = column_map.get("client", ["Client Name", "Production house"])
                 for row in all_records:
-                    row_client_name = str(row.get('Client Name', '')).strip().lower()
-                    row_prod_house = str(row.get('Production house', '')).strip().lower()
-                    if search_term in row_client_name or search_term in row_prod_house:
+                    row_client_vals = [str(row.get(col, '')).strip().lower() for col in client_cols]
+                    if any(search_term in val for val in row_client_vals if val):
                         client_matches.append(row)
                 logger.info(f"[QUERY] Client name filter results: {len(client_matches)} matches")
             else:
                 client_matches = all_records
                 logger.info(f"[QUERY] Client name filter skipped (no client specified). Using all records: {len(client_matches)}")
-            # Determine which date column to use from available columns
+            
+            # Determine which date column to use from column mappings
+            invoice_date_cols = column_map.get("invoice_date", [])
             date_column_name = None
+            
             if client_matches:
                 sample_row = client_matches[0]
                 date_columns = [k for k in sample_row.keys() if 'date' in k.lower()]
                 logger.info(f"[QUERY] Available date-related columns: {date_columns}")
+                logger.info(f"[QUERY] Invoice date columns from config: {invoice_date_cols}")
                 logger.info(f"[QUERY] Sample row keys: {list(sample_row.keys())[:10]}")
                 
-                # Prioritize date columns: job_date > Date > payment_date > any other date column
-                for preferred_col in ['job_date', 'Date', 'Date ', 'date', 'payment_date']:
-                    if preferred_col in sample_row:
-                        date_column_name = preferred_col
+                # Use the first invoice_date column that exists in the actual row
+                for col in invoice_date_cols:
+                    if col in sample_row:
+                        date_column_name = col
                         break
                 
-                # If no preferred column found, use the first date column
+                # Fallback: if no invoice_date column found, use first available date column
                 if not date_column_name and date_columns:
                     date_column_name = date_columns[0]
             
