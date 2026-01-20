@@ -1,6 +1,7 @@
 import google.generativeai as genai
 import os
 import json
+from typing import List, Dict
 from utils.logger import logger
 
 class GeminiService:
