@@ -50,8 +50,11 @@ class GeminiService:
         logger.error(f"Failed all models. Errors: {errors}")
         return None
 
-    def parse_user_intent(self, message: str) -> dict:
-        """Single constrained call for Intent and Parameter parsing."""
+    def parse_user_intent(self, message: str, conversation_history: List[Dict[str, str]] = None) -> dict:
+        """
+        Single constrained call for Intent and Parameter parsing.
+        conversation_history: List of previous messages with 'role' (user/assistant) and 'content'.
+        """
         if not self.model: 
             logger.error("Gemini model not initialized.")
             return {
@@ -60,6 +63,15 @@ class GeminiService:
                 "parameters": {},
                 "error_message": "Gemini model not initialized (check API key or quota)"
             }
+        
+        # Build context from conversation history if available
+        context_section = ""
+        if conversation_history and len(conversation_history) > 0:
+            context_lines = ["Recent conversation history:"]
+            for msg in conversation_history:
+                role_label = "User" if msg.get("role") == "user" else "Assistant"
+                context_lines.append(f"{role_label}: {msg.get('content', '')}")
+            context_section = "\n".join(context_lines) + "\n\n"
         
         system_prompt = (
             "You are a specialized Intent and Parameter Parser for an Operations Bot. Return ONLY valid JSON.\n"
@@ -76,6 +88,14 @@ class GeminiService:
             "    \"days\": number | null\n"
             "  }\n"
             "}\n\n"
+            "CONTEXT AWARENESS:\n"
+            "• Use the conversation history below to resolve references like 'it', 'that', 'this', 'the same one', 'do it again', etc.\n"
+            "• If the current message references something from recent conversation, extract parameters from that context.\n"
+            "• If multiple possible references exist, choose the most recent and relevant one.\n"
+            "• If the current message is self-contained and doesn't reference prior conversation, process it independently.\n"
+            "• DO NOT invent or assume entities, actions, or parameters that aren't in the conversation history or current message.\n"
+            "• If context is insufficient to safely resolve references, use null for ambiguous parameters.\n\n"
+            f"{context_section}"
             "EXAMPLES:\n"
             "1. 'What is the total billing for April for Garnier?'\n"
             "   -> {\"operation\": \"AGGREGATE_ENTITY\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
@@ -84,7 +104,9 @@ class GeminiService:
             "3. 'Get me Garnier invoice for April for 2025' or 'Can you get me Garnier invoice for April for 2025'\n"
             "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": 2025, \"period\": \"month\", \"days\": null}}\n"
             "4. 'Download invoice for ClientX in March'\n"
-            "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"ClientX\", \"bill_number\": null, \"month\": \"March\", \"year\": null, \"period\": \"month\", \"days\": null}}\n\n"
+            "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"ClientX\", \"bill_number\": null, \"month\": \"March\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
+            "5. Context example: If previous message was 'Get me Garnier invoice for April' and current message is 'Send it again'\n"
+            "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n\n"
             "IMPORTANT: Any request to GET, DOWNLOAD, SEND, RETRIEVE, or FETCH an invoice should use operation=\"ACTION_TRIGGER\" and entity=\"invoice\".\n\n"
             "RULES:\n"
             "1. Handle common typos.\n"
@@ -106,7 +128,7 @@ class GeminiService:
                     {
                         "role": "user",
                         "parts": [
-                            f"{system_prompt}\n\nUser message:\n{message}"
+                            f"{system_prompt}\n\nCurrent user message:\n{message}"
                         ]
                     }
                 ],

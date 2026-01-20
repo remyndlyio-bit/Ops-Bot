@@ -13,6 +13,11 @@ class IntentService:
         self.email = GmailService()
         self.memory = MemoryService()
 
+    def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
+        """Helper method to store user message and bot response in conversation history."""
+        self.memory.add_message(user_id, "user", user_message)
+        self.memory.add_message(user_id, "assistant", bot_response)
+
     def process_request(self, user_id: str, message: str) -> Dict:
         """
         Coordinates the Operations Architecture using single-call Gemini parsing.
@@ -20,8 +25,11 @@ class IntentService:
         from services.business_logic_service import BusinessLogicService
         logic = BusinessLogicService()
 
-        # 1. Single-call Intent & Parameter Parsing
-        result = self.gemini.parse_user_intent(message)
+        # Get conversation history for context-aware parsing (before storing current message)
+        conversation_history = self.memory.get_conversation_history(user_id)
+
+        # 1. Single-call Intent & Parameter Parsing with context
+        result = self.gemini.parse_user_intent(message, conversation_history=conversation_history)
         
         # Validation Layer
         operation = result.get("operation")
@@ -34,9 +42,11 @@ class IntentService:
         # Handle explicit Gemini API errors
         if operation == "GEMINI_ERROR":
             error_msg = result.get("error_message", "Unknown Gemini API error")
+            response = error_msg
+            self._store_conversation(user_id, message, response)
             return {
                 "operation": "GEMINI_ERROR",
-                "response": error_msg,
+                "response": response,
                 "trigger_invoice": False
             }
 
@@ -104,9 +114,11 @@ class IntentService:
                         failed += 1
 
                 if not targets:
+                    response = f"I don't see any clients with payments due in the next {approaching_days} days that need a first reminder."
+                    self._store_conversation(user_id, message, response)
                     return {
                         "operation": "ACTION_TRIGGER",
-                        "response": f"I don't see any clients with payments due in the next {approaching_days} days that need a first reminder.",
+                        "response": response,
                         "trigger_invoice": False,
                     }
 
@@ -118,9 +130,11 @@ class IntentService:
                 if failed > 0:
                     response_parts.append(f"\nFailed: {failed}.")
                 
+                response = "\n".join(response_parts)
+                self._store_conversation(user_id, message, response)
                 return {
                     "operation": "ACTION_TRIGGER",
-                    "response": "\n".join(response_parts),
+                    "response": response,
                     "trigger_invoice": False,
                 }
 
@@ -145,9 +159,11 @@ class IntentService:
                         logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
                 except Exception as se:
                     logger.error(f"Sheet access failed: {se}")
+                    response = "I encountered an error accessing the data records."
+                    self._store_conversation(user_id, message, response)
                     return {
                         "operation": operation,
-                        "response": "I encountered an error accessing the data records.",
+                        "response": response,
                         "trigger_invoice": False
                     }
                 
@@ -168,6 +184,7 @@ class IntentService:
                     action_result = resolved["message"]
                     logger.info(f"Invoice retrieval failed - {resolved.get('status', 'unknown')}: {action_result}")
                     # If it's a retrieval query and we didn't find it, we stop here.
+                    self._store_conversation(user_id, message, action_result)
                     return {
                         "operation": operation,
                         "response": action_result,
@@ -191,9 +208,11 @@ class IntentService:
                             logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
                     except Exception as se:
                         logger.error(f"Sheet access failed: {se}")
+                        response = "I encountered an error accessing the data records."
+                        self._store_conversation(user_id, message, response)
                         return {
                             "operation": operation,
-                            "response": "I encountered an error accessing the data records.",
+                            "response": response,
                             "trigger_invoice": False
                         }
                     
@@ -203,9 +222,11 @@ class IntentService:
             
             # Handle SMALL_TALK only if not an invoice retrieval or overdue query
             if operation == "SMALL_TALK" and action_result == "I don't see this information in my records yet.":
+                response = "Hello! I'm your Operations Bot. How can I help you today?"
+                self._store_conversation(user_id, message, response)
                 return {
                     "operation": "SMALL_TALK",
-                    "response": "Hello! I'm your Operations Bot. How can I help you today?",
+                    "response": response,
                     "trigger_invoice": False
                 }
 
@@ -301,6 +322,9 @@ class IntentService:
             response = action_result
         else:
             response = self.gemini.generate_response(message, action_result)
+
+        # Store both user message and bot response in conversation history after processing
+        self._store_conversation(user_id, message, response)
 
         return {
             "operation": operation,
