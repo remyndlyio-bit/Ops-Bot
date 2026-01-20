@@ -84,14 +84,29 @@ class SheetsService:
             else:
                 client_matches = all_records
                 logger.info(f"[QUERY] Client name filter skipped (no client specified). Using all records: {len(client_matches)}")
-            logger.info(f"[QUERY] Filter Step 2: Date/Month match (column: 'Date', target: Month={target_month}, Year={target_year})")
-            
-            # Log available columns from first row for debugging
+            # Determine which date column to use from available columns
+            date_column_name = None
             if client_matches:
                 sample_row = client_matches[0]
                 date_columns = [k for k in sample_row.keys() if 'date' in k.lower()]
                 logger.info(f"[QUERY] Available date-related columns: {date_columns}")
                 logger.info(f"[QUERY] Sample row keys: {list(sample_row.keys())[:10]}")
+                
+                # Prioritize date columns: job_date > Date > payment_date > any other date column
+                for preferred_col in ['job_date', 'Date', 'Date ', 'date', 'payment_date']:
+                    if preferred_col in sample_row:
+                        date_column_name = preferred_col
+                        break
+                
+                # If no preferred column found, use the first date column
+                if not date_column_name and date_columns:
+                    date_column_name = date_columns[0]
+            
+            if not date_column_name:
+                logger.warning("[QUERY] No date column found in sheet records")
+                return []
+            
+            logger.info(f"[QUERY] Filter Step 2: Date/Month match (column: '{date_column_name}', target: Month={target_month}, Year={target_year})")
 
             # Step 2: Filter by Date/Month
             filtered_data = []
@@ -100,9 +115,9 @@ class SheetsService:
             skipped_month_mismatch = 0
             
             for row in client_matches:
-                # Handle potential trailing spaces in column name "Date "
+                # Use the discovered date column name
                 # Also handle datetime objects that Google Sheets might return
-                row_date_value = row.get('Date') or row.get('Date ') or row.get('date')
+                row_date_value = row.get(date_column_name)
                 
                 # If it's already a datetime object, use it directly
                 if isinstance(row_date_value, datetime):
