@@ -178,7 +178,7 @@ class GeminiService:
         try:
             response = self.model.generate_content(
                 prompt,
-                generation_config={"max_output_tokens": 150, "temperature": 0.2}
+                generation_config={"max_output_tokens": 500, "temperature": 0.2}
             )
             
             text = response.text.strip()

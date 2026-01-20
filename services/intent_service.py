@@ -320,6 +320,9 @@ class IntentService:
             response = action_result # Use the "Confirmed!" message directly
         elif action_result.startswith("I don't see") or "error" in action_result.lower():
             response = action_result
+        elif action_result.startswith("Total billing") or action_result.startswith("The total billing"):
+            # Skip Gemini phrasing for billing responses - they're already well-formatted
+            response = action_result
         else:
             response = self.gemini.generate_response(message, action_result)
 
