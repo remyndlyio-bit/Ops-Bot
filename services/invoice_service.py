@@ -121,11 +121,23 @@ class InvoiceService:
                 if search_term and (search_term in row_client or search_term in row_prod):
                     client_exists = True # We found at least one client record
                     client_matches_count += 1
-                    row_date = str(row.get("Date", "")).strip()
-                    dt = parse_sheet_date(row_date)
-                    if dt and dt.month == target_month and (dt.year % 100 == target_year):
-                        month_matches.append(row)
-                        logger.info(f"[QUERY] Match found - Client: {row_client or row_prod}, Date: {row_date}, Month: {dt.month}, Year: {dt.year % 100}")
+                    
+                    # Handle datetime objects that Google Sheets might return
+                    row_date_value = row.get("Date")
+                    if isinstance(row_date_value, datetime):
+                        dt = row_date_value
+                        row_date = dt.strftime('%Y-%m-%d')
+                    else:
+                        row_date = str(row_date_value).strip() if row_date_value else ""
+                        if not row_date or row_date == 'None':
+                            continue
+                        dt = parse_sheet_date(row_date)
+                    
+                    if dt:
+                        row_year = dt.year % 100 if dt.year >= 2000 else dt.year
+                        if dt.month == target_month and row_year == target_year:
+                            month_matches.append(row)
+                            logger.info(f"[QUERY] Match found - Client: {row_client or row_prod}, Date: {row_date}, Month: {dt.month}, Year: {row_year}")
             
             logger.info(f"[QUERY] Client matches: {client_matches_count} | Month+Year matches: {len(month_matches)}")
             if month_matches:

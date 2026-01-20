@@ -238,6 +238,9 @@ class BusinessLogicService:
                 # Handle None, empty string, but allow 0 as valid value
                 if raw_val is None:
                     continue
+                # Handle datetime objects from Google Sheets
+                if isinstance(raw_val, datetime):
+                    return raw_val.strftime('%Y-%m-%d')
                 val = str(raw_val).strip()
                 # Return even if "0" (unpaid status) - only skip if truly empty
                 if val or val == "0":
@@ -255,6 +258,9 @@ class BusinessLogicService:
                     raw_val = row[row_key_actual]
                     if raw_val is None:
                         continue
+                    # Handle datetime objects from Google Sheets
+                    if isinstance(raw_val, datetime):
+                        return raw_val.strftime('%Y-%m-%d')
                     val = str(raw_val).strip()
                     if val or val == "0":
                         return val
@@ -409,15 +415,20 @@ class BusinessLogicService:
         skipped_period_mismatch = 0
         
         for row in all_records:
-            date_str = str(row.get('Date', '')).strip()
-            if not date_str:
-                skipped_no_date += 1
-                continue
+            # Handle datetime objects that Google Sheets might return
+            date_value = row.get('Date')
+            if isinstance(date_value, datetime):
+                dt = date_value
+            else:
+                date_str = str(date_value).strip() if date_value else ""
+                if not date_str or date_str == 'None':
+                    skipped_no_date += 1
+                    continue
                 
-            dt = parse_sheet_date(date_str)
-            if not dt:
-                skipped_date_parse_fail += 1
-                continue
+                dt = parse_sheet_date(date_str)
+                if not dt:
+                    skipped_date_parse_fail += 1
+                    continue
 
             match = False
             if period == "day" and dt.date() == now.date(): 

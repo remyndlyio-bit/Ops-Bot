@@ -2,6 +2,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import os
 from typing import List, Dict, Optional, Any
+from datetime import datetime
 from utils.logger import logger
 
 class SheetsService:
@@ -84,6 +85,13 @@ class SheetsService:
                 client_matches = all_records
                 logger.info(f"[QUERY] Client name filter skipped (no client specified). Using all records: {len(client_matches)}")
             logger.info(f"[QUERY] Filter Step 2: Date/Month match (column: 'Date', target: Month={target_month}, Year={target_year})")
+            
+            # Log available columns from first row for debugging
+            if client_matches:
+                sample_row = client_matches[0]
+                date_columns = [k for k in sample_row.keys() if 'date' in k.lower()]
+                logger.info(f"[QUERY] Available date-related columns: {date_columns}")
+                logger.info(f"[QUERY] Sample row keys: {list(sample_row.keys())[:10]}")
 
             # Step 2: Filter by Date/Month
             filtered_data = []
@@ -93,21 +101,34 @@ class SheetsService:
             
             for row in client_matches:
                 # Handle potential trailing spaces in column name "Date "
-                row_date_str = str(row.get('Date', '') or row.get('Date ', '') or row.get('date', '')).strip()
-                if not row_date_str:
-                    skipped_no_date += 1
-                    continue
-                    
-                dt = parse_sheet_date(row_date_str)
-                if not dt:
-                    skipped_date_parse_fail += 1
-                    continue
+                # Also handle datetime objects that Google Sheets might return
+                row_date_value = row.get('Date') or row.get('Date ') or row.get('date')
                 
-                if dt.month == target_month and (dt.year % 100 == target_year):
+                # If it's already a datetime object, use it directly
+                if isinstance(row_date_value, datetime):
+                    dt = row_date_value
+                    row_date_str = dt.strftime('%Y-%m-%d')
+                else:
+                    # Convert to string and parse
+                    row_date_str = str(row_date_value).strip() if row_date_value else ""
+                    if not row_date_str or row_date_str == 'None':
+                        skipped_no_date += 1
+                        continue
+                    
+                    dt = parse_sheet_date(row_date_str)
+                    if not dt:
+                        skipped_date_parse_fail += 1
+                        logger.debug(f"[QUERY] Failed to parse date: '{row_date_str}' (type: {type(row_date_value)})")
+                        continue
+                
+                # Compare month and year (handle both 2-digit and 4-digit year formats)
+                row_year = dt.year % 100 if dt.year >= 2000 else dt.year
+                if dt.month == target_month and row_year == target_year:
                     filtered_data.append(row)
                     logger.info(f"[QUERY] Match found - Client: '{row.get('Client Name')}', Date: {row_date_str}, Parsed: {dt.strftime('%Y-%m-%d')}")
                 else:
                     skipped_month_mismatch += 1
+                    logger.debug(f"[QUERY] Month/Year mismatch - Date: {row_date_str}, Parsed: {dt.strftime('%Y-%m-%d')}, Expected: Month={target_month}, Year={target_year}, Got: Month={dt.month}, Year={row_year}")
             
             logger.info(f"[QUERY] Invoice data query results - Total records: {len(all_records)}, Client matches: {len(client_matches)}, Final matches: {len(filtered_data)}, Skipped (no date): {skipped_no_date}, Skipped (parse fail): {skipped_date_parse_fail}, Skipped (month mismatch): {skipped_month_mismatch}")
             return filtered_data
