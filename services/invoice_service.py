@@ -1,4 +1,5 @@
 from typing import List, Dict
+from utils.logger import logger
 
 class InvoiceService:
     @staticmethod
@@ -16,19 +17,37 @@ class InvoiceService:
         total_amount = 0
         item_count = len(data)
 
+        # Find the fees column name (case-insensitive)
+        fees_column = None
+        if data:
+            for key in data[0].keys():
+                if key.lower() == 'fees':
+                    fees_column = key
+                    break
+        
+        # Fallback to 'Fees' if not found
+        if not fees_column:
+            fees_column = 'Fees'
+        
+        logger.info(f"[INVOICE] Using fees column: '{fees_column}'")
+
         for row in data:
-            # Clean and parse the 'Fees' column (e.g., "₹ 2,000")
-            fees_raw = str(row.get('Fees', '0'))
+            # Clean and parse the fees column (e.g., "₹ 2,000")
+            fees_raw = str(row.get(fees_column, row.get('Fees', row.get('fees', '0'))))
             # Remove currency symbols and commas
-            fees_clean = fees_raw.replace('₹', '').replace(',', '').strip()
+            fees_clean = fees_raw.replace('₹', '').replace(',', '').replace(' ', '').strip()
             
             try:
-                amount = float(fees_clean) if fees_clean else 0
-            except (ValueError, TypeError):
+                amount = float(fees_clean) if fees_clean and fees_clean != 'None' else 0
+                logger.debug(f"[INVOICE] Row fees: '{fees_raw}' -> cleaned: '{fees_clean}' -> amount: {amount}")
+            except (ValueError, TypeError) as e:
                 # Fallback to Qt * Rate if needed (though Fees usually represents the total line item here)
+                logger.warning(f"[INVOICE] Failed to parse fees '{fees_raw}': {e}")
                 amount = 0
             
             total_amount += amount
+        
+        logger.info(f"[INVOICE] Total amount calculated: ₹{total_amount:,.2f} from {item_count} items")
 
         return {
             "found": True,
