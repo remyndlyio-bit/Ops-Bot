@@ -300,16 +300,28 @@ class IntentService:
                         logger.info(f"[QUERY] Fetching invoice data for aggregation")
                         data = self.sheets.get_invoice_data(client, month, year=year)
                         logger.info(f"[QUERY] Aggregate query results - Found {len(data) if data else 0} records")
+                        
+                        # If no data found and year was specified, try previous year as fallback
+                        if not data and year:
+                            previous_year = year - 1
+                            logger.info(f"[QUERY] No records found for {month} {year}, trying previous year {previous_year}")
+                            data = self.sheets.get_invoice_data(client, month, year=previous_year)
+                            if data:
+                                logger.info(f"[QUERY] Found {len(data)} records for {month} {previous_year} (previous year)")
+                                year = previous_year  # Update year for the response
+                        
                         if not data:
+                            year_display = f" {year}" if year else ""
                             if client:
-                                action_result = f"I don't see any billing records for {client} in {month} yet."
+                                action_result = f"I don't see any billing records for {client} in {month}{year_display} yet."
                             else:
-                                action_result = f"I don't see any billing records for {month} yet."
+                                action_result = f"I don't see any billing records for {month}{year_display} yet."
                         else:
                             summary_client = client if client else "All Clients"
                             summary = InvoiceService.process_invoice_data(data, summary_client, month)
-                            logger.info(f"[QUERY] Aggregation complete - Total: {summary['currency']}{summary['total']:,}, Items: {summary['items']}, Client: {summary_client}")
-                            action_result = f"Total billing for {summary_client} in {month} is {summary['currency']}{summary['total']:,}."
+                            year_display = f" {year}" if year else ""
+                            logger.info(f"[QUERY] Aggregation complete - Total: {summary['currency']}{summary['total']:,}, Items: {summary['items']}, Client: {summary_client}, Year: {year}")
+                            action_result = f"Total billing for {summary_client} in {month}{year_display} is {summary['currency']}{summary['total']:,}."
 
         except Exception as e:
             logger.error(f"Execution failure: {e}")
