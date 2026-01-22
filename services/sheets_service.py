@@ -62,13 +62,18 @@ class SheetsService:
             
             target_month = month_name_to_number(month_name)
             from datetime import datetime
-            target_year = year if (year and year != 0) else datetime.now().year
-            # Support 2-digit year format common in sheets
-            if target_year > 2000: target_year -= 2000
+            # If year is specified, use it; otherwise, we'll match any year
+            if year and year != 0:
+                target_year = year
+                # Support 2-digit year format common in sheets
+                if target_year > 2000: target_year -= 2000
+            else:
+                target_year = None  # None means match any year
             
             search_term = client_name.strip().lower() if client_name else None
             
-            logger.info(f"[QUERY] Invoice Data Query - Client: '{client_name}', Month: {month_name}, Year: {target_year + 2000 if target_year < 100 else target_year}")
+            year_display = f"{target_year + 2000 if target_year and target_year < 100 else target_year}" if target_year else "Any"
+            logger.info(f"[QUERY] Invoice Data Query - Client: '{client_name}', Month: {month_name}, Year: {year_display}")
             logger.info(f"[QUERY] Searching through {len(all_records)} total records (normalized column names)")
             logger.info(f"[QUERY] Filter Step 1: Client name match (columns: 'Client Name', 'Production house') - skipped if client is None")
             
@@ -115,7 +120,8 @@ class SheetsService:
                 logger.warning("[QUERY] No date column found in sheet records")
                 return []
             
-            logger.info(f"[QUERY] Filter Step 2: Date/Month match (column: '{date_column_name}', target: Month={target_month}, Year={target_year})")
+            year_display = target_year if target_year else "Any"
+            logger.info(f"[QUERY] Filter Step 2: Date/Month match (column: '{date_column_name}', target: Month={target_month}, Year={year_display})")
 
             # Step 2: Filter by Date/Month
             filtered_data = []
@@ -147,12 +153,25 @@ class SheetsService:
                 
                 # Compare month and year (handle both 2-digit and 4-digit year formats)
                 row_year = dt.year % 100 if dt.year >= 2000 else dt.year
-                if dt.month == target_month and row_year == target_year:
+                
+                # Log the comparison for debugging
+                logger.info(f"[QUERY] Comparing - Row Date: {row_date_str}, Parsed: {dt.strftime('%Y-%m-%d')} (Month={dt.month}, Year={dt.year} -> {row_year}), Target: Month={target_month}, Year={target_year}")
+                
+                # If year was not specified (target_year is None), match any year for the given month
+                # Otherwise, match both month and year
+                year_matches = (target_year is None) or (row_year == target_year)
+                if dt.month == target_month and year_matches:
                     filtered_data.append(row)
                     logger.info(f"[QUERY] Match found - Client: '{row.get('Client Name')}', Date: {row_date_str}, Parsed: {dt.strftime('%Y-%m-%d')}")
                 else:
                     skipped_month_mismatch += 1
-                    logger.debug(f"[QUERY] Month/Year mismatch - Date: {row_date_str}, Parsed: {dt.strftime('%Y-%m-%d')}, Expected: Month={target_month}, Year={target_year}, Got: Month={dt.month}, Year={row_year}")
+                    if dt.month != target_month:
+                        mismatch_reason = f"Month mismatch (got {dt.month}, expected {target_month})"
+                    elif target_year is not None:
+                        mismatch_reason = f"Year mismatch (got {row_year}, expected {target_year})"
+                    else:
+                        mismatch_reason = "Unknown mismatch"
+                    logger.info(f"[QUERY] Skipped - {mismatch_reason} - Date: {row_date_str}, Parsed: {dt.strftime('%Y-%m-%d')}")
             
             logger.info(f"[QUERY] Invoice data query results - Total records: {len(all_records)}, Client matches: {len(client_matches)}, Final matches: {len(filtered_data)}, Skipped (no date): {skipped_no_date}, Skipped (parse fail): {skipped_date_parse_fail}, Skipped (month mismatch): {skipped_month_mismatch}")
             return filtered_data
