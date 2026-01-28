@@ -1,7 +1,7 @@
-import google.generativeai as genai
 import os
 import json
-from typing import List, Dict
+import httpx
+from typing import List, Dict, Optional
 from utils.logger import logger
 
 class GeminiService:
@@ -13,50 +13,123 @@ class GeminiService:
         
         if api_key:
             # Clean possible whitespace
-            api_key = api_key.strip()
-            genai.configure(api_key=api_key)
-            self.model = self._initialize_model()
-            if not self.model:
+            self.api_key = api_key.strip()
+            self.base_url = "https://aiplatform.googleapis.com/v1/publishers/google/models"
+            self.model_name = self._initialize_model()
+            if not self.model_name:
                 logger.error("Gemini model initialization failed after trying multiple models.")
         else:
             logger.error("No Gemini API key found. Checked GEMINI_KEY and GOOGLE_API_KEY.")
-            self.model = None
+            self.api_key = None
+            self.model_name = None
 
     def _initialize_model(self):
-        # Prefer flash for cost and speed
+        # Try Vertex AI compatible models
         models_to_try = [
-            'gemini-2.0-flash', 
-            'gemini-1.5-flash', 
-            'gemini-flash-latest',
-            'gemini-pro'
+            'gemini-2.5-flash-lite',
+            'gemini-2.0-flash-exp',
+            'gemini-1.5-flash',
+            'gemini-1.5-pro'
         ]
         errors = []
         for model_name in models_to_try:
             try:
-                model = genai.GenerativeModel(model_name)
-                # Verify accessibility
-                model.generate_content("hi", generation_config={"max_output_tokens": 1})
-                logger.info(f"Verified Gemini model: {model_name}")
-                return model
+                # Test with a simple request
+                url = f"{self.base_url}/{model_name}:generateContent?key={self.api_key}"
+                payload = {
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": "hi"}]
+                        }
+                    ],
+                    "generationConfig": {
+                        "maxOutputTokens": 1
+                    }
+                }
+                with httpx.Client(timeout=10.0) as client:
+                    response = client.post(url, json=payload)
+                    if response.status_code == 200:
+                        logger.info(f"Verified Gemini model: {model_name}")
+                        return model_name
+                    else:
+                        errors.append(f"{model_name}: HTTP {response.status_code} - {response.text[:200]}")
             except Exception as e:
                 errors.append(f"{model_name}: {str(e)}")
                 continue
-        
-        try:
-            available = [m.name for m in genai.list_models()]
-            logger.error(f"Models failed. Available for this key: {available}")
-        except Exception as e:
-            logger.error(f"Could not list models: {e}")
 
         logger.error(f"Failed all models. Errors: {errors}")
         return None
+
+    def _call_api(self, prompt: str, generation_config: Optional[Dict] = None, conversation_history: Optional[List[Dict]] = None) -> Optional[str]:
+        """Make API call to Vertex AI Gemini endpoint."""
+        if not self.api_key or not self.model_name:
+            raise Exception("Gemini model not initialized (check API key)")
+        
+        url = f"{self.base_url}/{self.model_name}:generateContent?key={self.api_key}"
+        
+        # Build contents array
+        contents = []
+        
+        # Add conversation history if provided
+        if conversation_history:
+            for msg in conversation_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "user":
+                    contents.append({
+                        "role": "user",
+                        "parts": [{"text": content}]
+                    })
+                elif role == "assistant":
+                    contents.append({
+                        "role": "model",
+                        "parts": [{"text": content}]
+                    })
+        
+        # Add current user message
+        contents.append({
+            "role": "user",
+            "parts": [{"text": prompt}]
+        })
+        
+        payload = {
+            "contents": contents
+        }
+        
+        # Add generation config
+        if generation_config:
+            payload["generationConfig"] = generation_config
+        
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+                result = response.json()
+                
+                # Extract text from response
+                if "candidates" in result and len(result["candidates"]) > 0:
+                    candidate = result["candidates"][0]
+                    if "content" in candidate and "parts" in candidate["content"]:
+                        parts = candidate["content"]["parts"]
+                        if parts and "text" in parts[0]:
+                            return parts[0]["text"]
+                
+                logger.error(f"Unexpected response format: {json.dumps(result)[:500]}")
+                return None
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error calling Gemini API: {e.response.status_code} - {e.response.text[:500]}")
+            raise
+        except Exception as e:
+            logger.error(f"Error calling Gemini API: {str(e)}")
+            raise
 
     def parse_user_intent(self, message: str, conversation_history: List[Dict[str, str]] = None) -> dict:
         """
         Single constrained call for Intent and Parameter parsing.
         conversation_history: List of previous messages with 'role' (user/assistant) and 'content'.
         """
-        if not self.model: 
+        if not self.model_name: 
             logger.error("Gemini model not initialized.")
             return {
                 "operation": "GEMINI_ERROR",
@@ -120,30 +193,19 @@ class GeminiService:
         )
         
         try:
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
+            full_prompt = f"{system_prompt}\n\nCurrent user message:\n{message}"
             
-            response = self.model.generate_content(
-                contents=[
-                    {
-                        "role": "user",
-                        "parts": [
-                            f"{system_prompt}\n\nCurrent user message:\n{message}"
-                        ]
-                    }
-                ],
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "temperature": 0
-                },
-                safety_settings=safety_settings
-            )
+            generation_config = {
+                "responseMimeType": "application/json",
+                "temperature": 0
+            }
             
-            raw_text = response.text.strip()
+            raw_text = self._call_api(full_prompt, generation_config=generation_config, conversation_history=conversation_history)
+            
+            if not raw_text:
+                raise Exception("Empty response from Gemini API")
+            
+            raw_text = raw_text.strip()
             logger.info(f"Raw Gemini Intent Response: {raw_text}")
 
             parsed = json.loads(raw_text)
@@ -168,7 +230,7 @@ class GeminiService:
         """Stage 3: Professional Phrasing with safety guards."""
         fallback = "I don't see this information in my records yet."
         
-        if not self.model or not backend_result or backend_result == fallback:
+        if not self.model_name or not backend_result or backend_result == fallback:
             return backend_result or fallback
         
         prompt = (
@@ -179,12 +241,17 @@ class GeminiService:
         )
 
         try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config={"max_output_tokens": 500, "temperature": 0.2}
-            )
+            generation_config = {
+                "maxOutputTokens": 500,
+                "temperature": 0.2
+            }
             
-            text = response.text.strip()
+            text = self._call_api(prompt, generation_config=generation_config)
+            
+            if not text:
+                return backend_result or fallback
+            
+            text = text.strip()
             if len(text) < 15:
                 return backend_result
             return text
