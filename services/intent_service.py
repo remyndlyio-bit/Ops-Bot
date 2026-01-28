@@ -191,6 +191,37 @@ class IntentService:
                         "trigger_invoice": False
                     }
             
+            # Check for payment followup queries (ACTION_TRIGGER with payment entity or followup keywords)
+            if action_result == "I don't see this information in my records yet.":
+                followup_keywords = ["follow up", "followup", "follow-up", "payment followup", "payment follow up", "payment follow-up", "check payment", "payment status"]
+                is_followup_query = any(keyword in message.lower() for keyword in followup_keywords)
+                is_payment_action = (operation == "ACTION_TRIGGER" and entity == "payment") or is_followup_query
+                
+                if is_payment_action:
+                    logger.info("Detected payment followup query")
+                    # Fetch records for payment followup query
+                    all_records = []
+                    try:
+                        logger.info(f"[QUERY] Fetching dataset for payment followup query")
+                        sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
+                        all_records = sheet.get_all_records()
+                        logger.info(f"[QUERY] Dataset loaded - Total records: {len(all_records)}")
+                        if all_records:
+                            logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
+                    except Exception as se:
+                        logger.error(f"Sheet access failed: {se}")
+                        response = "I encountered an error accessing the data records."
+                        self._store_conversation(user_id, message, response)
+                        return {
+                            "operation": operation,
+                            "response": response,
+                            "trigger_invoice": False
+                        }
+                    
+                    overdue_invoices = logic.get_overdue_invoices(all_records)
+                    action_result = logic.format_overdue_invoices_response(overdue_invoices, payment_terms_days=30)
+                    logger.info(f"Found {len(overdue_invoices)} invoices needing payment followup")
+            
             # Check for overdue invoice queries (after invoice retrieval, before other operations)
             if action_result == "I don't see this information in my records yet.":
                 overdue_keywords = ["overdue", "due date", "passed due", "past due", "past the due", "exceeded due", "late payment", "which.*passed", "have passed"]
