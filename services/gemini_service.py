@@ -13,16 +13,27 @@ class GeminiService:
     AI backend via OpenRouter. Set one env variable: AI_API_KEY (your OpenRouter API key).
     """
     def __init__(self):
-        api_key = (os.getenv("AI_API_KEY") or "").strip()
+        # Railway: env vars are loaded at deploy time — redeploy after adding/changing AI_API_KEY
+        raw = os.getenv("AI_API_KEY")
+        api_key = (raw or "").strip()
         if not api_key:
-            logger.error("AI_API_KEY is not set.")
+            logger.error(
+                "AI_API_KEY is not set. Set it in Railway dashboard (Variables) and redeploy."
+            )
             self.api_key = None
             self.model_name = None
             self._initialized = False
             return
+        logger.info(f"AI_API_KEY loaded (length={len(api_key)}). Verifying OpenRouter...")
         self.api_key = api_key
         self.model_name = DEFAULT_MODEL
-        self._initialized = self._verify()
+        ok = self._verify()
+        self._initialized = ok
+        if not ok:
+            logger.error(
+                "OpenRouter verification failed. Check key and redeploy. "
+                "Get a key at https://openrouter.ai/keys"
+            )
 
     def _verify(self) -> bool:
         try:
@@ -97,7 +108,7 @@ class GeminiService:
                 "operation": "GEMINI_ERROR",
                 "entity": None,
                 "parameters": {},
-                "error_message": "AI not initialized (set AI_API_KEY)",
+                "error_message": "AI not initialized. Set AI_API_KEY in Railway and redeploy.",
             }
         context_section = ""
         if conversation_history and len(conversation_history) > 0:
