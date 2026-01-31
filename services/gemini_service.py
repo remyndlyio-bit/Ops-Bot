@@ -13,35 +13,27 @@ class GeminiService:
     AI backend via OpenRouter. Set one env variable: AI_KEY (your OpenRouter API key).
     """
     def __init__(self):
-        # Railway: env vars are loaded at deploy time — redeploy after adding/changing AI_KEY
+        self.api_key = None
+        self.model_name = DEFAULT_MODEL
+        self._initialized = False
+        self._ensure_initialized()
+
+    def _ensure_initialized(self) -> bool:
+        """Initialize from AI_KEY. Called at startup and lazily on first use."""
+        if self._initialized:
+            return True
         raw = os.getenv("AI_KEY")
         api_key = (raw or "").strip()
-        
-        # Print directly to stdout for debugging (always visible in logs)
-        print(f"[GeminiService] AI_KEY env check: {'SET' if api_key else 'NOT SET'}")
-        if api_key:
-            print(f"[GeminiService] AI_KEY length: {len(api_key)}")
-        
         if not api_key:
-            logger.error(
-                "AI_KEY is not set. Set it in Railway dashboard (Variables) and redeploy."
-            )
-            print("[GeminiService] CRITICAL: AI_KEY is empty - service will not work")
-            self.api_key = None
-            self.model_name = None
-            self._initialized = False
-            return
+            logger.warning("AI_KEY not set. Will retry on first request.")
+            return False
         logger.info(f"AI_KEY loaded (length={len(api_key)}). Verifying OpenRouter...")
         self.api_key = api_key
-        self.model_name = DEFAULT_MODEL
         ok = self._verify()
         self._initialized = ok
         if not ok:
-            logger.error(
-                "OpenRouter verification failed. Check key and redeploy. "
-                "Get a key at https://openrouter.ai/keys"
-            )
-            print(f"[GeminiService] OpenRouter verification FAILED")
+            logger.error("OpenRouter verification failed. Check key at https://openrouter.ai/keys")
+        return ok
 
     def _verify(self) -> bool:
         try:
@@ -71,6 +63,7 @@ class GeminiService:
         prompt: str,
         generation_config: Optional[Dict] = None,
     ) -> Optional[str]:
+        self._ensure_initialized()
         if not self._initialized or not self.api_key:
             raise Exception("AI not initialized (set AI_KEY)")
         payload = {
@@ -110,6 +103,7 @@ class GeminiService:
             raise
 
     def parse_user_intent(self, message: str, conversation_history: List[Dict[str, str]] = None) -> dict:
+        self._ensure_initialized()
         if not self._initialized or not self.api_key:
             logger.error("AI not initialized.")
             return {
@@ -201,6 +195,7 @@ class GeminiService:
 
     def generate_response(self, user_message: str, backend_result: str) -> str:
         fallback = "I don't see this information in my records yet."
+        self._ensure_initialized()
         if not self._initialized or not self.api_key or not backend_result or backend_result == fallback:
             return backend_result or fallback
         prompt = (
