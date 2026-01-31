@@ -4,141 +4,101 @@ import httpx
 from typing import List, Dict, Optional
 from utils.logger import logger
 
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_MODEL = "google/gemini-2.0-flash-exp"
+
+
 class GeminiService:
+    """
+    AI backend via OpenRouter. Set one env variable: AI_API_KEY (your OpenRouter API key).
+    """
     def __init__(self):
-        api_key = os.getenv("GEMINI_KEY")
+        api_key = (os.getenv("AI_API_KEY") or "").strip()
         if not api_key:
-            # Try a common alternative name
-            api_key = os.getenv("GOOGLE_API_KEY")
-        
-        if api_key:
-            # Clean possible whitespace
-            self.api_key = api_key.strip()
-            self.base_url = "https://aiplatform.googleapis.com/v1/publishers/google/models"
-            self.model_name = self._initialize_model()
-            if not self.model_name:
-                logger.error("Gemini model initialization failed after trying multiple models.")
-        else:
-            logger.error("No Gemini API key found. Checked GEMINI_KEY and GOOGLE_API_KEY.")
+            logger.error("AI_API_KEY is not set.")
             self.api_key = None
             self.model_name = None
+            self._initialized = False
+            return
+        self.api_key = api_key
+        self.model_name = DEFAULT_MODEL
+        self._initialized = self._verify()
 
-    def _initialize_model(self):
-        # Try Vertex AI compatible models
-        models_to_try = [
-            'gemini-2.5-flash-lite',
-            'gemini-2.0-flash-exp',
-            'gemini-1.5-flash',
-            'gemini-1.5-pro'
-        ]
-        errors = []
-        for model_name in models_to_try:
-            try:
-                # Test with a simple request
-                url = f"{self.base_url}/{model_name}:generateContent?key={self.api_key}"
-                payload = {
-                    "contents": [
-                        {
-                            "role": "user",
-                            "parts": [{"text": "hi"}]
-                        }
-                    ],
-                    "generationConfig": {
-                        "maxOutputTokens": 1
-                    }
-                }
-                with httpx.Client(timeout=10.0) as client:
-                    response = client.post(url, json=payload)
-                    if response.status_code == 200:
-                        logger.info(f"Verified Gemini model: {model_name}")
-                        return model_name
-                    else:
-                        errors.append(f"{model_name}: HTTP {response.status_code} - {response.text[:200]}")
-            except Exception as e:
-                errors.append(f"{model_name}: {str(e)}")
-                continue
+    def _verify(self) -> bool:
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                response = client.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model_name,
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1,
+                    },
+                )
+                if response.status_code == 200:
+                    logger.info(f"Verified OpenRouter model: {self.model_name}")
+                    return True
+                logger.error(f"OpenRouter verification failed: {response.status_code} - {response.text[:200]}")
+        except Exception as e:
+            logger.error(f"OpenRouter verification error: {e}")
+        return False
 
-        logger.error(f"Failed all models. Errors: {errors}")
-        return None
-
-    def _call_api(self, prompt: str, generation_config: Optional[Dict] = None, conversation_history: Optional[List[Dict]] = None) -> Optional[str]:
-        """Make API call to Vertex AI Gemini endpoint."""
-        if not self.api_key or not self.model_name:
-            raise Exception("Gemini model not initialized (check API key)")
-        
-        url = f"{self.base_url}/{self.model_name}:generateContent?key={self.api_key}"
-        
-        # Build contents array
-        contents = []
-        
-        # Add conversation history if provided
-        if conversation_history:
-            for msg in conversation_history:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if role == "user":
-                    contents.append({
-                        "role": "user",
-                        "parts": [{"text": content}]
-                    })
-                elif role == "assistant":
-                    contents.append({
-                        "role": "model",
-                        "parts": [{"text": content}]
-                    })
-        
-        # Add current user message
-        contents.append({
-            "role": "user",
-            "parts": [{"text": prompt}]
-        })
-        
+    def _call_api(
+        self,
+        prompt: str,
+        generation_config: Optional[Dict] = None,
+    ) -> Optional[str]:
+        if not self._initialized or not self.api_key:
+            raise Exception("AI not initialized (set AI_API_KEY)")
         payload = {
-            "contents": contents
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}],
         }
-        
-        # Add generation config
         if generation_config:
-            payload["generationConfig"] = generation_config
-        
+            if "maxOutputTokens" in generation_config:
+                payload["max_tokens"] = generation_config["maxOutputTokens"]
+            if "temperature" in generation_config:
+                payload["temperature"] = generation_config["temperature"]
+            if generation_config.get("responseMimeType") == "application/json":
+                payload["response_format"] = {"type": "json_object"}
         try:
             with httpx.Client(timeout=30.0) as client:
-                response = client.post(url, json=payload)
+                response = client.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
                 response.raise_for_status()
                 result = response.json()
-                
-                # Extract text from response
-                if "candidates" in result and len(result["candidates"]) > 0:
-                    candidate = result["candidates"][0]
-                    if "content" in candidate and "parts" in candidate["content"]:
-                        parts = candidate["content"]["parts"]
-                        if parts and "text" in parts[0]:
-                            return parts[0]["text"]
-                
-                logger.error(f"Unexpected response format: {json.dumps(result)[:500]}")
+                if "choices" in result and len(result["choices"]) > 0:
+                    choice = result["choices"][0]
+                    if "message" in choice and "content" in choice["message"]:
+                        return choice["message"]["content"]
+                logger.error(f"OpenRouter unexpected response: {json.dumps(result)[:500]}")
                 return None
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error calling Gemini API: {e.response.status_code} - {e.response.text[:500]}")
+            logger.error(f"OpenRouter HTTP error: {e.response.status_code} - {e.response.text[:500]}")
             raise
         except Exception as e:
-            logger.error(f"Error calling Gemini API: {str(e)}")
+            logger.error(f"OpenRouter error: {str(e)}")
             raise
 
     def parse_user_intent(self, message: str, conversation_history: List[Dict[str, str]] = None) -> dict:
-        """
-        Single constrained call for Intent and Parameter parsing.
-        conversation_history: List of previous messages with 'role' (user/assistant) and 'content'.
-        """
-        if not self.model_name: 
-            logger.error("Gemini model not initialized.")
+        if not self._initialized or not self.api_key:
+            logger.error("AI not initialized.")
             return {
                 "operation": "GEMINI_ERROR",
                 "entity": None,
                 "parameters": {},
-                "error_message": "Gemini model not initialized (check API key or quota)"
+                "error_message": "AI not initialized (set AI_API_KEY)",
             }
-        
-        # Build context from conversation history if available
         context_section = ""
         if conversation_history and len(conversation_history) > 0:
             context_lines = ["Recent conversation history:"]
@@ -146,13 +106,12 @@ class GeminiService:
                 role_label = "User" if msg.get("role") == "user" else "Assistant"
                 context_lines.append(f"{role_label}: {msg.get('content', '')}")
             context_section = "\n".join(context_lines) + "\n\n"
-        
         system_prompt = (
             "You are a specialized Intent and Parameter Parser for an Operations Bot. Return ONLY valid JSON.\n"
             "STRICT SCHEMA (MUST RETURN ALL KEYS, NO OMISSIONS):\n"
             "{\n"
-            "  \"operation\": \"READ_ENTITY | AGGREGATE_ENTITY | CREATE_ENTITY | UPDATE_ENTITY | ACTION_TRIGGER | SCHEDULE_REMINDER | SMALL_TALK | UNKNOWN\",\n"
-            "  \"entity\": \"client | invoice | job | payment | project | bank_details | gst_details | reminder | communication_log | null\",\n"
+            '  "operation": "READ_ENTITY | AGGREGATE_ENTITY | CREATE_ENTITY | UPDATE_ENTITY | ACTION_TRIGGER | SCHEDULE_REMINDER | SMALL_TALK | UNKNOWN",\n'
+            '  "entity": "client | invoice | job | payment | project | bank_details | gst_details | reminder | communication_log | null",\n'
             "  \"parameters\": {\n"
             "    \"client_name\": string | null,\n"
             "    \"bill_number\": string | null,\n"
@@ -175,86 +134,70 @@ class GeminiService:
             "   -> {\"operation\": \"AGGREGATE_ENTITY\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
             "2. 'Send me invoice #101' or 'Get me invoice #101'\n"
             "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": null, \"bill_number\": \"101\", \"month\": null, \"year\": null, \"period\": null, \"days\": null}}\n"
-            "3. 'Get me Garnier invoice for April for 2025' or 'Can you get me Garnier invoice for April for 2025'\n"
+            "3. 'Get me Garnier invoice for April for 2025'\n"
             "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": 2025, \"period\": \"month\", \"days\": null}}\n"
             "4. 'Download invoice for ClientX in March'\n"
             "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"ClientX\", \"bill_number\": null, \"month\": \"March\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
-            "5. 'Can I follow up for a payment' or 'Follow up on payment' or 'Check payment status'\n"
+            "5. 'Can I follow up for a payment' or 'Follow up on payment'\n"
             "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"payment\", \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": null, \"year\": null, \"period\": null, \"days\": null}}\n"
-            "6. Context example: If previous message was 'Get me Garnier invoice for April' and current message is 'Send it again'\n"
+            "6. Context: previous 'Get me Garnier invoice for April', current 'Send it again'\n"
             "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n\n"
-            "IMPORTANT: Any request to GET, DOWNLOAD, SEND, RETRIEVE, or FETCH an invoice should use operation=\"ACTION_TRIGGER\" and entity=\"invoice\".\n"
-            "IMPORTANT: Any request to FOLLOW UP, CHECK PAYMENT STATUS, or inquire about PAYMENT should use operation=\"ACTION_TRIGGER\" and entity=\"payment\".\n\n"
+            "IMPORTANT: GET/DOWNLOAD/SEND invoice -> operation=ACTION_TRIGGER, entity=invoice.\n"
+            "IMPORTANT: FOLLOW UP / payment status -> operation=ACTION_TRIGGER, entity=payment.\n\n"
             "RULES:\n"
             "1. Handle common typos.\n"
             "2. NEVER omit any keys listed in the schema.\n"
             "3. Use null for any values you cannot extract.\n"
             "4. Return ONLY valid JSON."
         )
-        
         try:
             full_prompt = f"{system_prompt}\n\nCurrent user message:\n{message}"
-            
-            generation_config = {
-                "responseMimeType": "application/json",
-                "temperature": 0
-            }
-            
-            raw_text = self._call_api(full_prompt, generation_config=generation_config, conversation_history=conversation_history)
-            
+            generation_config = {"responseMimeType": "application/json", "temperature": 0, "maxOutputTokens": 1024}
+            raw_text = self._call_api(full_prompt, generation_config=generation_config)
             if not raw_text:
-                raise Exception("Empty response from Gemini API")
-            
+                raise Exception("Empty response from AI API")
             raw_text = raw_text.strip()
-            logger.info(f"Raw Gemini Intent Response: {raw_text}")
-
+            if raw_text.startswith("```"):
+                lines = raw_text.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                raw_text = "\n".join(lines)
+            logger.info(f"Raw AI Intent Response: {raw_text[:300]}...")
             parsed = json.loads(raw_text)
             return parsed
-
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Gemini Runtime Error: {error_msg}")
-            
+            logger.error(f"AI Runtime Error: {error_msg}")
             friendly_error = error_msg
             if "quota" in error_msg.lower() or "429" in error_msg or "resource_exhausted" in error_msg.lower():
-                friendly_error = "Gemini API quota exceeded for the day. Please try again later or check your billing."
-
+                friendly_error = "AI API quota exceeded. Please try again later."
             return {
                 "operation": "GEMINI_ERROR",
                 "entity": None,
                 "parameters": {},
-                "error_message": friendly_error
+                "error_message": friendly_error,
             }
 
     def generate_response(self, user_message: str, backend_result: str) -> str:
-        """Stage 3: Professional Phrasing with safety guards."""
         fallback = "I don't see this information in my records yet."
-        
-        if not self.model_name or not backend_result or backend_result == fallback:
+        if not self._initialized or not self.api_key or not backend_result or backend_result == fallback:
             return backend_result or fallback
-        
         prompt = (
             "You are a professional business assistant. Phrase a response based ONLY on this result.\n"
             f"Result: {backend_result}\n"
             f"User asked: {user_message}\n"
             "Rules: Concise, professional, human-like. NO technical jargon. If information is missing/error, say: 'I don't see this information in my records yet.'"
         )
-
         try:
-            generation_config = {
-                "maxOutputTokens": 500,
-                "temperature": 0.2
-            }
-            
-            text = self._call_api(prompt, generation_config=generation_config)
-            
+            text = self._call_api(prompt, generation_config={"maxOutputTokens": 500, "temperature": 0.2})
             if not text:
                 return backend_result or fallback
-            
             text = text.strip()
             if len(text) < 15:
                 return backend_result
             return text
         except Exception as e:
-            logger.error(f"Response Generation failed (Stage 3): {e}")
+            logger.error(f"Response Generation failed: {e}")
             return backend_result or fallback
