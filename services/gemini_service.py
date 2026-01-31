@@ -10,21 +10,28 @@ DEFAULT_MODEL = "google/gemini-2.0-flash-exp"
 
 class GeminiService:
     """
-    AI backend via OpenRouter. Set one env variable: AI_API_KEY (your OpenRouter API key).
+    AI backend via OpenRouter. Set one env variable: AI_KEY (your OpenRouter API key).
     """
     def __init__(self):
-        # Railway: env vars are loaded at deploy time — redeploy after adding/changing AI_API_KEY
-        raw = os.getenv("AI_API_KEY")
+        # Railway: env vars are loaded at deploy time — redeploy after adding/changing AI_KEY
+        raw = os.getenv("AI_KEY")
         api_key = (raw or "").strip()
+        
+        # Print directly to stdout for debugging (always visible in logs)
+        print(f"[GeminiService] AI_KEY env check: {'SET' if api_key else 'NOT SET'}")
+        if api_key:
+            print(f"[GeminiService] AI_KEY length: {len(api_key)}")
+        
         if not api_key:
             logger.error(
-                "AI_API_KEY is not set. Set it in Railway dashboard (Variables) and redeploy."
+                "AI_KEY is not set. Set it in Railway dashboard (Variables) and redeploy."
             )
+            print("[GeminiService] CRITICAL: AI_KEY is empty - service will not work")
             self.api_key = None
             self.model_name = None
             self._initialized = False
             return
-        logger.info(f"AI_API_KEY loaded (length={len(api_key)}). Verifying OpenRouter...")
+        logger.info(f"AI_KEY loaded (length={len(api_key)}). Verifying OpenRouter...")
         self.api_key = api_key
         self.model_name = DEFAULT_MODEL
         ok = self._verify()
@@ -34,6 +41,7 @@ class GeminiService:
                 "OpenRouter verification failed. Check key and redeploy. "
                 "Get a key at https://openrouter.ai/keys"
             )
+            print(f"[GeminiService] OpenRouter verification FAILED")
 
     def _verify(self) -> bool:
         try:
@@ -64,7 +72,7 @@ class GeminiService:
         generation_config: Optional[Dict] = None,
     ) -> Optional[str]:
         if not self._initialized or not self.api_key:
-            raise Exception("AI not initialized (set AI_API_KEY)")
+            raise Exception("AI not initialized (set AI_KEY)")
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -108,7 +116,7 @@ class GeminiService:
                 "operation": "GEMINI_ERROR",
                 "entity": None,
                 "parameters": {},
-                "error_message": "AI not initialized. Set AI_API_KEY in Railway and redeploy.",
+                "error_message": "AI not initialized. Set AI_KEY in Railway and redeploy.",
             }
         context_section = ""
         if conversation_history and len(conversation_history) > 0:
