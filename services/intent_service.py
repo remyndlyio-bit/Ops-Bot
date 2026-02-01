@@ -323,14 +323,22 @@ class IntentService:
                     elif entity == "bank_details":
                         action_result = "Our bank details: HDFC Bank, Acct: 12345678, IFSC: HDFC0001234."
                     elif entity == "client":
-                        # Handle client list requests (schema-aware)
+                        # Handle client list requests (schema-aware); support "clients for April" month filter
+                        month_param = params.get("month")
+                        year_param = params.get("year")
+                        if month_param:
+                            # "Display clients for April" - filter by month first
+                            records_for_list = self.sheets.get_invoice_data(None, month_param, year=year_param)
+                            logger.info(f"[QUERY] Client List (filtered by {month_param}) - Found {len(records_for_list)} records")
+                        else:
+                            records_for_list = all_records
                         if not name:
                             from services.business_logic_service import BusinessLogicService as BLS
-                            col_map = BLS._get_column_names(list(all_records[0].keys())) if all_records else {}
+                            col_map = BLS._get_column_names(list(records_for_list[0].keys())) if records_for_list else {}
                             client_cols = col_map.get("client", ["Client Name", "Production house"])
-                            logger.info(f"[QUERY] Client List Query - Searching {len(all_records)} records (columns: {client_cols})")
+                            logger.info(f"[QUERY] Client List Query - Searching {len(records_for_list)} records (columns: {client_cols})")
                             client_names = set()
-                            for row in all_records:
+                            for row in records_for_list:
                                 client = BLS._find_column_value(row, client_cols)
                                 if client and str(client).strip():
                                     client_names.add(str(client).strip())
@@ -338,12 +346,14 @@ class IntentService:
                             logger.info(f"[QUERY] Client list query results - Found {len(client_names)} unique clients")
                             if client_names:
                                 client_list = sorted(list(client_names))
+                                period_label = f" for {month_param}" + (f" {year_param}" if year_param else "") if month_param else ""
                                 if len(client_list) <= 10:
-                                    action_result = f"Here are the client names in my records:\n" + "\n".join(f"• {c}" for c in client_list)
+                                    action_result = f"Here are the client names in my records{period_label}:\n" + "\n".join(f"• {c}" for c in client_list)
                                 else:
-                                    action_result = f"I found {len(client_list)} clients. Here are some:\n" + "\n".join(f"• {c}" for c in client_list[:10]) + f"\n... and {len(client_list) - 10} more."
+                                    action_result = f"I found {len(client_list)} clients{period_label}. Here are some:\n" + "\n".join(f"• {c}" for c in client_list[:10]) + f"\n... and {len(client_list) - 10} more."
                             else:
-                                action_result = "I don't see any client names in my current sheet."
+                                period_label = f" for {month_param}" + (f" {year_param}" if year_param else "") if month_param else ""
+                                action_result = f"I don't see any client records{period_label} yet."
                         else:
                             # User is searching for a specific client (schema-aware)
                             from services.business_logic_service import BusinessLogicService as BLS
@@ -412,6 +422,11 @@ class IntentService:
             response = action_result
         elif action_result.startswith("Total billing") or action_result.startswith("The total billing"):
             # Skip Gemini phrasing for billing responses - they're already well-formatted
+            response = action_result
+        elif action_result.startswith("Here are the client names") or action_result.startswith("I found ") and "clients" in action_result:
+            # Skip Gemini phrasing for client list - avoid AI overwriting with fallback
+            response = action_result
+        elif action_result.startswith("Found ") and "records matching" in action_result:
             response = action_result
         else:
             response = self.gemini.generate_response(message, action_result)

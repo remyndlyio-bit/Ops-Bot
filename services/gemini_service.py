@@ -187,7 +187,9 @@ class GeminiService:
             "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"payment\", \"confidence\": 0.9, \"clarification_question\": null, \"resolved_columns\": {}, \"timeline_hint\": null, \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": null, \"year\": null, \"period\": null, \"days\": null}}\n"
             "5. 'Get me Garnier invoice for April'\n"
             "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"confidence\": 0.95, \"clarification_question\": null, \"resolved_columns\": {}, \"timeline_hint\": null, \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
-            "6. Context: 'Get me Garnier invoice for April', current 'Send it again'\n"
+            "6. 'Display clients for April' or 'Show clients for April' or 'List clients in April'\n"
+            "   -> {\"operation\": \"READ_ENTITY\", \"entity\": \"client\", \"confidence\": 0.95, \"clarification_question\": null, \"resolved_columns\": {\"filter_by\": \"invoice_date\", \"order_by\": null, \"display\": null}, \"timeline_hint\": null, \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
+            "7. Context: 'Get me Garnier invoice for April', current 'Send it again'\n"
             "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"confidence\": 0.95, \"clarification_question\": null, \"resolved_columns\": {}, \"timeline_hint\": null, \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n\n"
             "RULES: 1) Handle typos. 2) NEVER omit keys. 3) Use null for unknown values. 4) confidence < 0.7 with ambiguity -> NEED_CLARIFICATION. 5) Return ONLY valid JSON."
         )
