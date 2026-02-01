@@ -282,7 +282,7 @@ class IntentService:
             
             # Handle SMALL_TALK only if not an invoice retrieval or overdue query
             if operation == "SMALL_TALK" and action_result == "I don't see this information in my records yet.":
-                response = "Hello! I'm your Operations Bot. How can I help you today?"
+                response = "Hello! I'm your Assistant Remydnly. How can I help you today?"
                 self._store_conversation(user_id, message, response)
                 return {
                     "operation": "SMALL_TALK",

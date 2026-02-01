@@ -1,9 +1,10 @@
-from fastapi import FastAPI, Form, BackgroundTasks, Request # Added Request for Telegram webhook
+from fastapi import FastAPI, Form, BackgroundTasks, Request
 from fastapi.responses import PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
-import httpx # Added for Telegram webhook setup
+import asyncio
+import httpx
 from services.intent_service import IntentService
 from services.sheets_service import SheetsService
 from services.invoice_service import InvoiceService
@@ -134,6 +135,15 @@ async def whatsapp_webhook(
 
     return PlainTextResponse("OK")
 
+async def _keep_typing(chat_id: int, stop_event: asyncio.Event):
+    """Send typing action every 4 seconds until stop_event is set."""
+    while not stop_event.is_set():
+        await telegram_service.send_chat_action(chat_id, "typing")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=4.0)
+        except asyncio.TimeoutError:
+            pass
+
 @app.post("/webhooks/telegram")
 async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
     """Telegram Webhook"""
@@ -141,13 +151,28 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
         data = await request.json()
         if "message" not in data:
             return {"status": "ok"}
-        
+
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
         logger.info(f"Received Telegram message from {chat_id}: {text}")
 
+        await telegram_service.send_chat_action(chat_id, "typing")
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(_keep_typing(chat_id, stop_typing))
+
         user_id = str(chat_id)
-        result = intent_service.process_request(user_id=user_id, message=text)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: intent_service.process_request(user_id=user_id, message=text)
+        )
+
+        stop_typing.set()
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+
         if result.get("response"):
             await telegram_service.send_text_message(chat_id, result["response"])
 

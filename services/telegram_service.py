@@ -7,6 +7,15 @@ class TelegramService:
         self.token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.base_url = f"https://api.telegram.org/bot{self.token}"
 
+    async def send_chat_action(self, chat_id: int, action: str = "typing"):
+        """Send a chat action (e.g. typing). Action lasts ~5 seconds."""
+        url = f"{self.base_url}/sendChatAction"
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.post(url, json={"chat_id": chat_id, "action": action})
+            except Exception as e:
+                logger.debug(f"send_chat_action failed: {e}")
+
     async def send_text_message(self, chat_id: int, text: str):
         url = f"{self.base_url}/sendMessage"
         # Sanitize basic HTML tags if user-generated content is passed
