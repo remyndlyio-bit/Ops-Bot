@@ -8,12 +8,12 @@ class BusinessLogicService:
     @staticmethod
     def _get_column_names(all_available_columns: List[str] = None) -> Dict[str, List[str]]:
         """
-        Gets column name mappings from COLUMN_NAMES env variable and intelligently categorizes them.
+        Gets column name mappings from COLUMN_NAMES or COLUMN_NAME env variable and intelligently categorizes them.
         If all_available_columns is provided, uses those; otherwise uses env variable.
         Always includes Notes and AdditionalNotes as fallback.
         """
-        # Get comma-separated column names from env variable
-        column_names_str = os.getenv("COLUMN_NAMES", "")
+        # Get comma-separated column names from env (COLUMN_NAMES or COLUMN_NAME)
+        column_names_str = os.getenv("COLUMN_NAMES") or os.getenv("COLUMN_NAME") or ""
         
         if all_available_columns:
             # Use actual columns from the sheet
@@ -36,7 +36,9 @@ class BusinessLogicService:
         invoice_date_cols = []
         email_cols = []
         first_reminder_cols = []
-        
+        job_cols = []  # job, project, role, engagement
+        order_by_cols = []  # time-aware columns for "latest", "last" queries
+
         for col in columns:
             col_lower = col.lower().strip()
             # normalize to help detect headers like "Paid ?", "Payment-Date", "Date\t"
@@ -47,9 +49,8 @@ class BusinessLogicService:
                 .replace("?", " ")
             )
             col_norm = " ".join(col_norm.split())
-            
+
             # Check for status/paid columns FIRST.
-            # Accept variants like "Paid ?", "Paid?", "Payment status", etc.
             if (
                 col_norm == "paid"
                 or col_norm.startswith("paid ")
@@ -57,22 +58,24 @@ class BusinessLogicService:
                 or "status" in col_norm
             ):
                 status_cols.append(col)
-            # Check for due date columns (contains "due" AND "date")
             elif "due" in col_norm and "date" in col_norm:
                 due_date_cols.append(col)
-            # Check for invoice date column (contains "date" but NOT due date and NOT payment date)
             elif "date" in col_norm and "payment" not in col_norm and "due" not in col_norm:
                 invoice_date_cols.append(col)
-            # Check for client columns (contains "client" or "production")
             elif "client" in col_norm or "production" in col_norm:
                 client_cols.append(col)
-            # Check for notes columns (contains "notes" or "additional")
             elif "notes" in col_norm or "additional" in col_norm:
                 notes_cols.append(col)
             elif "email" in col_norm:
                 email_cols.append(col)
             elif "firstremindersent" in col_norm.replace(" ", "") or "first reminder sent" in col_norm:
                 first_reminder_cols.append(col)
+            # Job/project/role columns for "last job" type queries
+            elif any(x in col_norm for x in ["job", "project", "role", "engagement", "task"]):
+                job_cols.append(col)
+            # Time-aware ordering columns (for "latest", "last" queries)
+            elif any(x in col_norm for x in ["created", "updated", "completed", "end date", "start date"]):
+                order_by_cols.append(col)
         
         # Always ensure Notes and AdditionalNotes are in notes columns (case-insensitive check)
         for col in columns:
@@ -104,14 +107,24 @@ class BusinessLogicService:
                 col_lower = col.lower().strip()
                 if "client" in col_lower or ("production" in col_lower and "house" in col_lower):
                     client_cols.append(col)
-        
+
+        # Fallback: literal "Job" for job columns
+        if not job_cols:
+            for col in columns:
+                if col.lower().strip() in ["job", "project", "role"]:
+                    job_cols.append(col)
+
+        # Order-by: prefer explicit columns; fallback to invoice_date for time ordering
+        if not order_by_cols and invoice_date_cols:
+            order_by_cols = list(invoice_date_cols)
+
         logger.info(
             "Column categorization - "
             f"Invoice Date: {invoice_date_cols}, Due Date: {due_date_cols}, "
             f"Status: {status_cols}, Client: {client_cols}, Notes: {notes_cols}, "
-            f"Email: {email_cols}, FirstReminderSent: {first_reminder_cols}"
+            f"Job: {job_cols}, OrderBy: {order_by_cols}, Email: {email_cols}"
         )
-        
+
         return {
             "invoice_date": invoice_date_cols,
             "due_date": due_date_cols,
@@ -120,7 +133,33 @@ class BusinessLogicService:
             "notes": notes_cols,
             "email": email_cols,
             "first_reminder_sent": first_reminder_cols,
+            "job": job_cols,
+            "order_by": order_by_cols,
         }
+
+    @staticmethod
+    def get_schema_for_intent(all_available_columns: List[str] = None) -> str:
+        """
+        Returns a schema description for the intent parser, using COLUMN_NAMES or COLUMN_NAME env.
+        Used for schema-aware reasoning and semantic column mapping.
+        """
+        column_map = BusinessLogicService._get_column_names(all_available_columns)
+        parts = []
+        if column_map.get("client"):
+            parts.append(f"Client identifier columns: {', '.join(column_map['client'])}")
+        if column_map.get("invoice_date"):
+            parts.append(f"Invoice/Job date columns (for filtering by month/year): {', '.join(column_map['invoice_date'])}")
+        if column_map.get("due_date"):
+            parts.append(f"Due date columns: {', '.join(column_map['due_date'])}")
+        if column_map.get("job"):
+            parts.append(f"Job/Project/Role columns: {', '.join(column_map['job'])}")
+        if column_map.get("order_by"):
+            parts.append(f"Time-aware ordering columns (latest, last, first): {', '.join(column_map['order_by'])}")
+        if column_map.get("status"):
+            parts.append(f"Payment status columns: {', '.join(column_map['status'])}")
+        if column_map.get("notes"):
+            parts.append(f"Notes columns: {', '.join(column_map['notes'])}")
+        return "\n".join(parts) if parts else "No column schema available (use COLUMN_NAMES env)."
 
     @staticmethod
     def _is_truthy(val: any) -> bool:
@@ -536,6 +575,69 @@ class BusinessLogicService:
                 response_parts.append(f"   Due Date: {due_date_display}{notes_display}")
         
         return "\n".join(response_parts)
+
+    @staticmethod
+    def get_most_recent_record(
+        all_records: List[Dict],
+        client_name: Optional[str] = None,
+        entity_hint: str = "job",
+    ) -> Optional[Dict]:
+        """
+        Returns the most recent record by time, optionally filtered by client.
+        Uses order_by columns (invoice_date, created_at, etc.) for sorting.
+        entity_hint: "job" | "invoice" | "payment" - affects which fields to display.
+        """
+        if not all_records:
+            return None
+        available_columns = list(all_records[0].keys())
+        column_map = BusinessLogicService._get_column_names(all_available_columns=available_columns)
+        order_cols = column_map.get("order_by", column_map.get("invoice_date", []))
+        if not order_cols:
+            order_cols = [k for k in available_columns if "date" in k.lower()]
+        if not order_cols:
+            return all_records[-1] if all_records else None
+
+        def get_sort_key(row: Dict):
+            for col in order_cols:
+                val = BusinessLogicService._find_column_value(row, [col]) or row.get(col)
+                if val:
+                    dt = parse_sheet_date(str(val))
+                    if dt:
+                        return dt
+            return datetime.min
+
+        filtered = all_records
+        if client_name:
+            search_term = client_name.strip().lower()
+            client_cols = column_map.get("client", [])
+            filtered = [
+                r for r in all_records
+                if any(search_term in str(r.get(c, "")).lower() for c in client_cols)
+            ]
+        if not filtered:
+            return None
+        return max(filtered, key=get_sort_key)
+
+    @staticmethod
+    def format_single_record_response(record: Dict, entity_hint: str = "job") -> str:
+        """Formats a single record into a readable response."""
+        if not record:
+            return "I couldn't find a matching record."
+        column_map = BusinessLogicService._get_column_names(list(record.keys()))
+        client = BusinessLogicService._find_column_value(record, column_map["client"])
+        job_val = BusinessLogicService._find_column_value(record, column_map.get("job", []))
+        date_val = BusinessLogicService._find_column_value(record, column_map.get("invoice_date", []))
+        notes = BusinessLogicService._find_column_value(record, column_map["notes"])
+        parts = []
+        if client:
+            parts.append(f"Client: {client}")
+        if job_val:
+            parts.append(f"Job: {job_val}")
+        if date_val:
+            parts.append(f"Date: {date_val}")
+        if notes:
+            parts.append(f"Notes: {notes}")
+        return "\n".join(parts) if parts else str(record)
 
     @staticmethod
     def get_blacklisted_clients(all_records: List[Dict]) -> List[str]:

@@ -28,8 +28,15 @@ class IntentService:
         # Get conversation history for context-aware parsing (before storing current message)
         conversation_history = self.memory.get_conversation_history(user_id)
 
-        # 1. Single-call Intent & Parameter Parsing with context
-        result = self.gemini.parse_user_intent(message, conversation_history=conversation_history)
+        # Schema for intent parser (from COLUMN_NAMES or COLUMN_NAME env)
+        schema_info = logic.get_schema_for_intent()
+
+        # 1. Schema-aware Intent & Parameter Parsing with context
+        result = self.gemini.parse_user_intent(
+            message,
+            conversation_history=conversation_history,
+            schema_info=schema_info or None,
+        )
         
         # Validation Layer
         operation = result.get("operation")
@@ -48,6 +55,28 @@ class IntentService:
                 "operation": "GEMINI_ERROR",
                 "response": response,
                 "trigger_invoice": False
+            }
+
+        # Handle low-confidence ambiguity: return clarification question
+        confidence = result.get("confidence", 1.0)
+        clarification = result.get("clarification_question")
+        if operation == "NEED_CLARIFICATION" and clarification:
+            logger.info(f"Intent ambiguous (confidence={confidence}) - asking clarification")
+            response = clarification
+            self._store_conversation(user_id, message, response)
+            return {
+                "operation": "NEED_CLARIFICATION",
+                "response": response,
+                "trigger_invoice": False,
+            }
+        if isinstance(confidence, (int, float)) and confidence < 0.7 and clarification:
+            logger.info(f"Low confidence ({confidence}) - asking clarification")
+            response = clarification
+            self._store_conversation(user_id, message, response)
+            return {
+                "operation": "NEED_CLARIFICATION",
+                "response": response,
+                "trigger_invoice": False,
             }
 
         # 2. Execution
@@ -279,17 +308,30 @@ class IntentService:
             if action_result == "I don't see this information in my records yet.":
                 if operation == "READ_ENTITY":
                     name = params.get("client_name")
-                    if entity == "bank_details":
+                    timeline_hint = result.get("timeline_hint")
+                    # Timeline-based query: "last job", "latest project", etc.
+                    if entity in ("job", "project") and timeline_hint in ("latest", "last", "previous"):
+                        if all_records:
+                            most_recent = logic.get_most_recent_record(all_records, client_name=name, entity_hint=entity)
+                            if most_recent:
+                                action_result = logic.format_single_record_response(most_recent, entity_hint=entity)
+                                logger.info("[QUERY] Timeline query - returned most recent record")
+                            else:
+                                action_result = f"I couldn't find a recent {'job' if entity == 'job' else 'project'} record" + (f" for {name}" if name else "") + "."
+                        else:
+                            action_result = "I don't have any records to search yet."
+                    elif entity == "bank_details":
                         action_result = "Our bank details: HDFC Bank, Acct: 12345678, IFSC: HDFC0001234."
                     elif entity == "client":
-                        # Handle client list requests
+                        # Handle client list requests (schema-aware)
                         if not name:
-                            # User wants a list of clients
-                            logger.info(f"[QUERY] Client List Query - Searching {len(all_records)} records")
-                            logger.info(f"[QUERY] Checking columns: 'Client Name', 'Production house'")
+                            from services.business_logic_service import BusinessLogicService as BLS
+                            col_map = BLS._get_column_names(list(all_records[0].keys())) if all_records else {}
+                            client_cols = col_map.get("client", ["Client Name", "Production house"])
+                            logger.info(f"[QUERY] Client List Query - Searching {len(all_records)} records (columns: {client_cols})")
                             client_names = set()
                             for row in all_records:
-                                client = row.get("Client Name") or row.get("Production house")
+                                client = BLS._find_column_value(row, client_cols)
                                 if client and str(client).strip():
                                     client_names.add(str(client).strip())
                             
@@ -303,16 +345,21 @@ class IntentService:
                             else:
                                 action_result = "I don't see any client names in my current sheet."
                         else:
-                            # User is searching for a specific client
-                            logger.info(f"[QUERY] Client Search Query - Searching for: '{name}' in {len(all_records)} records")
-                            logger.info(f"[QUERY] Searching across all columns for partial match")
+                            # User is searching for a specific client (schema-aware)
+                            from services.business_logic_service import BusinessLogicService as BLS
+                            col_map = BLS._get_column_names(list(all_records[0].keys())) if all_records else {}
+                            client_cols = col_map.get("client", ["Client Name", "Production house"])
+                            logger.info(f"[QUERY] Client Search Query - Searching for: '{name}' in {len(all_records)} records (columns: {client_cols})")
                             results = []
                             for r in all_records:
-                                for v in r.values():
-                                    if name.lower() in str(v).lower():
+                                for c in client_cols:
+                                    if c in r and name.lower() in str(r.get(c, "")).lower():
                                         results.append(r)
                                         break
-                            
+                            if not results:
+                                for r in all_records:
+                                    if any(name.lower() in str(v).lower() for v in r.values()):
+                                        results.append(r)
                             logger.info(f"[QUERY] Client search results - Found {len(results)} records matching '{name}'")
                             if results:
                                 action_result = f"Found {len(results)} records matching '{name}'."
