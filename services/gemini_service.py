@@ -5,7 +5,7 @@ from typing import List, Dict, Optional
 from utils.logger import logger
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "google/gemini-2.0-flash-exp"
+DEFAULT_MODEL = "google/gemini-2.5-flash"
 
 
 class GeminiService:
