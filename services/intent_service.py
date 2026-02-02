@@ -1,10 +1,12 @@
 from services.gemini_service import GeminiService
 from services.sheets_service import SheetsService
 from services.gmail_service import GmailService
+from services.query_planner import get_query_plan
+from services.query_validator import validate_plan
+from services.query_executor import execute_plan
 from utils.memory_service import MemoryService
 from utils.logger import logger
-from utils.date_utils import get_last_quarter_months, number_to_month_name, infer_year_for_month
-from typing import Dict
+from typing import Dict, List
 import json
 
 class IntentService:
@@ -15,78 +17,50 @@ class IntentService:
         self.memory = MemoryService()
 
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
-        """Helper method to store user message and bot response in conversation history."""
+        """Store user message and bot response in conversation history."""
         self.memory.add_message(user_id, "user", user_message)
         self.memory.add_message(user_id, "assistant", bot_response)
 
+    def _get_schema_and_columns(self, records: List[Dict]) -> tuple:
+        """Return (schema_description, allowed_columns, date_column) from sheet or env."""
+        from services.business_logic_service import BusinessLogicService
+        logic = BusinessLogicService()
+        cols = list(records[0].keys()) if records else []
+        if not cols:
+            column_map = logic._get_column_names(None)
+            cols = list({c for v in column_map.values() for c in v})
+        schema_description = logic.get_schema_for_intent(cols)
+        column_map = logic._get_column_names(cols)
+        date_cols = column_map.get("invoice_date", []) or ([c for c in cols if "date" in c.lower()] if cols else [])
+        date_column = date_cols[0] if date_cols else (cols[0] if cols else "Date")
+        return schema_description, cols, date_column
+
+    def _format_query_result(self, result: Dict, plan: Dict) -> str:
+        """Format executor result for the user."""
+        if not result.get("ok"):
+            return result.get("message", "I don't see this information in my records yet.")
+        if "labels" in result and result["labels"]:
+            lines = ["• " + str(l) for l in result["labels"][:30]]
+            if len(result["labels"]) > 30:
+                lines.append(f"... and {len(result['labels']) - 30} more.")
+            return "Here are the values in my records:\n" + "\n".join(lines)
+        value = result.get("value", 0)
+        column = plan.get("column", "value")
+        return f"Total for the selected period: ₹{value:,.2f}." if isinstance(value, (int, float)) else str(value)
+
     def process_request(self, user_id: str, message: str) -> Dict:
         """
-        Coordinates the Operations Architecture using single-call Gemini parsing.
+        Main handler: keyword-based branches for reminder/invoice/overdue;
+        then LLM query plan → validate → resolve time → execute → format.
         """
         from services.business_logic_service import BusinessLogicService
         logic = BusinessLogicService()
-
-        # Get conversation history for context-aware parsing (before storing current message)
         conversation_history = self.memory.get_conversation_history(user_id)
-
-        # Schema for intent parser (from COLUMN_NAMES or COLUMN_NAME env)
-        schema_info = logic.get_schema_for_intent()
-
-        # 1. Schema-aware Intent & Parameter Parsing with context
-        result = self.gemini.parse_user_intent(
-            message,
-            conversation_history=conversation_history,
-            schema_info=schema_info or None,
-        )
-        
-        # Validation Layer
-        operation = result.get("operation")
-        params = result.get("parameters", {})
-        entity = result.get("entity")
-
-        # Log the parsed intent for debugging
-        logger.info(f"Parsed intent - Operation: {operation}, Entity: {entity}, Params: {params}")
-
-        # Handle explicit Gemini API errors
-        if operation == "GEMINI_ERROR":
-            error_msg = result.get("error_message", "Unknown Gemini API error")
-            response = error_msg
-            self._store_conversation(user_id, message, response)
-            return {
-                "operation": "GEMINI_ERROR",
-                "response": response,
-                "trigger_invoice": False
-            }
-
-        # Handle low-confidence ambiguity: return clarification question
-        confidence = result.get("confidence", 1.0)
-        clarification = result.get("clarification_question")
-        if operation == "NEED_CLARIFICATION" and clarification:
-            logger.info(f"Intent ambiguous (confidence={confidence}) - asking clarification")
-            response = clarification
-            self._store_conversation(user_id, message, response)
-            return {
-                "operation": "NEED_CLARIFICATION",
-                "response": response,
-                "trigger_invoice": False,
-            }
-        if isinstance(confidence, (int, float)) and confidence < 0.7 and clarification:
-            logger.info(f"Low confidence ({confidence}) - asking clarification")
-            response = clarification
-            self._store_conversation(user_id, message, response)
-            return {
-                "operation": "NEED_CLARIFICATION",
-                "response": response,
-                "trigger_invoice": False,
-            }
-
-        # 2. Execution
-        action_result = "I don't see this information in my records yet."
         trigger_invoice = False
         invoice_data = {}
 
         try:
-            # Payment reminder intent (keyword-based, runs before normal ops)
+            # 1. Payment reminder (keyword-based)
             reminder_keywords = [
                 "payment reminder",
                 "payment reminders",
@@ -102,10 +76,7 @@ class IntentService:
                 logger.info("[REMINDER] Detected payment reminder query")
                 records = self.sheets.get_all_records_with_row_numbers()
                 logger.info(f"[REMINDER] Loaded {len(records)} records for reminder scan")
-
-                # Use 'days' from intent parameters if provided, else default to 7
-                days_param = params.get("days")
-                approaching_days = int(days_param) if isinstance(days_param, int) and days_param > 0 else 7
+                approaching_days = 7
                 # For now we treat sheet 'Date' as the due date (no extra payment terms shift)
                 payment_terms_days = 0
 
@@ -168,319 +139,86 @@ class IntentService:
                     "trigger_invoice": False,
                 }
 
-            # Check for invoice retrieval FIRST (before operation-based logic)
-            # This ensures invoice requests are handled regardless of how Gemini categorizes them
-            is_retrieval_query = any(word in message.lower() for word in ["get", "download", "send", "give", "show", "retrieve", "fetch", "can you get"])
-            has_invoice_keyword = entity == "invoice" or "invoice" in message.lower()
-            is_action_trigger_invoice = operation == "ACTION_TRIGGER" and entity == "invoice"
-            
-            # High-Priority Retrieval Path (Handle "Get me X Invoice")
-            # Also handle ACTION_TRIGGER with invoice entity as retrieval
-            if (is_retrieval_query and has_invoice_keyword) or is_action_trigger_invoice:
-                logger.info(f"Detected invoice retrieval query - fetching records")
-                # Fetch records for invoice retrieval
-                all_records = []
+            # 2. Invoice retrieval (keyword-based; use LLM only to extract params)
+            is_retrieval = any(w in message.lower() for w in ["get", "download", "send", "give", "show", "retrieve", "fetch"]) and "invoice" in message.lower()
+            if is_retrieval:
+                schema_info = logic.get_schema_for_intent()
+                intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
+                params = intent_result.get("parameters", {})
+                if intent_result.get("operation") != "GEMINI_ERROR":
+                    all_records = []
+                    try:
+                        sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
+                        all_records = sheet.get_all_records()
+                    except Exception as se:
+                        logger.error(f"Sheet access failed: {se}")
+                    if all_records:
+                        from services.invoice_service import InvoiceService
+                        resolved = InvoiceService.resolve_invoice_pdf(params, all_records)
+                        if resolved["status"] == "found":
+                            trigger_invoice = True
+                            invoice_data = {"client_name": resolved["client"], "month": resolved["month"], "bill_number": params.get("bill_number"), "year": resolved.get("year")}
+                            response = f"Confirmed! I've found the record for {resolved['client']}. I'm generating the invoice now... 📄"
+                        else:
+                            response = resolved.get("message", "I don't see that invoice in my records.")
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
+
+            # 3. Overdue / payment followup (keyword-based)
+            overdue_keywords = ["overdue", "due date", "passed due", "past due", "late payment", "follow up", "followup", "payment followup", "payment status"]
+            is_overdue = any(k in message.lower() for k in overdue_keywords) and ("invoice" in message.lower() or "client" in message.lower() or "payment" in message.lower())
+            if is_overdue:
                 try:
-                    logger.info(f"[QUERY] Fetching dataset for invoice retrieval")
                     sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
                     all_records = sheet.get_all_records()
-                    logger.info(f"[QUERY] Dataset loaded - Total records: {len(all_records)}")
-                    if all_records:
-                        logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
-                except Exception as se:
-                    logger.error(f"Sheet access failed: {se}")
-                    response = "I encountered an error accessing the data records."
+                    overdue_invoices = logic.get_overdue_invoices(all_records)
+                    response = logic.format_overdue_invoices_response(overdue_invoices, payment_terms_days=30)
                     self._store_conversation(user_id, message, response)
-                    return {
-                        "operation": operation,
-                        "response": response,
-                        "trigger_invoice": False
-                    }
-                
-                from services.invoice_service import InvoiceService
-                resolved = InvoiceService.resolve_invoice_pdf(params, all_records)
-                
-                if resolved["status"] == "found":
-                    trigger_invoice = True
-                    invoice_data = {
-                        "client_name": resolved["client"],
-                        "month": resolved["month"],
-                        "bill_number": params.get("bill_number"),
-                        "year": params.get("year")
-                    }
-                    action_result = f"Confirmed! I've found the record for {resolved['client']}. I'm generating the invoice now... 📄"
-                    logger.info(f"Invoice retrieval successful - Client: {resolved['client']}, Month: {resolved['month']}")
-                else:
-                    action_result = resolved["message"]
-                    logger.info(f"Invoice retrieval failed - {resolved.get('status', 'unknown')}: {action_result}")
-                    # If it's a retrieval query and we didn't find it, we stop here.
-                    self._store_conversation(user_id, message, action_result)
-                    return {
-                        "operation": operation,
-                        "response": action_result,
-                        "trigger_invoice": False
-                    }
-            
-            # Check for payment followup queries (ACTION_TRIGGER with payment entity or followup keywords)
-            if action_result == "I don't see this information in my records yet.":
-                followup_keywords = ["follow up", "followup", "follow-up", "payment followup", "payment follow up", "payment follow-up", "check payment", "payment status"]
-                is_followup_query = any(keyword in message.lower() for keyword in followup_keywords)
-                is_payment_action = (operation == "ACTION_TRIGGER" and entity == "payment") or is_followup_query
-                
-                if is_payment_action:
-                    logger.info("Detected payment followup query")
-                    # Fetch records for payment followup query
-                    all_records = []
-                    try:
-                        logger.info(f"[QUERY] Fetching dataset for payment followup query")
-                        sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
-                        all_records = sheet.get_all_records()
-                        logger.info(f"[QUERY] Dataset loaded - Total records: {len(all_records)}")
-                        if all_records:
-                            logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
-                    except Exception as se:
-                        logger.error(f"Sheet access failed: {se}")
-                        response = "I encountered an error accessing the data records."
-                        self._store_conversation(user_id, message, response)
-                        return {
-                            "operation": operation,
-                            "response": response,
-                            "trigger_invoice": False
-                        }
-                    
-                    overdue_invoices = logic.get_overdue_invoices(all_records)
-                    action_result = logic.format_overdue_invoices_response(overdue_invoices, payment_terms_days=30)
-                    logger.info(f"Found {len(overdue_invoices)} invoices needing payment followup")
-            
-            # Check for overdue invoice queries (after invoice retrieval, before other operations)
-            if action_result == "I don't see this information in my records yet.":
-                overdue_keywords = ["overdue", "due date", "passed due", "past due", "past the due", "exceeded due", "late payment", "which.*passed", "have passed"]
-                is_overdue_query = any(keyword in message.lower() for keyword in overdue_keywords)
-                if is_overdue_query and (entity == "invoice" or entity == "client" or "invoice" in message.lower() or "client" in message.lower()):
-                    logger.info("Detected overdue invoice query")
-                    # Fetch records for overdue query
-                    all_records = []
-                    try:
-                        logger.info(f"[QUERY] Fetching dataset for overdue invoice query")
-                        sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
-                        all_records = sheet.get_all_records()
-                        logger.info(f"[QUERY] Dataset loaded - Total records: {len(all_records)}")
-                        if all_records:
-                            logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
-                    except Exception as se:
-                        logger.error(f"Sheet access failed: {se}")
-                        response = "I encountered an error accessing the data records."
-                        self._store_conversation(user_id, message, response)
-                        return {
-                            "operation": operation,
-                            "response": response,
-                            "trigger_invoice": False
-                        }
-                    
-                    overdue_invoices = logic.get_overdue_invoices(all_records)
-                    action_result = logic.format_overdue_invoices_response(overdue_invoices, payment_terms_days=30)
-                    logger.info(f"Found {len(overdue_invoices)} overdue invoices")
-            
-            # Handle SMALL_TALK only if not an invoice retrieval or overdue query
-            if operation == "SMALL_TALK" and action_result == "I don't see this information in my records yet.":
-                response = "Hello! I'm your Assistant Remydnly. How can I help you today?"
+                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                except Exception as se:
+                    logger.error(f"Overdue query failed: {se}")
+
+            # 4. Query-plan path: LLM returns structured JSON → validate → resolve time → execute
+            try:
+                sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
+                records = sheet.get_all_records()
+            except Exception as se:
+                logger.error(f"Sheet access failed: {se}")
+                records = []
+            if not records:
+                response = "I don't have any records to query yet."
                 self._store_conversation(user_id, message, response)
-                return {
-                    "operation": "SMALL_TALK",
-                    "response": response,
-                    "trigger_invoice": False
-                }
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # Sheets data often needed for other operations
-            if action_result == "I don't see this information in my records yet.":
-                all_records = []
-                if operation in ["AGGREGATE_ENTITY", "READ_ENTITY", "ACTION_TRIGGER"]:
-                    try:
-                        logger.info(f"[QUERY] Fetching dataset for operation: {operation}")
-                        sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
-                        all_records = sheet.get_all_records()
-                        logger.info(f"[QUERY] Dataset loaded - Total records: {len(all_records)}")
-                        if all_records:
-                            logger.info(f"[QUERY] Dataset columns: {list(all_records[0].keys())}")
-                    except Exception as se:
-                        logger.error(f"Sheet access failed: {se}")
+            schema_description, allowed_columns, date_column = self._get_schema_and_columns(records)
+            plan = get_query_plan(message, self.gemini, schema_description, allowed_columns, conversation_history)
 
-            # 2. Standard Operation Path (only if not already handled by retrieval or overdue)
-            if action_result == "I don't see this information in my records yet.":
-                if operation == "READ_ENTITY":
-                    name = params.get("client_name")
-                    timeline_hint = result.get("timeline_hint")
-                    specific_date = params.get("specific_date")
-                    scope = params.get("scope")
+            if plan.get("_error"):
+                response = "I couldn't process that. Please try rephrasing (e.g. specify a time period like 'last quarter' or 'this month')."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-                    # Resolve "it" / "this date" from context: record by specific_date
-                    if specific_date and all_records:
-                        rec = logic.get_record_by_date(all_records, specific_date)
-                        if rec:
-                            action_result = logic.format_single_record_response(rec, entity_hint=entity or "job")
-                            logger.info(f"[QUERY] Resolved record by specific_date {specific_date}")
-                        # else fall through to default message
-                    # List all jobs with dates when user asks "what are the dates on these jobs?"
-                    elif entity in ("job", "project") and scope == "all" and all_records:
-                        action_result = logic.format_jobs_with_dates(all_records)
-                        logger.info("[QUERY] Listed all jobs with dates (scope=all)")
-                    # Timeline-based query: "last job", "latest project", etc.
-                    elif entity in ("job", "project") and timeline_hint in ("latest", "last", "previous") and not specific_date:
-                        if all_records:
-                            most_recent = logic.get_most_recent_record(all_records, client_name=name, entity_hint=entity)
-                            if most_recent:
-                                action_result = logic.format_single_record_response(most_recent, entity_hint=entity)
-                                logger.info("[QUERY] Timeline query - returned most recent record")
-                            else:
-                                action_result = f"I couldn't find a recent {'job' if entity == 'job' else 'project'} record" + (f" for {name}" if name else "") + "."
-                        else:
-                            action_result = "I don't have any records to search yet."
-                    elif entity == "bank_details":
-                        action_result = "Our bank details: HDFC Bank, Acct: 12345678, IFSC: HDFC0001234."
-                    elif entity == "client":
-                        # Handle client list requests (schema-aware); support "clients for April" month filter
-                        month_param = params.get("month")
-                        year_param = params.get("year")
-                        if month_param:
-                            # "Display clients for April" - filter by month first
-                            records_for_list = self.sheets.get_invoice_data(None, month_param, year=year_param)
-                            logger.info(f"[QUERY] Client List (filtered by {month_param}) - Found {len(records_for_list)} records")
-                        else:
-                            records_for_list = all_records
-                        if not name:
-                            from services.business_logic_service import BusinessLogicService as BLS
-                            col_map = BLS._get_column_names(list(records_for_list[0].keys())) if records_for_list else {}
-                            client_cols = col_map.get("client", ["Client Name", "Production house"])
-                            logger.info(f"[QUERY] Client List Query - Searching {len(records_for_list)} records (columns: {client_cols})")
-                            client_names = set()
-                            for row in records_for_list:
-                                client = BLS._find_column_value(row, client_cols)
-                                if client and str(client).strip():
-                                    client_names.add(str(client).strip())
-                            
-                            logger.info(f"[QUERY] Client list query results - Found {len(client_names)} unique clients")
-                            if client_names:
-                                client_list = sorted(list(client_names))
-                                period_label = f" for {month_param}" + (f" {year_param}" if year_param else "") if month_param else ""
-                                if len(client_list) <= 10:
-                                    action_result = f"Here are the client names in my records{period_label}:\n" + "\n".join(f"• {c}" for c in client_list)
-                                else:
-                                    action_result = f"I found {len(client_list)} clients{period_label}. Here are some:\n" + "\n".join(f"• {c}" for c in client_list[:10]) + f"\n... and {len(client_list) - 10} more."
-                            else:
-                                period_label = f" for {month_param}" + (f" {year_param}" if year_param else "") if month_param else ""
-                                action_result = f"I don't see any client records{period_label} yet."
-                        else:
-                            # User is searching for a specific client (schema-aware)
-                            from services.business_logic_service import BusinessLogicService as BLS
-                            col_map = BLS._get_column_names(list(all_records[0].keys())) if all_records else {}
-                            client_cols = col_map.get("client", ["Client Name", "Production house"])
-                            logger.info(f"[QUERY] Client Search Query - Searching for: '{name}' in {len(all_records)} records (columns: {client_cols})")
-                            results = []
-                            for r in all_records:
-                                for c in client_cols:
-                                    if c in r and name.lower() in str(r.get(c, "")).lower():
-                                        results.append(r)
-                                        break
-                            if not results:
-                                for r in all_records:
-                                    if any(name.lower() in str(v).lower() for v in r.values()):
-                                        results.append(r)
-                            logger.info(f"[QUERY] Client search results - Found {len(results)} records matching '{name}'")
-                            if results:
-                                action_result = f"Found {len(results)} records matching '{name}'."
-                            else:
-                                action_result = f"I don't see any records for {name} in my current sheet."
-                
-                elif operation == "AGGREGATE_ENTITY":
-                    client = params.get("client_name")
-                    month = params.get("month")
-                    year = params.get("year")
-                    period = params.get("period")
-                    scope = params.get("scope")
-                    logger.info(f"[QUERY] Aggregate Query - Client: {client}, Month: {month}, Year: {year}, Period: {period}, Scope: {scope}")
+            if plan.get("confidence") == "low" and plan.get("clarification_question"):
+                response = plan["clarification_question"]
+                self._store_conversation(user_id, message, response)
+                return {"operation": "NEED_CLARIFICATION", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-                    # "All jobs" / "All" billing: sum across all records
-                    if scope == "all" and all_records:
-                        total = logic.calculate_total_billing_all(all_records)
-                        action_result = f"Total billing for all jobs in my records is ₹{total:,.2f}."
-                        logger.info(f"[QUERY] Aggregate (scope=all) - Total: {total:,.2f}")
-                    # "Last quarter" billing: aggregate over previous calendar quarter
-                    elif period == "quarter":
-                        quarter_months = get_last_quarter_months()
-                        combined_data = []
-                        for m_num, y in quarter_months:
-                            month_name = number_to_month_name(m_num)
-                            chunk = self.sheets.get_invoice_data(client, month_name, year=y)
-                            if chunk:
-                                combined_data.extend(chunk)
-                        if not combined_data:
-                            action_result = "I don't see any billing records for the last quarter yet."
-                        else:
-                            from services.invoice_service import InvoiceService
-                            summary_client = client if client else "All Clients"
-                            summary = InvoiceService.process_invoice_data(combined_data, summary_client, "last quarter")
-                            action_result = f"Total billing for {summary_client} for the last quarter is {summary['currency']}{summary['total']:,}."
-                        logger.info(f"[QUERY] Aggregate (quarter) - Records: {len(combined_data)}")
-                    elif not month and not (scope == "all"):
-                        action_result = "Please specify a month or time period (e.g. last quarter) to calculate the total billing."
-                    else:
-                        # Infer year when only month is given (e.g. "December")
-                        if month and year is None:
-                            year = infer_year_for_month(month)
-                            logger.info(f"[QUERY] Inferred year for {month}: {year}")
-                        from services.invoice_service import InvoiceService
-                        logger.info(f"[QUERY] Fetching invoice data for aggregation")
-                        data = self.sheets.get_invoice_data(client, month, year=year)
-                        logger.info(f"[QUERY] Aggregate query results - Found {len(data) if data else 0} records")
+            valid, sanitized, err = validate_plan(plan, allowed_columns)
+            if not valid:
+                response = err or "Could you rephrase? Please specify a time period (e.g. last quarter, this month) and what you want to know."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-                        # If no data found and year was specified, try previous year as fallback
-                        if not data and year:
-                            previous_year = year - 1
-                            logger.info(f"[QUERY] No records found for {month} {year}, trying previous year {previous_year}")
-                            data = self.sheets.get_invoice_data(client, month, year=previous_year)
-                            if data:
-                                logger.info(f"[QUERY] Found {len(data)} records for {month} {previous_year} (previous year)")
-                                year = previous_year  # Update year for the response
-
-                        if not data:
-                            year_display = f" {year}" if year else ""
-                            if client:
-                                action_result = f"I don't see any billing records for {client} in {month}{year_display} yet."
-                            else:
-                                action_result = f"I don't see any billing records for {month}{year_display} yet."
-                        else:
-                            summary_client = client if client else "All Clients"
-                            summary = InvoiceService.process_invoice_data(data, summary_client, month)
-                            year_display = f" {year}" if year else ""
-                            logger.info(f"[QUERY] Aggregation complete - Total: {summary['currency']}{summary['total']:,}, Items: {summary['items']}, Client: {summary_client}, Year: {year}")
-                            action_result = f"Total billing for {summary_client} in {month}{year_display} is {summary['currency']}{summary['total']:,}."
+            exec_result = execute_plan(sanitized, records, date_column)
+            response = self._format_query_result(exec_result, sanitized)
 
         except Exception as e:
             logger.error(f"Execution failure: {e}")
-            action_result = "I encountered an error accessing the data records."
+            response = "I encountered an error accessing the data records."
 
-        # 3. Final Response Phrasing
-        if trigger_invoice:
-            response = action_result # Use the "Confirmed!" message directly
-        elif action_result.startswith("I don't see") or "error" in action_result.lower():
-            response = action_result
-        elif action_result.startswith("Total billing") or action_result.startswith("The total billing"):
-            # Skip Gemini phrasing for billing responses - they're already well-formatted
-            response = action_result
-        elif action_result.startswith("Here are the client names") or action_result.startswith("I found ") and "clients" in action_result:
-            # Skip Gemini phrasing for client list - avoid AI overwriting with fallback
-            response = action_result
-        elif action_result.startswith("Found ") and "records matching" in action_result:
-            response = action_result
-        else:
-            response = self.gemini.generate_response(message, action_result)
-
-        # Store both user message and bot response in conversation history after processing
         self._store_conversation(user_id, message, response)
-
         return {
-            "operation": operation,
-            "parameters": params,
+            "operation": "query",
             "response": response,
             "trigger_invoice": trigger_invoice,
             "invoice_data": invoice_data
