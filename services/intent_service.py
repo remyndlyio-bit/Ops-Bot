@@ -3,6 +3,7 @@ from services.sheets_service import SheetsService
 from services.gmail_service import GmailService
 from utils.memory_service import MemoryService
 from utils.logger import logger
+from utils.date_utils import get_last_quarter_months, number_to_month_name, infer_year_for_month
 from typing import Dict
 import json
 
@@ -309,8 +310,22 @@ class IntentService:
                 if operation == "READ_ENTITY":
                     name = params.get("client_name")
                     timeline_hint = result.get("timeline_hint")
+                    specific_date = params.get("specific_date")
+                    scope = params.get("scope")
+
+                    # Resolve "it" / "this date" from context: record by specific_date
+                    if specific_date and all_records:
+                        rec = logic.get_record_by_date(all_records, specific_date)
+                        if rec:
+                            action_result = logic.format_single_record_response(rec, entity_hint=entity or "job")
+                            logger.info(f"[QUERY] Resolved record by specific_date {specific_date}")
+                        # else fall through to default message
+                    # List all jobs with dates when user asks "what are the dates on these jobs?"
+                    elif entity in ("job", "project") and scope == "all" and all_records:
+                        action_result = logic.format_jobs_with_dates(all_records)
+                        logger.info("[QUERY] Listed all jobs with dates (scope=all)")
                     # Timeline-based query: "last job", "latest project", etc.
-                    if entity in ("job", "project") and timeline_hint in ("latest", "last", "previous"):
+                    elif entity in ("job", "project") and timeline_hint in ("latest", "last", "previous") and not specific_date:
                         if all_records:
                             most_recent = logic.get_most_recent_record(all_records, client_name=name, entity_hint=entity)
                             if most_recent:
@@ -380,15 +395,44 @@ class IntentService:
                     client = params.get("client_name")
                     month = params.get("month")
                     year = params.get("year")
-                    logger.info(f"[QUERY] Aggregate Query - Client: {client}, Month: {month}, Year: {year}")
-                    if not month:
-                        action_result = "Please specify a month to calculate the total billing."
+                    period = params.get("period")
+                    scope = params.get("scope")
+                    logger.info(f"[QUERY] Aggregate Query - Client: {client}, Month: {month}, Year: {year}, Period: {period}, Scope: {scope}")
+
+                    # "All jobs" / "All" billing: sum across all records
+                    if scope == "all" and all_records:
+                        total = logic.calculate_total_billing_all(all_records)
+                        action_result = f"Total billing for all jobs in my records is ₹{total:,.2f}."
+                        logger.info(f"[QUERY] Aggregate (scope=all) - Total: {total:,.2f}")
+                    # "Last quarter" billing: aggregate over previous calendar quarter
+                    elif period == "quarter":
+                        quarter_months = get_last_quarter_months()
+                        combined_data = []
+                        for m_num, y in quarter_months:
+                            month_name = number_to_month_name(m_num)
+                            chunk = self.sheets.get_invoice_data(client, month_name, year=y)
+                            if chunk:
+                                combined_data.extend(chunk)
+                        if not combined_data:
+                            action_result = "I don't see any billing records for the last quarter yet."
+                        else:
+                            from services.invoice_service import InvoiceService
+                            summary_client = client if client else "All Clients"
+                            summary = InvoiceService.process_invoice_data(combined_data, summary_client, "last quarter")
+                            action_result = f"Total billing for {summary_client} for the last quarter is {summary['currency']}{summary['total']:,}."
+                        logger.info(f"[QUERY] Aggregate (quarter) - Records: {len(combined_data)}")
+                    elif not month and not (scope == "all"):
+                        action_result = "Please specify a month or time period (e.g. last quarter) to calculate the total billing."
                     else:
+                        # Infer year when only month is given (e.g. "December")
+                        if month and year is None:
+                            year = infer_year_for_month(month)
+                            logger.info(f"[QUERY] Inferred year for {month}: {year}")
                         from services.invoice_service import InvoiceService
                         logger.info(f"[QUERY] Fetching invoice data for aggregation")
                         data = self.sheets.get_invoice_data(client, month, year=year)
                         logger.info(f"[QUERY] Aggregate query results - Found {len(data) if data else 0} records")
-                        
+
                         # If no data found and year was specified, try previous year as fallback
                         if not data and year:
                             previous_year = year - 1
@@ -397,7 +441,7 @@ class IntentService:
                             if data:
                                 logger.info(f"[QUERY] Found {len(data)} records for {month} {previous_year} (previous year)")
                                 year = previous_year  # Update year for the response
-                        
+
                         if not data:
                             year_display = f" {year}" if year else ""
                             if client:

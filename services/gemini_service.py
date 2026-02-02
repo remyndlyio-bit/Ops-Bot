@@ -141,22 +141,22 @@ class GeminiService:
             )
         system_prompt = (
             "You are a schema-aware Intent and Parameter Parser for an Operations Bot. "
-            "Infer the user's underlying intent, not just literal phrasing. "
-            "Return ONLY valid JSON.\n\n"
+            "Infer the user's underlying intent, not just literal phrasing. Be conversational and context-aware like a smart assistant.\n\n"
             f"{schema_section}"
             "INTENT UNDERSTANDING:\n"
             "- Identify: timeline-based (latest, last, previous, first), role/task/job/client/invoice/payment, summary vs comparison vs specific record.\n"
             "- Use SEMANTIC COLUMN MAPPING: map queries to the correct data fields from the schema above.\n"
             "- Prefer time-aware columns when the query implies recency.\n\n"
-            "CONTEXT PRIORITIZATION:\n"
-            "- Use conversation history to disambiguate. If user previously discussed clients/projects/invoices, bias toward that domain.\n\n"
-            "AMBIGUITY HANDLING (CRITICAL):\n"
-            "- If multiple interpretations are equally valid OR required column cannot be confidently inferred:\n"
-            "  * Set operation to NEED_CLARIFICATION\n"
-            "  * Set confidence to a value < 0.7\n"
-            "  * Provide a concise, natural clarification_question (e.g. 'Do you mean your most recent client project, your last job title, or the last task you completed?')\n"
-            "- DO NOT guess when confidence is low. Ask instead.\n\n"
-            "CONFIDENCE: Only set operation to a non-NEED_CLARIFICATION value if confidence >= 0.7.\n\n"
+            "CONTEXT & REFERENCE RESOLUTION (CRITICAL):\n"
+            "- Use conversation history to resolve pronouns and references. If the Assistant just said something (e.g. 'Your last gig was on 2026-01-18'), and the user asks 'What was it about?' or 'Client?' or 'What job did I do on this date?', resolve 'it' / 'this date' to that specific date and set specific_date to that date (YYYY-MM-DD).\n"
+            "- If the user just listed or asked about 'client names in my records' and then asks 'What are the dates on these jobs?' or 'What is the billing amount?', resolve 'these jobs' / 'these' to all jobs (set scope to 'all').\n"
+            "- When the user replies with only 'Jobs', 'Invoices', or 'Clients' after a clarification, use the PREVIOUS user message or assistant context for the time period (e.g. 'December', 'last quarter'). So 'Jobs' after 'December' means: show billing or job info for December.\n"
+            "- When the user says 'All' or 'All jobs' for billing, set scope to 'all' and do not require month/client.\n"
+            "- Temporal expressions: 'last quarter' -> set period to 'quarter' (backend will compute Oct–Dec or Jan–Mar etc.). 'December' with no year -> set month to 'December', year can be null (backend will infer current or previous year).\n\n"
+            "AMBIGUITY HANDLING:\n"
+            "- If multiple interpretations are equally valid OR required column cannot be confidently inferred, set operation to NEED_CLARIFICATION and confidence < 0.7 with a concise clarification_question.\n"
+            "- When context clearly disambiguates (e.g. assistant just said a date), prefer resolving from context over asking.\n\n"
+            "CONFIDENCE: Only set a non-NEED_CLARIFICATION operation if confidence >= 0.7.\n\n"
             "STRICT SCHEMA (MUST RETURN ALL KEYS):\n"
             "{\n"
             '  "operation": "READ_ENTITY | AGGREGATE_ENTITY | CREATE_ENTITY | UPDATE_ENTITY | ACTION_TRIGGER | SCHEDULE_REMINDER | SMALL_TALK | NEED_CLARIFICATION | UNKNOWN",\n'
@@ -171,7 +171,9 @@ class GeminiService:
             "    \"month\": string | null,\n"
             "    \"year\": number | null,\n"
             "    \"period\": \"day | month | quarter | year | null\",\n"
-            "    \"days\": number | null\n"
+            "    \"days\": number | null,\n"
+            "    \"specific_date\": string | null (YYYY-MM-DD when user refers to a date from context, e.g. last gig date),\n"
+            "    \"scope\": \"all | null\" (set to \"all\" when user says all jobs, all clients, or refers to \"these\" jobs from just-listed context)\n"
             "  }\n"
             "}\n\n"
             f"{context_section}"
@@ -190,8 +192,16 @@ class GeminiService:
             "6. 'Display clients for April' or 'Show clients for April' or 'List clients in April'\n"
             "   -> {\"operation\": \"READ_ENTITY\", \"entity\": \"client\", \"confidence\": 0.95, \"clarification_question\": null, \"resolved_columns\": {\"filter_by\": \"invoice_date\", \"order_by\": null, \"display\": null}, \"timeline_hint\": null, \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n"
             "7. Context: 'Get me Garnier invoice for April', current 'Send it again'\n"
-            "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"confidence\": 0.95, \"clarification_question\": null, \"resolved_columns\": {}, \"timeline_hint\": null, \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null}}\n\n"
-            "RULES: 1) Handle typos. 2) NEVER omit keys. 3) Use null for unknown values. 4) confidence < 0.7 with ambiguity -> NEED_CLARIFICATION. 5) Return ONLY valid JSON."
+            "   -> {\"operation\": \"ACTION_TRIGGER\", \"entity\": \"invoice\", \"confidence\": 0.95, \"clarification_question\": null, \"resolved_columns\": {}, \"timeline_hint\": null, \"parameters\": {\"client_name\": \"Garnier\", \"bill_number\": null, \"month\": \"April\", \"year\": null, \"period\": \"month\", \"days\": null, \"specific_date\": null, \"scope\": null}}\n"
+            "8. 'What is my total billing for the last quarter?'\n"
+            "   -> {\"operation\": \"AGGREGATE_ENTITY\", \"entity\": \"invoice\", \"confidence\": 0.95, \"clarification_question\": null, \"resolved_columns\": {\"filter_by\": \"invoice_date\", \"order_by\": null, \"display\": null}, \"timeline_hint\": null, \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": null, \"year\": null, \"period\": \"quarter\", \"days\": null, \"specific_date\": null, \"scope\": null}}\n"
+            "9. Context: Assistant asked 'invoices, jobs, or clients for December?'; user replies 'Jobs'\n"
+            "   -> {\"operation\": \"AGGREGATE_ENTITY\", \"entity\": \"invoice\", \"confidence\": 0.9, \"clarification_question\": null, \"resolved_columns\": {}, \"timeline_hint\": null, \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": \"December\", \"year\": null, \"period\": \"month\", \"days\": null, \"specific_date\": null, \"scope\": null}}\n"
+            "10. Context: Assistant said 'Your last gig was on 2026-01-18.'; user asks 'What was it about?' or 'Client?'\n"
+            "   -> {\"operation\": \"READ_ENTITY\", \"entity\": \"job\", \"confidence\": 0.9, \"clarification_question\": null, \"resolved_columns\": {\"order_by\": null, \"filter_by\": null, \"display\": \"client,notes\"}, \"timeline_hint\": \"last\", \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": null, \"year\": null, \"period\": null, \"days\": null, \"specific_date\": \"2026-01-18\", \"scope\": null}}\n"
+            "11. Context: Assistant said 'Here are the client names in my records: 7up, Duracell...'; user asks 'What are the dates on these jobs?' or 'What is the billing amount?' then 'All' / 'All jobs'\n"
+            "   -> {\"operation\": \"READ_ENTITY\" or \"AGGREGATE_ENTITY\", \"entity\": \"job\" or \"invoice\", \"confidence\": 0.9, \"clarification_question\": null, \"resolved_columns\": {}, \"timeline_hint\": null, \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": null, \"year\": null, \"period\": null, \"days\": null, \"specific_date\": null, \"scope\": \"all\"}}\n\n"
+            "RULES: 1) Handle typos. 2) NEVER omit keys. 3) Use null for unknown values. 4) Resolve 'it'/'these'/'all' from conversation when clear. 5) confidence < 0.7 with ambiguity -> NEED_CLARIFICATION. 6) Return ONLY valid JSON."
         )
         try:
             full_prompt = f"{system_prompt}\n\nCurrent user message:\n{message}"
@@ -214,6 +224,10 @@ class GeminiService:
             parsed.setdefault("clarification_question", None)
             parsed.setdefault("resolved_columns", {})
             parsed.setdefault("timeline_hint", None)
+            params = parsed.get("parameters") or {}
+            params.setdefault("specific_date", None)
+            params.setdefault("scope", None)
+            parsed["parameters"] = params
             return parsed
         except Exception as e:
             error_msg = str(e)

@@ -493,6 +493,18 @@ class BusinessLogicService:
         return total
 
     @staticmethod
+    def calculate_total_billing_all(all_records: List[Dict]) -> float:
+        """Sums Fees across all records (no date filter). Used for 'all jobs' billing."""
+        total = 0.0
+        for row in all_records:
+            fees_raw = str(row.get("Fees", row.get("fees", "0"))).replace("₹", "").replace(",", "").strip()
+            try:
+                total += float(fees_raw) if fees_raw and fees_raw != "None" else 0
+            except (ValueError, TypeError):
+                continue
+        return total
+
+    @staticmethod
     def format_overdue_invoices_response(overdue_invoices: List[Dict], payment_terms_days: int = 30) -> str:
         """
         Formats overdue invoices into a readable response.
@@ -619,6 +631,30 @@ class BusinessLogicService:
         return max(filtered, key=get_sort_key)
 
     @staticmethod
+    def get_record_by_date(all_records: List[Dict], date_str: str) -> Optional[Dict]:
+        """
+        Returns the record whose invoice date matches the given date (YYYY-MM-DD).
+        If multiple match, returns the first one found.
+        """
+        if not all_records or not date_str:
+            return None
+        target_dt = parse_sheet_date(str(date_str).strip())
+        if not target_dt:
+            return None
+        target_date = target_dt.date()
+        available_columns = list(all_records[0].keys())
+        column_map = BusinessLogicService._get_column_names(available_columns)
+        date_cols = column_map.get("invoice_date", []) or [k for k in available_columns if "date" in k.lower()]
+        for row in all_records:
+            date_val = BusinessLogicService._find_column_value(row, date_cols) or (row.get(date_cols[0]) if date_cols else None)
+            if not date_val:
+                continue
+            dt = parse_sheet_date(str(date_val))
+            if dt and dt.date() == target_date:
+                return row
+        return None
+
+    @staticmethod
     def format_single_record_response(record: Dict, entity_hint: str = "job") -> str:
         """Formats a single record into a readable response."""
         if not record:
@@ -638,6 +674,42 @@ class BusinessLogicService:
         if notes:
             parts.append(f"Notes: {notes}")
         return "\n".join(parts) if parts else str(record)
+
+    @staticmethod
+    def format_jobs_with_dates(all_records: List[Dict], limit: int = 50) -> str:
+        """Formats a list of records as jobs with dates (client, job, date) for display."""
+        if not all_records:
+            return "I don't have any job records to show."
+        available_columns = list(all_records[0].keys())
+        column_map = BusinessLogicService._get_column_names(available_columns)
+        order_cols = column_map.get("order_by", column_map.get("invoice_date", []))
+        if not order_cols:
+            order_cols = [k for k in available_columns if "date" in k.lower()]
+        client_cols = column_map.get("client", [])
+        job_cols = column_map.get("job", [])
+
+        def get_sort_key(row):
+            for col in order_cols:
+                val = BusinessLogicService._find_column_value(row, [col]) or row.get(col)
+                if val:
+                    dt = parse_sheet_date(str(val))
+                    if dt:
+                        return dt
+            return datetime.min
+
+        sorted_records = sorted(all_records, key=get_sort_key, reverse=True)[:limit]
+        lines = []
+        for r in sorted_records:
+            date_val = BusinessLogicService._find_column_value(r, order_cols) or (r.get(order_cols[0]) if order_cols else None)
+            client = BusinessLogicService._find_column_value(r, client_cols) if client_cols else None
+            job_val = BusinessLogicService._find_column_value(r, job_cols) if job_cols else None
+            date_str = str(date_val).strip() if date_val else "—"
+            client_str = (client or "—").strip()
+            job_str = (job_val or "—").strip()
+            lines.append(f"• {date_str} — {client_str}: {job_str}")
+        if len(all_records) > limit:
+            lines.append(f"... and {len(all_records) - limit} more.")
+        return "Here are the jobs with dates:\n" + "\n".join(lines) if lines else "I don't have any job records to show."
 
     @staticmethod
     def get_blacklisted_clients(all_records: List[Dict]) -> List[str]:
