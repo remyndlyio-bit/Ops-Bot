@@ -40,10 +40,21 @@ class IntentService:
         if not result.get("ok"):
             return result.get("message", "I don't see this information in my records yet.")
         if "labels" in result and result["labels"]:
-            lines = ["• " + str(l) for l in result["labels"][:30]]
-            if len(result["labels"]) > 30:
-                lines.append(f"... and {len(result['labels']) - 30} more.")
-            return "Here are the values in my records:\n" + "\n".join(lines)
+            labels = result["labels"]
+            values = result.get("values") or []
+            lines = []
+            for idx, label in enumerate(labels[:30]):
+                prefix = f"• {label}"
+                if idx < len(values):
+                    v = values[idx]
+                    if isinstance(v, (int, float)):
+                        prefix += f" – ₹{v:,.2f}"
+                    else:
+                        prefix += f": {v}"
+                lines.append(prefix)
+            if len(labels) > 30:
+                lines.append(f"... and {len(labels) - 30} more.")
+            return "Here is what I found in your records:\n" + "\n".join(lines)
         value = result.get("value", 0)
         column = plan.get("column", "value")
         return f"Total for the selected period: ₹{value:,.2f}." if isinstance(value, (int, float)) else str(value)

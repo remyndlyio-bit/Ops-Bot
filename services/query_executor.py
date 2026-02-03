@@ -105,21 +105,34 @@ def execute_plan(
     if not filtered:
         return {"ok": True, "value": 0, "count": 0, "message": "No rows match the filters or time period."}
 
-    # group_by: return distinct values (and optionally count per value)
+    # group_by: grouped aggregation (sum/avg/min/max/count) per group
     if col_group:
-        distinct = {}
+        groups: Dict[str, List[float]] = {}
         for r in filtered:
             val = r.get(col_group)
             v = str(val).strip() if val is not None else ""
             if v:
-                distinct[v] = distinct.get(v, 0) + 1
-        if metric == "count":
-            labels = list(distinct.keys())
-            values = list(distinct.values())
-            return {"ok": True, "labels": labels, "values": values, "count": len(filtered)}
-        # else: still aggregate metric on column, but we'll return one value; group_by is used for "list" so count is enough
-        labels = sorted(distinct.keys())
-        return {"ok": True, "labels": labels, "values": [distinct[k] for k in labels], "count": len(filtered)}
+                groups.setdefault(v, []).append(_numeric_value(r.get(col_metric)))
+
+        agg_values: Dict[str, float] = {}
+        for label, nums in groups.items():
+            if metric == "count":
+                agg_values[label] = float(len(nums))
+            elif metric == "sum":
+                agg_values[label] = float(sum(nums))
+            elif metric == "avg":
+                agg_values[label] = float(sum(nums) / len(nums)) if nums else 0.0
+            elif metric == "min":
+                agg_values[label] = float(min(nums)) if nums else 0.0
+            elif metric == "max":
+                agg_values[label] = float(max(nums)) if nums else 0.0
+            else:
+                agg_values[label] = float(sum(nums))
+
+        # Sort groups by aggregated value descending (useful for \"top clients\" style questions)
+        sorted_labels = sorted(agg_values.keys(), key=lambda k: agg_values[k], reverse=True)
+        values = [agg_values[l] for l in sorted_labels]
+        return {\"ok\": True, \"labels\": sorted_labels, \"values\": values, \"count\": len(filtered)}
 
     # Single metric on column
     numbers = [_numeric_value(r.get(col_metric)) for r in filtered]
