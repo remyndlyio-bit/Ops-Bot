@@ -70,6 +70,7 @@ def build_query_plan_prompt(
         "- 'Last year', 'previous year', 'past year', 'total billing for last year' -> time_range type \"absolute\" with start (TODAY'S_YEAR - 1)-01-01 and end (TODAY'S_YEAR - 1)-12-31. Example: if today is 2025-02-02, last year is 2024-01-01 to 2024-12-31.\n"
         "- 'This month', 'last month', 'December', 'last 30 days' -> time_range type \"absolute\" with computed YYYY-MM-DD start and end.\n"
         "- 'When did I do my last gig', 'when was my last job', 'latest gig', 'most recent job', 'last gig date' -> metric \"max\", column \"" + (date_column or "Date") + "\" (the date column), time_range null. This returns the most recent date.\n"
+        "- 'When was the job for [Client] started', 'when did the [Client] job start', 'date of the Garnier job' -> same idea: metric \"max\", column \"" + (date_column or "Date") + "\", time_range null, and set filters to that client (e.g. filters: { \"Client Name\": \"Garnier\" }). This returns the date of that client's job.\n"
         "- List clients / distinct values -> metric \"count\", group_by the dimension column (e.g. Client Name).\n"
         "- If unclear or ambiguous, set confidence to \"low\" and include \"clarification_question\" with a short question.\n"
         "- Only use columns from the schema. Only use metrics from the list. Omit optional fields (or set null) when not needed.\n\n"

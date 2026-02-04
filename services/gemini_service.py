@@ -102,6 +102,46 @@ class GeminiService:
             logger.error(f"OpenRouter error: {str(e)}")
             raise
 
+    def generate_schema_from_columns(
+        self,
+        column_names: List[str],
+        sample_row: Optional[Dict] = None,
+    ) -> Optional[str]:
+        """
+        Ask the AI to generate a short schema description from the actual sheet columns.
+        Used so the query planner always gets an accurate, semantic schema (which column is date, client, fees, job, etc.).
+        Returns None on failure; caller should fall back to rule-based schema.
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key or not column_names:
+            return None
+        columns_str = ", ".join(f'"{c}"' for c in column_names[:80])
+        sample_section = ""
+        if sample_row and isinstance(sample_row, dict):
+            sample_pairs = [f"{k}: {str(v)[:50]}" for k, v in list(sample_row.items())[:20]]
+            sample_section = "\nExample row (column: value): " + " | ".join(sample_pairs)
+
+        prompt = (
+            "Given these column headers from a spreadsheet, write a SHORT schema description for a query planner.\n\n"
+            f"Columns: {columns_str}\n"
+            f"{sample_section}\n\n"
+            "In 5–10 lines, list:\n"
+            "- Which column(s) are the DATE column (invoice/job date – use for 'when', 'last gig', time filters). Use the exact column name.\n"
+            "- Which column(s) are CLIENT (client name, production house). Use exact name.\n"
+            "- Which column is the FEES/BILLING/AMOUNT column (numeric – use for sum, total billing). Use exact name.\n"
+            "- Which column(s) are JOB/PROJECT (job name, role, task). Use exact name.\n"
+            "- Any other columns that are useful for filtering (e.g. status, paid, notes). Use exact names.\n\n"
+            "Write ONLY the schema description, no preamble. Use the exact column names as they appear. Keep it concise."
+        )
+        try:
+            out = self._call_api(prompt, generation_config={"temperature": 0, "maxOutputTokens": 512})
+            if out and isinstance(out, str) and len(out.strip()) > 10:
+                logger.info(f"AI-generated schema length: {len(out)} chars")
+                return out.strip()
+        except Exception as e:
+            logger.warning(f"AI schema generation failed: {e}")
+        return None
+
     def parse_user_intent(
         self,
         message: str,

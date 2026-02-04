@@ -10,6 +10,9 @@ from typing import Dict, List
 import json
 
 class IntentService:
+    # Cache AI-generated schema by column names so we don't call the AI on every message
+    _schema_cache: Dict[tuple, str] = {}
+
     def __init__(self):
         self.gemini = GeminiService()
         self.sheets = SheetsService()
@@ -22,14 +25,25 @@ class IntentService:
         self.memory.add_message(user_id, "assistant", bot_response)
 
     def _get_schema_and_columns(self, records: List[Dict]) -> tuple:
-        """Return (schema_description, allowed_columns, date_column) from sheet or env."""
+        """Return (schema_description, allowed_columns, date_column). Prefer AI-generated schema; fallback to rule-based."""
         from services.business_logic_service import BusinessLogicService
         logic = BusinessLogicService()
         cols = list(records[0].keys()) if records else []
         if not cols:
             column_map = logic._get_column_names(None)
             cols = list({c for v in column_map.values() for c in v})
-        schema_description = logic.get_schema_for_intent(cols)
+        # Prefer AI-generated schema; cache by column names so we don't call the AI every message
+        cache_key = tuple(sorted(cols))
+        schema_description = IntentService._schema_cache.get(cache_key)
+        if not schema_description:
+            schema_description = self.gemini.generate_schema_from_columns(
+                cols,
+                sample_row=records[0] if records else None,
+            )
+            if schema_description:
+                IntentService._schema_cache[cache_key] = schema_description
+        if not schema_description:
+            schema_description = logic.get_schema_for_intent(cols)
         column_map = logic._get_column_names(cols)
         date_cols = column_map.get("invoice_date", []) or ([c for c in cols if "date" in c.lower()] if cols else [])
         date_column = date_cols[0] if date_cols else (cols[0] if cols else "Date")
