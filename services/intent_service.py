@@ -256,7 +256,10 @@ class IntentService:
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             exec_result = execute_plan(sanitized, records, date_column)
-            response = self._format_query_result(exec_result, sanitized)
+            factual_output = self._format_query_result(exec_result, sanitized)
+            # Response maker: smarter reply using only RAG facts, matching tone, concise
+            polished = self.gemini.make_response(message, conversation_history, factual_output)
+            response = polished if (polished and polished.strip()) else factual_output
 
         except Exception as e:
             logger.error(f"Execution failure: {e}")

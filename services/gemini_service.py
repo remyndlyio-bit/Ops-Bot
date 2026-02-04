@@ -142,6 +142,51 @@ class GeminiService:
             logger.warning(f"AI schema generation failed: {e}")
         return None
 
+    def make_response(
+        self,
+        user_message: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        factual_output: str = "",
+    ) -> Optional[str]:
+        """
+        Response maker: produce final user-facing reply from RAG output.
+        - Uses ONLY the factual_output for facts (no inventing).
+        - Matches user tone (formal, casual, frustrated, curious).
+        - Concise, clear, helpful. If facts insufficient, ask a brief clarification.
+        - Returns plain text only; no explanations or metadata.
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key:
+            return None
+        context_lines = []
+        if conversation_history:
+            for msg in conversation_history:
+                role = "User" if msg.get("role") == "user" else "Assistant"
+                context_lines.append(f"{role}: {msg.get('content', '')}")
+        context_block = "\n".join(context_lines) if context_lines else "(no prior messages)"
+
+        prompt = (
+            "You are a response maker. You receive the user's message, recent conversation, and the factual output from a data system (RAG). "
+            "Your task: produce the final reply to the user.\n\n"
+            "RULES:\n"
+            "- Use ONLY the factual output below for facts. Do not invent or infer new facts.\n"
+            "- Match the user's tone: if they are formal, be formal; casual → casual; frustrated → empathetic and brief; curious → helpful and clear.\n"
+            "- Be concise, clear, and helpful. Plain text only—no explanations, no metadata, no \"Here is...\" unless it fits the tone.\n"
+            "- If the factual output is empty, insufficient, or says something like \"no rows match\", ask one brief clarification question (e.g. \"Could you narrow it down by client or time period?\").\n"
+            "- Output ONLY the final reply text. Nothing else.\n\n"
+            f"Recent conversation:\n{context_block}\n\n"
+            f"User message:\n{user_message}\n\n"
+            f"Factual output from system:\n{factual_output or '(none)'}\n\n"
+            "Your reply (plain text only):"
+        )
+        try:
+            out = self._call_api(prompt, generation_config={"temperature": 0.3, "maxOutputTokens": 512})
+            if out and isinstance(out, str):
+                return out.strip()
+        except Exception as e:
+            logger.warning(f"Response maker failed: {e}")
+        return None
+
     def parse_user_intent(
         self,
         message: str,
