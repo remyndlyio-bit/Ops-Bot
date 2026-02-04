@@ -39,6 +39,16 @@ class IntentService:
         """Format executor result for the user."""
         if not result.get("ok"):
             return result.get("message", "I don't see this information in my records yet.")
+        if result.get("value_type") == "date":
+            val = result.get("value")
+            if val is None or result.get("message"):
+                return result.get("message", "I don't have any gigs on record with a date.")
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(str(val)[:10], "%Y-%m-%d")
+                return f"Your last gig was on {dt.strftime('%d %b %Y')}."
+            except ValueError:
+                return f"Your last gig was on {val}."
         if "labels" in result and result["labels"]:
             labels = result["labels"]
             values = result.get("values") or []
@@ -56,7 +66,6 @@ class IntentService:
                 lines.append(f"... and {len(labels) - 30} more.")
             return "Here is what I found in your records:\n" + "\n".join(lines)
         value = result.get("value", 0)
-        column = plan.get("column", "value")
         return f"Total for the selected period: ₹{value:,.2f}." if isinstance(value, (int, float)) else str(value)
 
     def process_request(self, user_id: str, message: str) -> Dict:
@@ -202,7 +211,7 @@ class IntentService:
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             schema_description, allowed_columns, date_column = self._get_schema_and_columns(records)
-            plan = get_query_plan(message, self.gemini, schema_description, allowed_columns, conversation_history)
+            plan = get_query_plan(message, self.gemini, schema_description, allowed_columns, conversation_history, date_column=date_column)
 
             if plan.get("_error"):
                 response = "I couldn't process that. Please try rephrasing (e.g. specify a time period like 'last quarter' or 'this month')."

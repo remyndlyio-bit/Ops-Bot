@@ -14,6 +14,7 @@ def build_query_plan_prompt(
     schema_description: str,
     allowed_columns: List[str],
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    date_column: Optional[str] = None,
 ) -> str:
     """Build the prompt for the LLM to return a query plan only."""
     context_section = ""
@@ -66,8 +67,9 @@ def build_query_plan_prompt(
         "- Map natural language to the schema: 'earnings', 'billing', 'income' -> sum on Fees (or the numeric column).\n"
         "- 'Top 3 clients', 'top five' -> limit: 3 or 5, order: \"desc\". 'Bottom 3', 'lowest 5', 'least paying' -> limit: 3 or 5, order: \"asc\".\n"
         "- 'Last quarter', 'Q2', '3 months ago' -> time_range type \"absolute\" with start/end computed from today (e.g. last quarter: previous quarter boundaries).\n"
-        "- 'Last year', 'previous year', 'past year' -> time_range type \"absolute\" with start Jan 1 and end Dec 31 of previous year.\n"
+        "- 'Last year', 'previous year', 'past year', 'total billing for last year' -> time_range type \"absolute\" with start (TODAY'S_YEAR - 1)-01-01 and end (TODAY'S_YEAR - 1)-12-31. Example: if today is 2025-02-02, last year is 2024-01-01 to 2024-12-31.\n"
         "- 'This month', 'last month', 'December', 'last 30 days' -> time_range type \"absolute\" with computed YYYY-MM-DD start and end.\n"
+        "- 'When did I do my last gig', 'when was my last job', 'latest gig', 'most recent job', 'last gig date' -> metric \"max\", column \"" + (date_column or "Date") + "\" (the date column), time_range null. This returns the most recent date.\n"
         "- List clients / distinct values -> metric \"count\", group_by the dimension column (e.g. Client Name).\n"
         "- If unclear or ambiguous, set confidence to \"low\" and include \"clarification_question\" with a short question.\n"
         "- Only use columns from the schema. Only use metrics from the list. Omit optional fields (or set null) when not needed.\n\n"
@@ -91,6 +93,7 @@ def get_query_plan(
     schema_description: str,
     allowed_columns: List[str],
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    date_column: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Call the LLM to get a query plan. Returns parsed dict or error dict.
@@ -102,6 +105,7 @@ def get_query_plan(
             schema_description=schema_description,
             allowed_columns=allowed_columns,
             conversation_history=conversation_history,
+            date_column=date_column,
         )
         config = {"responseMimeType": "application/json", "temperature": 0, "maxOutputTokens": 1024}
         raw = gemini_service._call_api(prompt, generation_config=config)

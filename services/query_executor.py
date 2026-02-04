@@ -115,6 +115,24 @@ def execute_plan(
     if not filtered:
         return {"ok": True, "value": 0, "count": 0, "message": "No rows match the filters or time period."}
 
+    # "When was my last gig" / latest date: metric max on the date column → return most recent date
+    if metric == "max" and col_metric and col_date and col_metric == col_date:
+        dates_parsed = []
+        for r in filtered:
+            raw = r.get(col_metric)
+            if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+                continue
+            if isinstance(raw, datetime):
+                dates_parsed.append(raw)
+            else:
+                dt = parse_sheet_date(raw) or parse_sheet_date(str(raw))
+                if dt:
+                    dates_parsed.append(dt)
+        if not dates_parsed:
+            return {"ok": True, "value": None, "value_type": "date", "count": 0, "message": "I don't have any gigs on record with a date."}
+        latest = max(dates_parsed)
+        return {"ok": True, "value": latest.date().isoformat(), "value_type": "date", "count": len(filtered)}
+
     # group_by: grouped aggregation (sum/avg/min/max/count) per group
     if col_group:
         groups: Dict[str, List[float]] = {}
