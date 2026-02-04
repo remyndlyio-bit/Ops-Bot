@@ -129,10 +129,10 @@ def execute_plan(
             else:
                 agg_values[label] = float(sum(nums))
 
-        # Sort groups by aggregated value descending (useful for \"top clients\" style questions)
+        # Sort groups by aggregated value descending (useful for "top clients" style questions)
         sorted_labels = sorted(agg_values.keys(), key=lambda k: agg_values[k], reverse=True)
         values = [agg_values[l] for l in sorted_labels]
-        return {\"ok\": True, \"labels\": sorted_labels, \"values\": values, \"count\": len(filtered)}
+        return {"ok": True, "labels": sorted_labels, "values": values, "count": len(filtered)}
 
     # Single metric on column
     numbers = [_numeric_value(r.get(col_metric)) for r in filtered]
