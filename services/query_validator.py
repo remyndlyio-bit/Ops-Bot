@@ -81,23 +81,20 @@ def validate_plan(
                     out[key_match] = str(v)
         sanitized["filters"] = out
 
-    # time_range: optional; if missing, treat as "no date filter"
+    # time_range: optional; if missing, treat as "no date filter". Only absolute (AI-computed) dates are allowed.
     time_range = plan.get("time_range")
     if time_range is None:
-        # No explicit period specified -> backend will query across all available records
         sanitized["time_range"] = None
     else:
         if not isinstance(time_range, dict):
-            return False, None, "Invalid 'time_range'. Please specify a period (e.g. last_quarter, this_month) or start/end dates."
+            return False, None, "Invalid 'time_range'. Use { \"type\": \"absolute\", \"value\": { \"start\": \"YYYY-MM-DD\", \"end\": \"YYYY-MM-DD\" } } or null."
         tr_type = time_range.get("type")
         tr_value = time_range.get("value")
-        if tr_type not in ("relative", "absolute"):
-            return False, None, "time_range.type must be 'relative' or 'absolute'."
-        if tr_type == "relative" and (not tr_value or not isinstance(tr_value, str) or not str(tr_value).strip()):
-            return False, None, "time_range.value must be a string for relative (e.g. last_quarter, this_month, ytd)."
-        if tr_type == "absolute" and (not isinstance(tr_value, dict) or "start" not in tr_value or "end" not in tr_value):
-            return False, None, "time_range.value must be { \"start\": \"YYYY-MM-DD\", \"end\": \"YYYY-MM-DD\" } for absolute."
-        sanitized["time_range"] = {"type": tr_type, "value": tr_value}
+        if tr_type != "absolute":
+            return False, None, "time_range.type must be 'absolute' (AI computes dates). Use start/end in YYYY-MM-DD."
+        if not isinstance(tr_value, dict) or "start" not in tr_value or "end" not in tr_value:
+            return False, None, "time_range.value must be { \"start\": \"YYYY-MM-DD\", \"end\": \"YYYY-MM-DD\" }."
+        sanitized["time_range"] = {"type": "absolute", "value": {"start": str(tr_value.get("start", ""))[:10], "end": str(tr_value.get("end", ""))[:10]}}
 
     # group_by: null or column from schema
     group_by = plan.get("group_by")

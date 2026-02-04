@@ -1,10 +1,10 @@
 """
 Executes a validated query plan against Google Sheets.
-Resolves time range in code, filters rows, applies metric, optionally group_by.
+Time range comes from the plan as absolute start/end (computed by AI). Filters rows, applies metric, optionally group_by.
 """
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from utils.date_utils import parse_sheet_date
-from utils.time_resolver import resolve_time_range
 from utils.logger import logger
 
 
@@ -29,16 +29,19 @@ def _row_matches_filters(row: Dict, filters: Dict[str, Any], date_column: str, d
                 return False
     if date_range and date_column:
         date_val = row.get(date_column)
-        if not date_val:
+        if date_val is None or (isinstance(date_val, str) and not date_val.strip()):
             return False
-        dt = parse_sheet_date(str(date_val))
+        # Sheets may return datetime objects; parse_sheet_date handles that and "YYYY-MM-DD HH:MM:SS"
+        if isinstance(date_val, datetime):
+            dt = date_val
+        else:
+            dt = parse_sheet_date(date_val) or parse_sheet_date(str(date_val))
         if not dt:
             return False
         start = date_range.get("start")
         end = date_range.get("end")
         if start and end:
             try:
-                from datetime import datetime
                 start_d = datetime.strptime(start[:10], "%Y-%m-%d").date()
                 end_d = datetime.strptime(end[:10], "%Y-%m-%d").date()
                 if not (start_d <= dt.date() <= end_d):
@@ -77,10 +80,10 @@ def execute_plan(
 
     time_range = plan.get("time_range")
     date_range = None
-    if time_range and date_column:
-        date_range = resolve_time_range(time_range, date_column)
-        if not date_range:
-            return {"ok": False, "message": "I couldn't resolve the time period. Please specify a period (e.g. last quarter, this month)."}
+    if time_range and date_column and time_range.get("type") == "absolute":
+        v = time_range.get("value")
+        if isinstance(v, dict) and v.get("start") and v.get("end"):
+            date_range = {"start": str(v["start"])[:10], "end": str(v["end"])[:10]}
 
     filters = plan.get("filters") or {}
     column = plan.get("column")

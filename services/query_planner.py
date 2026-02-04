@@ -1,16 +1,12 @@
 """
 Builds the LLM prompt and calls the LLM in JSON-only mode.
 Returns a structured query plan only; no SQL, formulas, or executable code.
+Time ranges are computed by the AI and returned as absolute start/end dates.
 """
 import json
+from datetime import date
 from typing import Dict, Any, List, Optional
 from utils.logger import logger
-
-# Relative time values the backend can resolve (see time_resolver.py)
-RELATIVE_TIME_VALUES = (
-    "last_quarter, this_quarter, last_month, this_month, "
-    "ytd, this_year, last_7_days, last_30_days, last_90_days"
-)
 
 
 def build_query_plan_prompt(
@@ -32,24 +28,28 @@ def build_query_plan_prompt(
     if len(allowed_columns) > 50:
         columns_list += f", ... ({len(allowed_columns)} columns total)"
 
+    today = date.today().isoformat()
+
     return (
         "You are a query planner for a data assistant. You return ONLY a structured JSON query plan. "
         "Do NOT return SQL, Sheets formulas, or any executable code.\n\n"
+        "TODAY'S DATE (use this to compute any time ranges): " + today + "\n\n"
         "SCHEMA (allowed columns from the sheet):\n"
         f"{schema_description}\n\n"
         f"Allowed column names (use exactly): {columns_list}\n\n"
         "ALLOWED METRICS: sum, avg, min, max, count\n\n"
-        "TIME RANGES:\n"
-        "- For relative periods use type \"relative\" and value one of: " + RELATIVE_TIME_VALUES + "\n"
-        "- For a specific period use type \"absolute\" and value {\"start\": \"YYYY-MM-DD\", \"end\": \"YYYY-MM-DD\"}\n"
-        "  (Do NOT compute dates yourself; use relative identifiers or leave to backend.)\n\n"
+        "TIME RANGES (you must compute dates yourself):\n"
+        "- When the user asks for a time period (e.g. last quarter, this month, last year, last 30 days), "
+        "output time_range with type \"absolute\" and value {\"start\": \"YYYY-MM-DD\", \"end\": \"YYYY-MM-DD\"}. "
+        "Compute start and end from TODAY'S DATE above (e.g. last quarter = Q of previous quarter; this month = first day to last day of current month).\n"
+        "- When the user asks for \"all time\", \"overall\", \"total\", or no period is mentioned, use time_range: null.\n\n"
         "OUTPUT FORMAT (return ONLY this JSON, no other text):\n"
         "{\n"
         '  "sheet": "sheet1",\n'
         '  "metric": "sum" | "avg" | "min" | "max" | "count",\n'
         '  "column": "<column name from schema>",\n'
         '  "filters": { "<column>": "<value> or [\"value1\", \"value2\", ...] or null" },\n'
-        '  "time_range": { "type": "relative" | "absolute", "value": "<relative id or { start, end }>" } | null,\n'
+        '  "time_range": { "type": "absolute", "value": { "start": "YYYY-MM-DD", "end": "YYYY-MM-DD" } } | null,\n'
         '  "group_by": "<column name or null>",\n'
         '  "limit": number | null,\n'
         '  "order": "asc" | "desc" | null,\n'
@@ -65,8 +65,9 @@ def build_query_plan_prompt(
         "RULES:\n"
         "- Map natural language to the schema: 'earnings', 'billing', 'income' -> sum on Fees (or the numeric column).\n"
         "- 'Top 3 clients', 'top five' -> limit: 3 or 5, order: \"desc\". 'Bottom 3', 'lowest 5', 'least paying' -> limit: 3 or 5, order: \"asc\".\n"
-        "- 'Last quarter', 'Q2', '3 months ago' -> time_range type \"relative\", value \"last_quarter\" or \"last_90_days\".\n"
-        "- 'This month', 'December' -> \"this_month\" or \"last_month\" or absolute range.\n"
+        "- 'Last quarter', 'Q2', '3 months ago' -> time_range type \"absolute\" with start/end computed from today (e.g. last quarter: previous quarter boundaries).\n"
+        "- 'Last year', 'previous year', 'past year' -> time_range type \"absolute\" with start Jan 1 and end Dec 31 of previous year.\n"
+        "- 'This month', 'last month', 'December', 'last 30 days' -> time_range type \"absolute\" with computed YYYY-MM-DD start and end.\n"
         "- List clients / distinct values -> metric \"count\", group_by the dimension column (e.g. Client Name).\n"
         "- If unclear or ambiguous, set confidence to \"low\" and include \"clarification_question\" with a short question.\n"
         "- Only use columns from the schema. Only use metrics from the list. Omit optional fields (or set null) when not needed.\n\n"

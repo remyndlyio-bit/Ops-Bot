@@ -5,30 +5,34 @@ from typing import Optional, List, Tuple
 def parse_sheet_date(date_str: str) -> Optional[datetime]:
     """
     Centrally parses Google Sheet dates.
-    Primary format: YYYY-MM-DD
-    Fallback formats: DD/MM/YY, DD/MM/YYYY (for backward compatibility)
+    Handles: datetime objects, YYYY-MM-DD, YYYY-MM-DD HH:MM:SS (from Sheets),
+    DD/MM/YY, DD/MM/YYYY.
     Returns a datetime object or None if parsing fails.
     """
-    if not date_str:
+    if date_str is None:
         return None
-    
+    if isinstance(date_str, datetime):
+        return date_str
     date_str = str(date_str).strip()
-    
-    # Try YYYY-MM-DD format first (new format)
+    if not date_str or date_str == "None":
+        return None
+
+    # Try YYYY-MM-DD format first (and first 10 chars when Sheets returns "YYYY-MM-DD HH:MM:SS")
     try:
-        parsed_date = datetime.strptime(date_str, "%Y-%m-%d")
-        return parsed_date
+        return datetime.strptime(date_str[:10], "%Y-%m-%d")
+    except (ValueError, IndexError):
+        pass
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
         pass
-    
+
     # Fallback to old formats for backward compatibility
     try:
-        # Try DD/MM/YY format
         parsed_date = datetime.strptime(date_str, "%d/%m/%y")
         return parsed_date
     except ValueError:
         try:
-            # Try DD/MM/YYYY format
             return datetime.strptime(date_str, "%d/%m/%Y")
         except ValueError:
             logger.warning(f"Failed to parse date string: {date_str}")
