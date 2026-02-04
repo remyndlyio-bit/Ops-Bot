@@ -61,7 +61,7 @@ def validate_plan(
         return False, None, f"Column '{col_str}' is not in the schema. Allowed columns include: {', '.join(sorted(columns_set)[:15])}{'...' if len(columns_set) > 15 else ''}."
     sanitized["column"] = col_match if col_match else col_str
 
-    # filters: keys must be in schema; values string or number or null
+    # filters: keys must be in schema; values string, number, list of strings (for "in" match), or null
     filters = plan.get("filters")
     if filters is None:
         sanitized["filters"] = {}
@@ -73,7 +73,9 @@ def validate_plan(
             k_str = str(k).strip()
             key_match = next((c for c in columns_set if c.lower() == k_str.lower()), None)
             if key_match and v is not None:
-                if isinstance(v, (str, int, float)):
+                if isinstance(v, list):
+                    out[key_match] = [str(x).strip() for x in v if x is not None]
+                elif isinstance(v, (str, int, float)):
                     out[key_match] = v
                 else:
                     out[key_match] = str(v)
@@ -112,7 +114,7 @@ def validate_plan(
     else:
         sanitized["group_by"] = None
 
-    # limit: optional positive integer for "top N" (e.g. top 3 clients)
+    # limit: optional positive integer (top N, bottom N, etc.)
     limit_raw = plan.get("limit")
     if limit_raw is None:
         sanitized["limit"] = None
@@ -129,6 +131,33 @@ def validate_plan(
             sanitized["limit"] = None
     else:
         sanitized["limit"] = None
+
+    # order: optional "asc" | "desc" for sort order of grouped/list results
+    order_raw = plan.get("order")
+    if order_raw is None or (isinstance(order_raw, str) and not order_raw.strip()):
+        sanitized["order"] = None
+    elif isinstance(order_raw, str) and order_raw.strip().lower() in ("asc", "desc"):
+        sanitized["order"] = order_raw.strip().lower()
+    else:
+        sanitized["order"] = None
+
+    # offset: optional non-negative integer (skip first N)
+    offset_raw = plan.get("offset")
+    if offset_raw is None:
+        sanitized["offset"] = None
+    elif isinstance(offset_raw, int) and offset_raw >= 0:
+        sanitized["offset"] = min(int(offset_raw), 1000)
+    elif isinstance(offset_raw, (float, str)):
+        try:
+            n = int(float(offset_raw))
+            if n >= 0:
+                sanitized["offset"] = min(n, 1000)
+            else:
+                sanitized["offset"] = None
+        except (ValueError, TypeError):
+            sanitized["offset"] = None
+    else:
+        sanitized["offset"] = None
 
     # confidence
     confidence = plan.get("confidence")

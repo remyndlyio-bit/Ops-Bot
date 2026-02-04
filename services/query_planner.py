@@ -48,21 +48,36 @@ def build_query_plan_prompt(
         '  "sheet": "sheet1",\n'
         '  "metric": "sum" | "avg" | "min" | "max" | "count",\n'
         '  "column": "<column name from schema>",\n'
-        '  "filters": { "<column>": "<value or null>" },\n'
-        '  "time_range": { "type": "relative" | "absolute", "value": "<relative id or { start, end }>" },\n'
+        '  "filters": { "<column>": "<value> or [\"value1\", \"value2\", ...] or null" },\n'
+        '  "time_range": { "type": "relative" | "absolute", "value": "<relative id or { start, end }>" } | null,\n'
         '  "group_by": "<column name or null>",\n'
-        '  "limit": number | null (optional; use for "top N" e.g. top 3 clients -> 3),\n'
+        '  "limit": number | null,\n'
+        '  "order": "asc" | "desc" | null,\n'
+        '  "offset": number | null,\n'
         '  "confidence": "high" | "low",\n'
-        '  "clarification_question": "optional; include when confidence is low"\n'
+        '  "clarification_question": "string | null"\n'
         "}\n\n"
+        "OPTIONAL FIELDS (include only when user intent implies them):\n"
+        "- limit: max number of rows/groups to return. Use for \"top N\", \"first N\", \"bottom N\", \"lowest N\" (e.g. top 3 -> 3).\n"
+        "- order: sort order for grouped or listed results. \"desc\" = highest/biggest first (default for \"top\"); \"asc\" = lowest/smallest first (use for \"bottom\", \"lowest\", \"least\").\n"
+        "- offset: number of rows/groups to skip from the start. Use for \"skip first 2\", \"after the top 3\", \"second page\", etc.\n"
+        "- time_range: null when user asks for \"all time\", \"overall\", \"total\", or no period mentioned.\n\n"
         "RULES:\n"
         "- Map natural language to the schema: 'earnings', 'billing', 'income' -> sum on Fees (or the numeric column).\n"
-        "- 'Top 3 clients', 'top five', 'top 10' -> set \"limit\" to that number (3, 5, 10) when using group_by.\n"
+        "- 'Top 3 clients', 'top five' -> limit: 3 or 5, order: \"desc\". 'Bottom 3', 'lowest 5', 'least paying' -> limit: 3 or 5, order: \"asc\".\n"
         "- 'Last quarter', 'Q2', '3 months ago' -> time_range type \"relative\", value \"last_quarter\" or \"last_90_days\".\n"
         "- 'This month', 'December' -> \"this_month\" or \"last_month\" or absolute range.\n"
         "- List clients / distinct values -> metric \"count\", group_by the dimension column (e.g. Client Name).\n"
         "- If unclear or ambiguous, set confidence to \"low\" and include \"clarification_question\" with a short question.\n"
-        "- Only use columns from the schema. Only use metrics from the list.\n\n"
+        "- Only use columns from the schema. Only use metrics from the list. Omit optional fields (or set null) when not needed.\n\n"
+        "CONTEXT (use Recent conversation when the user refers to prior messages):\n"
+        "- When the user says \"sum of these\", \"total of those\", \"all these\", \"the above\", \"those clients\", \"these amounts\", etc., "
+        "look at the Assistant's LAST message in the conversation. If it listed specific items (e.g. client names with amounts like \"7up – ₹8,000\"), "
+        "the user means ONLY those items. Set \"filters\" so the query is restricted to them.\n"
+        "- For a SINGLE entity use: \"filters\": { \"<column>\": \"<value>\" } (e.g. client_name: \"7up\").\n"
+        "- For MULTIPLE entities from the list use: \"filters\": { \"<column>\": [\"value1\", \"value2\", \"value3\"] } (e.g. client_name: [\"7up\", \"Xiaomi\", \"Kotak\"]). "
+        "Extract the exact names from the Assistant's message (the part before the amount or the bullet text).\n"
+        "- Recent conversation is in chronological order; the last Assistant message is what the user usually means by \"these\" or \"those\".\n\n"
         f"{context_section}"
         f"Current user message:\n{message}\n\n"
         "Return ONLY valid JSON."

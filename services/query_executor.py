@@ -9,7 +9,7 @@ from utils.logger import logger
 
 
 def _row_matches_filters(row: Dict, filters: Dict[str, Any], date_column: str, date_range: Optional[Dict[str, str]]) -> bool:
-    """Check if row matches filters and (if provided) date range."""
+    """Check if row matches filters and (if provided) date range. Filter value can be a single value or a list (row must match one of)."""
     for col, val in filters.items():
         if val is None:
             continue
@@ -17,9 +17,16 @@ def _row_matches_filters(row: Dict, filters: Dict[str, Any], date_column: str, d
         if row_val is None:
             return False
         row_str = str(row_val).strip().lower()
-        val_str = str(val).strip().lower()
-        if row_str != val_str and val_str not in row_str:
-            return False
+        if isinstance(val, list):
+            if not val:
+                return False
+            val_strs = [str(v).strip().lower() for v in val]
+            if not any(row_str == v or v in row_str or row_str in v for v in val_strs):
+                return False
+        else:
+            val_str = str(val).strip().lower()
+            if row_str != val_str and val_str not in row_str:
+                return False
     if date_range and date_column:
         date_val = row.get(date_column)
         if not date_val:
@@ -129,10 +136,16 @@ def execute_plan(
             else:
                 agg_values[label] = float(sum(nums))
 
-        # Sort groups by aggregated value descending (useful for "top clients" style questions)
-        sorted_labels = sorted(agg_values.keys(), key=lambda k: agg_values[k], reverse=True)
+        # Sort groups by aggregated value; order controls asc/desc
+        order = plan.get("order")
+        reverse = order != "asc"  # default desc (highest first)
+        sorted_labels = sorted(agg_values.keys(), key=lambda k: agg_values[k], reverse=reverse)
         values = [agg_values[l] for l in sorted_labels]
-        # Apply limit (e.g. "top 3 clients") if present in plan
+        # Apply offset then limit if present
+        offset = plan.get("offset")
+        if isinstance(offset, int) and offset > 0:
+            sorted_labels = sorted_labels[offset:]
+            values = values[offset:]
         limit = plan.get("limit")
         if isinstance(limit, int) and limit > 0:
             sorted_labels = sorted_labels[:limit]
