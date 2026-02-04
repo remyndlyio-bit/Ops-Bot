@@ -10,10 +10,12 @@ from utils.logger import logger
 
 def _row_matches_filters(row: Dict, filters: Dict[str, Any], date_column: str, date_range: Optional[Dict[str, str]]) -> bool:
     """Check if row matches filters and (if provided) date range. Filter value can be a single value or a list (row must match one of)."""
+    row_keys_lower = {str(k).strip().lower(): k for k in row.keys()}
     for col, val in filters.items():
         if val is None:
             continue
-        row_val = row.get(col)
+        col_resolved = row_keys_lower.get(str(col).strip().lower()) if row_keys_lower else col
+        row_val = row.get(col_resolved) if col_resolved else row.get(col)
         if row_val is None:
             return False
         row_str = str(row_val).strip().lower()
@@ -25,6 +27,23 @@ def _row_matches_filters(row: Dict, filters: Dict[str, Any], date_column: str, d
                 return False
         else:
             val_str = str(val).strip().lower()
+            # Date column: compare as dates so "2025-04-04" matches sheet "04 Apr 2025" or datetime
+            col_key_lower = str(col).strip().lower()
+            if date_column and col_key_lower == date_column.strip().lower() and len(val_str) >= 10:
+                try:
+                    from datetime import datetime as dt
+                    filter_date = dt.strptime(val_str[:10], "%Y-%m-%d").date()
+                    if isinstance(row_val, datetime):
+                        row_date = row_val.date()
+                    else:
+                        parsed = parse_sheet_date(row_val) or parse_sheet_date(str(row_val))
+                        row_date = parsed.date() if parsed else None
+                    if row_date is not None and row_date == filter_date:
+                        continue
+                    if row_date is not None:
+                        return False
+                except ValueError:
+                    pass
             if row_str != val_str and val_str not in row_str:
                 return False
     if date_range and date_column:
@@ -114,6 +133,15 @@ def execute_plan(
 
     if not filtered:
         return {"ok": True, "value": 0, "count": 0, "message": "No rows match the filters or time period."}
+
+    # "What was it about?" / lookup: metric value → return the column value from the first matching row
+    if metric == "value":
+        first = filtered[0]
+        raw = first.get(col_metric)
+        val = str(raw).strip() if raw is not None else ""
+        if not val:
+            return {"ok": True, "value": None, "value_type": "text", "count": 0, "message": "I don't have that detail on record for that gig."}
+        return {"ok": True, "value": val, "value_type": "text", "count": 1}
 
     # "When was my last gig" / latest date: metric max on the date column → return most recent date
     if metric == "max" and col_metric and col_date and col_metric == col_date:

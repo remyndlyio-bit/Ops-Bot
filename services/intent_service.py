@@ -63,6 +63,13 @@ class IntentService:
                 return f"Your last gig was on {dt.strftime('%d %b %Y')}."
             except ValueError:
                 return f"Your last gig was on {val}."
+        if result.get("value_type") == "text":
+            val = result.get("value")
+            if result.get("message"):
+                return result.get("message")
+            if val is None or not str(val).strip():
+                return "I don't have that detail on record for that gig."
+            return f"It was about: {val}."
         if "labels" in result and result["labels"]:
             labels = result["labels"]
             values = result.get("values") or []

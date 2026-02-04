@@ -5,7 +5,7 @@ Only allows columns from the schema and metrics from the approved list.
 from typing import Dict, Any, List, Tuple, Optional
 from utils.logger import logger
 
-ALLOWED_METRICS = frozenset({"sum", "avg", "min", "max", "count"})
+ALLOWED_METRICS = frozenset({"sum", "avg", "min", "max", "count", "value"})
 ALLOWED_CONFIDENCE = frozenset({"high", "low"})
 REQUIRED_KEYS = frozenset({"sheet", "metric", "column", "filters", "time_range", "group_by", "confidence"})
 
@@ -47,7 +47,7 @@ def validate_plan(
     # metric: only from approved list
     metric = plan.get("metric")
     if metric is None or (isinstance(metric, str) and metric.strip().lower() not in ALLOWED_METRICS):
-        return False, None, f"Invalid or missing 'metric'. Allowed: sum, avg, min, max, count."
+        return False, None, f"Invalid or missing 'metric'. Allowed: sum, avg, min, max, count, value."
     sanitized["metric"] = str(metric).strip().lower()
 
     # column: must be in schema

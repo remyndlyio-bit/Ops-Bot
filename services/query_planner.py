@@ -38,7 +38,9 @@ def build_query_plan_prompt(
         "SCHEMA (allowed columns from the sheet):\n"
         f"{schema_description}\n\n"
         f"Allowed column names (use exactly): {columns_list}\n\n"
-        "ALLOWED METRICS: sum, avg, min, max, count\n\n"
+        "ALLOWED METRICS: sum, avg, min, max, count, value\n\n"
+        "- Use metric \"value\" when the user wants the CONTENT of one column for a specific row (e.g. \"What was it about?\", \"What job was that?\"). "
+        "Set column to the most relevant column (Job, Notes, or similar) and use filters (and optional time_range) to identify the row. No aggregation.\n\n"
         "TIME RANGES (you must compute dates yourself):\n"
         "- When the user asks for a time period (e.g. last quarter, this month, last year, last 30 days), "
         "output time_range with type \"absolute\" and value {\"start\": \"YYYY-MM-DD\", \"end\": \"YYYY-MM-DD\"}. "
@@ -47,7 +49,7 @@ def build_query_plan_prompt(
         "OUTPUT FORMAT (return ONLY this JSON, no other text):\n"
         "{\n"
         '  "sheet": "sheet1",\n'
-        '  "metric": "sum" | "avg" | "min" | "max" | "count",\n'
+        '  "metric": "sum" | "avg" | "min" | "max" | "count" | "value",\n'
         '  "column": "<column name from schema>",\n'
         '  "filters": { "<column>": "<value> or [\"value1\", \"value2\", ...] or null" },\n'
         '  "time_range": { "type": "absolute", "value": { "start": "YYYY-MM-DD", "end": "YYYY-MM-DD" } } | null,\n'
@@ -78,6 +80,10 @@ def build_query_plan_prompt(
         "- When the user says \"sum of these\", \"total of those\", \"all these\", \"the above\", \"those clients\", \"these amounts\", etc., "
         "look at the Assistant's LAST message in the conversation. If it listed specific items (e.g. client names with amounts like \"7up – ₹8,000\"), "
         "the user means ONLY those items. Set \"filters\" so the query is restricted to them.\n"
+        "- When the user asks \"What was it about?\", \"What job was that?\", \"Tell me more\", \"What was that gig?\" and the Assistant's LAST message was a date (e.g. \"Your last gig was on 04 Apr 2025.\" or \"The job for Garnier was on 04 Apr 2025\"), "
+        "the user wants the JOB (or Notes) for that gig. Use metric \"value\", column = the Job/Project/Role column from the schema, and set filters to identify that row: "
+        "include the date in YYYY-MM-DD (e.g. 04 Apr 2025 -> 2025-04-04) and the client name if it was mentioned in the previous user message (e.g. Garnier). "
+        "Example: filters: { \"Date\": \"2025-04-04\", \"Client Name\": \"Garnier\" }, column: \"Job\", metric: \"value\", time_range: null.\n"
         "- For a SINGLE entity use: \"filters\": { \"<column>\": \"<value>\" } (e.g. client_name: \"7up\").\n"
         "- For MULTIPLE entities from the list use: \"filters\": { \"<column>\": [\"value1\", \"value2\", \"value3\"] } (e.g. client_name: [\"7up\", \"Xiaomi\", \"Kotak\"]). "
         "Extract the exact names from the Assistant's message (the part before the amount or the bullet text).\n"
