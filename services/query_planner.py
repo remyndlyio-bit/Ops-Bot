@@ -51,11 +51,13 @@ def build_query_plan_prompt(
         '  "filters": { "<column>": "<value or null>" },\n'
         '  "time_range": { "type": "relative" | "absolute", "value": "<relative id or { start, end }>" },\n'
         '  "group_by": "<column name or null>",\n'
+        '  "limit": number | null (optional; use for "top N" e.g. top 3 clients -> 3),\n'
         '  "confidence": "high" | "low",\n'
         '  "clarification_question": "optional; include when confidence is low"\n'
         "}\n\n"
         "RULES:\n"
         "- Map natural language to the schema: 'earnings', 'billing', 'income' -> sum on Fees (or the numeric column).\n"
+        "- 'Top 3 clients', 'top five', 'top 10' -> set \"limit\" to that number (3, 5, 10) when using group_by.\n"
         "- 'Last quarter', 'Q2', '3 months ago' -> time_range type \"relative\", value \"last_quarter\" or \"last_90_days\".\n"
         "- 'This month', 'December' -> \"this_month\" or \"last_month\" or absolute range.\n"
         "- List clients / distinct values -> metric \"count\", group_by the dimension column (e.g. Client Name).\n"

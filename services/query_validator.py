@@ -112,6 +112,24 @@ def validate_plan(
     else:
         sanitized["group_by"] = None
 
+    # limit: optional positive integer for "top N" (e.g. top 3 clients)
+    limit_raw = plan.get("limit")
+    if limit_raw is None:
+        sanitized["limit"] = None
+    elif isinstance(limit_raw, int) and limit_raw > 0:
+        sanitized["limit"] = min(int(limit_raw), 100)
+    elif isinstance(limit_raw, (float, str)):
+        try:
+            n = int(float(limit_raw))
+            if n > 0:
+                sanitized["limit"] = min(n, 100)
+            else:
+                sanitized["limit"] = None
+        except (ValueError, TypeError):
+            sanitized["limit"] = None
+    else:
+        sanitized["limit"] = None
+
     # confidence
     confidence = plan.get("confidence")
     if confidence is None or (isinstance(confidence, str) and confidence.strip().lower() not in ALLOWED_CONFIDENCE):

@@ -132,6 +132,11 @@ def execute_plan(
         # Sort groups by aggregated value descending (useful for "top clients" style questions)
         sorted_labels = sorted(agg_values.keys(), key=lambda k: agg_values[k], reverse=True)
         values = [agg_values[l] for l in sorted_labels]
+        # Apply limit (e.g. "top 3 clients") if present in plan
+        limit = plan.get("limit")
+        if isinstance(limit, int) and limit > 0:
+            sorted_labels = sorted_labels[:limit]
+            values = values[:limit]
         return {"ok": True, "labels": sorted_labels, "values": values, "count": len(filtered)}
 
     # Single metric on column
