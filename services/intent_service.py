@@ -246,7 +246,12 @@ class IntentService:
 
             valid, sanitized, err = validate_plan(plan, allowed_columns)
             if not valid:
-                response = err or "Could you rephrase? Please specify a time period (e.g. last quarter, this month) and what you want to know."
+                # Ask for more context instead of showing technical validation errors
+                response = (
+                    "I'm not quite sure what you're looking for. Could you give a bit more detail? "
+                    "For example, are you asking for a total amount, a date, a list of clients or jobs, "
+                    "or details about a specific gig? I'll use that to answer you."
+                )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 

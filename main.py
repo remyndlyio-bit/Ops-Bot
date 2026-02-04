@@ -34,17 +34,38 @@ telegram_service = TelegramService() # Initialized TelegramService
 invoice_gen_service = InvoiceGenerationService()
 intent_service = IntentService()
 
+UPDATE_MESSAGE = (
+    "Hi! I've just been updated with new features and I'm smarter than ever. Have a great day 😊"
+)
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Set the Telegram webhook on startup."""
+    """Set the Telegram webhook and send update message on startup (e.g. after deploy)."""
     base_url = os.getenv("BASE_URL")
-    if base_url:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+
+    if base_url and token:
         webhook_url = f"{base_url.rstrip('/')}/webhooks/telegram"
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if token:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(f"https://api.telegram.org/bot{token}/setWebhook", data={"url": webhook_url})
-                logger.info(f"Telegram webhook set to {webhook_url}: {resp.json()}")
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(f"https://api.telegram.org/bot{token}/setWebhook", data={"url": webhook_url})
+            logger.info(f"Telegram webhook set to {webhook_url}: {resp.json()}")
+
+    # Send "I've been updated" message to all known Telegram chats (user_id = chat_id for Telegram)
+    if token:
+        try:
+            memory = getattr(intent_service, "memory", None)
+            if memory and getattr(memory, "memory", None):
+                for user_id in memory.memory:
+                    try:
+                        chat_id = int(user_id)
+                        await telegram_service.send_text_message(chat_id, UPDATE_MESSAGE)
+                        logger.info(f"Sent update message to Telegram chat_id={chat_id}")
+                    except (ValueError, TypeError):
+                        pass  # skip non-numeric IDs (e.g. WhatsApp numbers)
+        except Exception as e:
+            logger.warning(f"Could not send Telegram update message: {e}")
+
 
 @app.get("/health")
 def health_check():
