@@ -89,6 +89,61 @@ class IntentService:
         value = result.get("value", 0)
         return f"Total for the selected period: ₹{value:,.2f}." if isinstance(value, (int, float)) else str(value)
 
+    def _handle_form_step(self, user_id: str, message: str) -> Dict:
+        """Handle an active form: store value, advance, ask next or complete."""
+        form = self.memory.get_form_state(user_id)
+        if not form:
+            return None
+        fields = form.get("fields", [])
+        step = form.get("step", 0)
+
+        # Cancel form if user says cancel/stop/nevermind
+        if message.strip().lower() in ("cancel", "stop", "nevermind", "abort", "exit"):
+            self.memory.cancel_form(user_id)
+            response = "No problem, I've cancelled the form. Let me know if you need anything else."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "form_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Store the current answer
+        current_field = fields[step]
+        self.memory.set_form_value(user_id, current_field, message.strip())
+        self.memory.advance_form_step(user_id)
+
+        # Check if there's a next field
+        next_step = step + 1
+        if next_step < len(fields):
+            next_field = fields[next_step]
+            response = f"Got it! Now, what's the {next_field}?"
+            self._store_conversation(user_id, message, response)
+            return {"operation": "form_in_progress", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # All fields collected - save to sheet
+        values = self.memory.complete_form(user_id)
+        if values:
+            ok = self.sheets.append_row_by_columns(values)
+            if ok:
+                summary = ", ".join(f"{k}: {v}" for k, v in values.items())
+                response = f"Done! I've added the new job: {summary}"
+            else:
+                response = "I collected all the info but couldn't save it to the sheet. Please try again later."
+        else:
+            response = "Something went wrong completing the form."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "form_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _start_add_job_form(self, user_id: str, message: str) -> Dict:
+        """Start the 'add new job' form by asking for the first field."""
+        fields = self.sheets.get_first_n_columns(5)
+        if not fields:
+            response = "I couldn't get the column headers from your sheet. Please check the sheet connection."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "form_error", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        self.memory.start_form(user_id, fields)
+        first_field = fields[0]
+        response = f"Let's add a new job! I'll ask you for a few details.\n\nFirst, what's the {first_field}?\n\n(Type 'cancel' anytime to stop.)"
+        self._store_conversation(user_id, message, response)
+        return {"operation": "form_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
     def process_request(self, user_id: str, message: str) -> Dict:
         """
         Main handler: keyword-based branches for reminder/invoice/overdue;
@@ -101,6 +156,16 @@ class IntentService:
         invoice_data = {}
 
         try:
+            # 0. Check for active form (multi-step data entry)
+            form_state = self.memory.get_form_state(user_id)
+            if form_state:
+                return self._handle_form_step(user_id, message)
+
+            # 0b. Check for "add job" / "add new job" trigger to start form
+            add_job_triggers = ["add job", "add a job", "add new job", "new job", "log a job", "log job", "record job", "record a job"]
+            if any(t in message.lower() for t in add_job_triggers):
+                return self._start_add_job_form(user_id, message)
+
             # 1. Payment reminder (keyword-based)
             reminder_keywords = [
                 "payment reminder",

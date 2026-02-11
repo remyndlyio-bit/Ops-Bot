@@ -73,3 +73,56 @@ class MemoryService:
             self.memory[user_id]["conversation"] = conversation[-self.memory_level * 2:]
         
         self._save_memory()
+
+    # --- Form state for multi-step data entry (e.g. "add new job") ---
+
+    def start_form(self, user_id: str, fields: List[str]) -> None:
+        """Start a new form flow for the user. fields = list of column names to collect."""
+        if user_id not in self.memory:
+            self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads"}
+        self.memory[user_id]["form"] = {
+            "active": True,
+            "fields": fields,
+            "step": 0,
+            "values": {},
+        }
+        self._save_memory()
+
+    def get_form_state(self, user_id: str) -> Optional[Dict]:
+        """Return form state dict or None if no active form."""
+        if user_id not in self.memory:
+            return None
+        form = self.memory[user_id].get("form")
+        if form and form.get("active"):
+            return form
+        return None
+
+    def set_form_value(self, user_id: str, field: str, value: str) -> None:
+        """Store a value for the current form field."""
+        form = self.get_form_state(user_id)
+        if form:
+            form["values"][field] = value
+            self._save_memory()
+
+    def advance_form_step(self, user_id: str) -> None:
+        """Move to the next step in the form."""
+        form = self.get_form_state(user_id)
+        if form:
+            form["step"] += 1
+            self._save_memory()
+
+    def complete_form(self, user_id: str) -> Optional[Dict[str, str]]:
+        """Mark form complete and return collected values. Clears form state."""
+        form = self.get_form_state(user_id)
+        if not form:
+            return None
+        values = dict(form.get("values", {}))
+        self.memory[user_id]["form"] = {"active": False}
+        self._save_memory()
+        return values
+
+    def cancel_form(self, user_id: str) -> None:
+        """Cancel any active form."""
+        if user_id in self.memory:
+            self.memory[user_id]["form"] = {"active": False}
+            self._save_memory()

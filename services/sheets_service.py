@@ -286,6 +286,44 @@ class SheetsService:
             logger.error(f"Error deleting row: {e}")
             return f"Error deleting row: {str(e)}"
 
+    def get_first_n_columns(self, n: int = 5) -> List[str]:
+        """Return the first N column headers from sheet1."""
+        if not self.client:
+            self.client = self._authenticate()
+            if not self.client:
+                return []
+        try:
+            sheet = self.client.open_by_url(self.sheet_url).sheet1
+            headers = sheet.row_values(1)
+            return [str(h).strip() for h in headers[:n] if h and str(h).strip()]
+        except Exception as e:
+            logger.error(f"Error getting column headers: {e}")
+            return []
+
+    def append_row_by_columns(self, column_values: Dict[str, Any]) -> bool:
+        """
+        Append a new row to sheet1. column_values maps header name -> value.
+        Only fills columns present in column_values; others are left blank.
+        """
+        if not self.client:
+            self.client = self._authenticate()
+            if not self.client:
+                return False
+        try:
+            sheet = self.client.open_by_url(self.sheet_url).sheet1
+            headers = [str(h).strip() for h in sheet.row_values(1)]
+            # Build row in header order; blank for missing
+            row = []
+            for h in headers:
+                val = column_values.get(h, "")
+                row.append(val)
+            sheet.append_row(row, value_input_option="USER_ENTERED")
+            logger.info(f"[SHEETS] Appended new row: {column_values}")
+            return True
+        except Exception as e:
+            logger.error(f"Error appending row: {e}")
+            return False
+
     def get_sheet_summary(self, sheet_name: str):
         """Returns a high-level summary of the sheet for metadata queries."""
         try:
