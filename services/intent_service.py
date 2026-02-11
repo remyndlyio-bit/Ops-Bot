@@ -50,9 +50,12 @@ class IntentService:
         return schema_description, cols, date_column
 
     def _format_query_result(self, result: Dict, plan: Dict) -> str:
-        """Format executor result for the user."""
+        """Format executor result for the user. Uses metric type for correct formatting."""
         if not result.get("ok"):
             return result.get("message", "I don't see this information in my records yet.")
+        metric = result.get("metric") or plan.get("metric", "sum")
+        column = plan.get("column", "")
+
         if result.get("value_type") == "date":
             val = result.get("value")
             if val is None or result.get("message"):
@@ -60,16 +63,18 @@ class IntentService:
             try:
                 from datetime import datetime
                 dt = datetime.strptime(str(val)[:10], "%Y-%m-%d")
-                return f"Your last gig was on {dt.strftime('%d %b %Y')}."
+                return f"date: {dt.strftime('%d %b %Y')}"
             except ValueError:
-                return f"Your last gig was on {val}."
+                return f"date: {val}"
         if result.get("value_type") == "text":
             val = result.get("value")
             if result.get("message"):
                 return result.get("message")
             if val is None or not str(val).strip():
-                return "I don't have that detail on record for that gig."
-            return f"It was about: {val}."
+                return "I don't have that detail on record."
+            return f"{column}: {val}"
+
+        # Grouped results (labels + values)
         if "labels" in result and result["labels"]:
             labels = result["labels"]
             values = result.get("values") or []
@@ -79,15 +84,34 @@ class IntentService:
                 if idx < len(values):
                     v = values[idx]
                     if isinstance(v, (int, float)):
-                        prefix += f" – ₹{v:,.2f}"
+                        if metric == "count":
+                            prefix += f": {int(v)}"
+                        else:
+                            prefix += f" – ₹{v:,.2f}"
                     else:
                         prefix += f": {v}"
                 lines.append(prefix)
             if len(labels) > 30:
                 lines.append(f"... and {len(labels) - 30} more.")
-            return "Here is what I found in your records:\n" + "\n".join(lines)
+            return "\n".join(lines)
+
+        # Single value result
         value = result.get("value", 0)
-        return f"Total for the selected period: ₹{value:,.2f}." if isinstance(value, (int, float)) else str(value)
+        row_count = result.get("count", 0)
+        if not isinstance(value, (int, float)):
+            return str(value)
+
+        # Format based on metric type
+        if metric == "count":
+            return f"count: {int(value)}"
+        elif metric == "avg":
+            return f"average {column}: ₹{value:,.2f} (across {row_count} records)"
+        elif metric == "min":
+            return f"minimum {column}: ₹{value:,.2f}"
+        elif metric == "max":
+            return f"maximum {column}: ₹{value:,.2f}"
+        else:  # sum or default
+            return f"total {column}: ₹{value:,.2f}"
 
     def _handle_form_step(self, user_id: str, message: str) -> Dict:
         """Handle an active form: store value, advance, ask next or complete."""

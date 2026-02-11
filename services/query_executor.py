@@ -199,7 +199,7 @@ def execute_plan(
         if isinstance(limit, int) and limit > 0:
             sorted_labels = sorted_labels[:limit]
             values = values[:limit]
-        return {"ok": True, "labels": sorted_labels, "values": values, "count": len(filtered)}
+        return {"ok": True, "labels": sorted_labels, "values": values, "count": len(filtered), "metric": metric}
 
     # Single metric on column
     numbers = [_numeric_value(r.get(col_metric)) for r in filtered]
@@ -216,4 +216,4 @@ def execute_plan(
     else:
         value = sum(numbers)
 
-    return {"ok": True, "value": value, "count": len(filtered)}
+    return {"ok": True, "value": value, "count": len(filtered), "metric": metric}
