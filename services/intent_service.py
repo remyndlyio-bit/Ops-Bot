@@ -1,12 +1,12 @@
 from services.gemini_service import GeminiService
 from services.sheets_service import SheetsService
 from services.gmail_service import GmailService
-from services.query_planner import get_query_plan
-from services.query_validator import validate_plan
-from services.query_executor import execute_plan
+from services.uscf_parser import parse_uscf_command
+from services.uscf_validator import validate_uscf
+from services.uscf_executor import execute_uscf
 from utils.memory_service import MemoryService
 from utils.logger import logger
-from typing import Dict, List
+from typing import Dict, List, Optional
 import json
 
 class IntentService:
@@ -49,69 +49,115 @@ class IntentService:
         date_column = date_cols[0] if date_cols else (cols[0] if cols else "Date")
         return schema_description, cols, date_column
 
-    def _format_query_result(self, result: Dict, plan: Dict) -> str:
-        """Format executor result for the user. Uses metric type for correct formatting."""
+    def _format_uscf_result(self, result: Dict, cmd: Dict) -> str:
+        """Format USCF executor result as factual output for response maker."""
         if not result.get("ok"):
-            return result.get("message", "I don't see this information in my records yet.")
-        metric = result.get("metric") or plan.get("metric", "sum")
-        column = plan.get("column", "")
+            return result.get("message", "I don't see this information in my records.")
 
+        operation = result.get("operation") or cmd.get("operation")
+
+        # CREATE result
+        if operation == "create":
+            return result.get("message", "Record created.")
+
+        # UPDATE result
+        if operation == "update":
+            return result.get("message", f"Updated {result.get('count', 0)} record(s).")
+
+        # DELETE result
+        if operation == "delete":
+            return result.get("message", f"Deleted {result.get('count', 0)} record(s).")
+
+        # QUERY result
+        metric = result.get("metric", "count")
+        column = result.get("column") or cmd.get("column", "")
+        count = result.get("count", 0)
+
+        # Date result
         if result.get("value_type") == "date":
             val = result.get("value")
-            if val is None or result.get("message"):
-                return result.get("message", "I don't have any gigs on record with a date.")
+            if val is None:
+                return result.get("message", "No date found.")
             try:
                 from datetime import datetime
                 dt = datetime.strptime(str(val)[:10], "%Y-%m-%d")
                 return f"date: {dt.strftime('%d %b %Y')}"
             except ValueError:
                 return f"date: {val}"
-        if result.get("value_type") == "text":
-            val = result.get("value")
-            if result.get("message"):
-                return result.get("message")
-            if val is None or not str(val).strip():
-                return "I don't have that detail on record."
+
+        # Value lookup (single cell)
+        if metric == "value":
+            val = result.get("value", "")
+            if not val:
+                return "No value found."
             return f"{column}: {val}"
 
-        # Grouped results (labels + values)
+        # Grouped results
         if "labels" in result and result["labels"]:
             labels = result["labels"]
-            values = result.get("values") or []
+            values = result.get("values", [])
             lines = []
             for idx, label in enumerate(labels[:30]):
-                prefix = f"• {label}"
+                line = f"• {label}"
                 if idx < len(values):
                     v = values[idx]
                     if isinstance(v, (int, float)):
                         if metric == "count":
-                            prefix += f": {int(v)}"
+                            line += f": {int(v)}"
                         else:
-                            prefix += f" – ₹{v:,.2f}"
+                            line += f": ₹{v:,.2f}"
                     else:
-                        prefix += f": {v}"
-                lines.append(prefix)
+                        line += f": {v}"
+                lines.append(line)
             if len(labels) > 30:
                 lines.append(f"... and {len(labels) - 30} more.")
             return "\n".join(lines)
 
-        # Single value result
+        # Single value
         value = result.get("value", 0)
-        row_count = result.get("count", 0)
         if not isinstance(value, (int, float)):
-            return str(value)
+            return str(value) if value else "No result."
 
-        # Format based on metric type
         if metric == "count":
             return f"count: {int(value)}"
         elif metric == "avg":
-            return f"average {column}: ₹{value:,.2f} (across {row_count} records)"
+            return f"average {column}: ₹{value:,.2f} (across {count} records)"
         elif metric == "min":
             return f"minimum {column}: ₹{value:,.2f}"
         elif metric == "max":
             return f"maximum {column}: ₹{value:,.2f}"
-        else:  # sum or default
+        else:  # sum
             return f"total {column}: ₹{value:,.2f}"
+
+    def _build_uscf_context(self, user_id: str, conversation_history: List[Dict]) -> Optional[Dict]:
+        """Build context for USCF parser (helps resolve 'it', 'that', 'update it')."""
+        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+        # Extract info from recent assistant messages (dates, clients mentioned)
+        if conversation_history:
+            for msg in reversed(conversation_history[-4:]):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    # Look for dates like "04 Apr 2025" or "2025-04-04"
+                    import re
+                    date_match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4}-\d{2}-\d{2})", content)
+                    if date_match and not ctx.get("last_result_date"):
+                        ctx["last_result_date"] = date_match.group(1)
+                    break
+        return ctx if ctx else None
+
+    def _update_uscf_context(self, user_id: str, cmd: Dict, result: Dict):
+        """Update context after command execution for future reference resolution."""
+        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+        filters = cmd.get("filters", {})
+        # Store filters for "update it" type references
+        if filters:
+            ctx["current_filters"] = filters
+        # Store date from result
+        if result.get("value_type") == "date" and result.get("value"):
+            ctx["last_result_date"] = result["value"]
+        # Store operation type
+        ctx["last_operation"] = cmd.get("operation")
+        self.memory.update_user_memory(user_id, {"uscf_context": ctx})
 
     def _handle_form_step(self, user_id: str, message: str) -> Dict:
         """Handle an active form: store value, advance, ask next or complete."""
@@ -308,45 +354,56 @@ class IntentService:
                 except Exception as se:
                     logger.error(f"Overdue query failed: {se}")
 
-            # 4. Query-plan path: LLM returns structured JSON → validate → resolve time → execute
+            # 4. USCF path: AI → JSON command → validate → execute → format → response maker
             try:
-                sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
-                records = sheet.get_all_records()
+                records = self.sheets.get_all_records_with_row_numbers()
             except Exception as se:
                 logger.error(f"Sheet access failed: {se}")
                 records = []
             if not records:
-                response = "I don't have any records to query yet."
+                response = "I don't have any records to work with yet."
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            schema_description, allowed_columns, date_column = self._get_schema_and_columns(records)
-            plan = get_query_plan(message, self.gemini, schema_description, allowed_columns, conversation_history, date_column=date_column)
+            # Get columns and date column
+            columns = list(records[0].keys()) if records else []
+            columns = [c for c in columns if c and not c.startswith("_")]  # Exclude internal keys
+            column_map = logic._get_column_names(columns)
+            date_cols = column_map.get("invoice_date", []) or [c for c in columns if "date" in c.lower()]
+            date_column = date_cols[0] if date_cols else "Date"
 
-            if plan.get("_error"):
-                response = "I couldn't process that. Please try rephrasing (e.g. specify a time period like 'last quarter' or 'this month')."
-                self._store_conversation(user_id, message, response)
-                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            # Build context for AI (helps with "it", "that", "update it" references)
+            uscf_context = self._build_uscf_context(user_id, conversation_history)
 
-            if plan.get("confidence") == "low" and plan.get("clarification_question"):
-                response = plan["clarification_question"]
-                self._store_conversation(user_id, message, response)
-                return {"operation": "NEED_CLARIFICATION", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            # Parse intent to USCF command
+            cmd = parse_uscf_command(message, self.gemini, columns, conversation_history, uscf_context)
 
-            valid, sanitized, err = validate_plan(plan, allowed_columns)
-            if not valid:
-                # Ask for more context instead of showing technical validation errors
+            if cmd.get("_error"):
                 response = (
-                    "I'm not quite sure what you're looking for. Could you give a bit more detail? "
-                    "For example, are you asking for a total amount, a date, a list of clients or jobs, "
-                    "or details about a specific gig? I'll use that to answer you."
+                    "I'm not quite sure what you're asking. Could you give a bit more detail? "
+                    "For example: a total amount, a date, a list of jobs, or update a specific record?"
                 )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            exec_result = execute_plan(sanitized, records, date_column)
-            factual_output = self._format_query_result(exec_result, sanitized)
-            # Response maker: smarter reply using only RAG facts, matching tone, concise
+            # Validate command
+            valid, sanitized, err = validate_uscf(cmd, columns)
+            if not valid:
+                response = (
+                    "I couldn't quite understand that. Could you rephrase? "
+                    "For example: 'How many jobs did I do?', 'Total billing last month', or 'Add a new job'."
+                )
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # Execute command
+            exec_result = execute_uscf(sanitized, records, date_column, self.sheets)
+            factual_output = self._format_uscf_result(exec_result, sanitized)
+
+            # Update context for future reference resolution
+            self._update_uscf_context(user_id, sanitized, exec_result)
+
+            # Response maker: natural reply using only facts
             polished = self.gemini.make_response(message, conversation_history, factual_output)
             response = polished if (polished and polished.strip()) else factual_output
 
