@@ -201,8 +201,15 @@ def execute_uscf(
     if operation == "query":
         time_range = cmd.get("time_range")
         filtered = [r for r in records if _row_matches_filters(r, filters, date_column, time_range)]
+
+        # Log raw filtered results for debugging
+        logger.info(f"[USCF] Query filters={filters}, time_range={time_range}, matched_rows={len(filtered)}")
+        if filtered:
+            sample = {k: v for k, v in list(filtered[0].items())[:8] if not str(k).startswith("_")}
+            logger.info(f"[USCF] Sample row: {sample}")
+
         if not filtered:
-            return {"ok": True, "operation": "query", "metric": cmd.get("metric", "count"), "value": 0, "count": 0, "message": "No matching records."}
+            return {"ok": True, "operation": "query", "metric": cmd.get("metric", "count"), "value": 0, "count": 0, "message": "No matching records.", "rows": []}
 
         metric = cmd.get("metric", "count")
         column = cmd.get("column")
@@ -216,13 +223,40 @@ def execute_uscf(
         actual_group = _get_col(group_by, records[0], key_map) if group_by else None
         actual_date_col = _get_col(date_column, records[0], key_map)
 
-        # Single value lookup (metric=value)
-        if metric == "value":
-            if not actual_col:
-                return {"ok": False, "message": f"Column '{column}' not found."}
+        # Resolve return_fields to actual column names
+        actual_return_fields = []
+        if return_fields:
+            for rf in return_fields:
+                actual_rf = _get_col(rf, records[0], key_map)
+                if actual_rf:
+                    actual_return_fields.append(actual_rf)
+
+        # Single value lookup (metric=value OR single return_field requested)
+        if metric == "value" or (len(actual_return_fields) == 1 and not actual_group):
+            target_col = actual_col or (actual_return_fields[0] if actual_return_fields else None)
+            if not target_col:
+                return {"ok": False, "message": f"Column '{column or return_fields}' not found."}
             first = filtered[0]
-            val = first.get(actual_col)
-            return {"ok": True, "operation": "query", "metric": "value", "value": str(val) if val else "", "column": column, "count": 1}
+            val = first.get(target_col)
+            logger.info(f"[USCF] SINGLE_FIELD lookup: column={target_col}, value={val}")
+            return {
+                "ok": True, "operation": "query", "metric": "value",
+                "value": val, "column": target_col,
+                "count": 1, "rows": [first], "return_fields": [target_col],
+                "filters": filters
+            }
+
+        # Multiple return_fields requested → return row data
+        if len(actual_return_fields) > 1:
+            row_data = []
+            for r in filtered[:20]:  # Limit to 20 rows
+                row_data.append({f: r.get(f) for f in actual_return_fields})
+            logger.info(f"[USCF] RECORD mode: return_fields={actual_return_fields}, rows={len(row_data)}")
+            return {
+                "ok": True, "operation": "query", "metric": "record",
+                "rows": row_data, "return_fields": actual_return_fields,
+                "count": len(filtered), "filters": filters
+            }
 
         # Date max (latest date)
         if metric == "max" and actual_col and actual_date_col and actual_col == actual_date_col:
@@ -272,9 +306,10 @@ def execute_uscf(
             if limit and isinstance(limit, int):
                 sorted_labels = sorted_labels[:limit]
                 values = values[:limit]
-            return {"ok": True, "operation": "query", "metric": metric, "labels": sorted_labels, "values": values, "count": len(filtered)}
+            logger.info(f"[USCF] Grouped: metric={metric}, group_by={group_by}, groups={len(sorted_labels)}")
+            return {"ok": True, "operation": "query", "metric": metric, "labels": sorted_labels, "values": values, "count": len(filtered), "filters": filters}
 
-        # Single metric
+        # Single metric aggregation
         if actual_col:
             numbers = [_numeric_value(r.get(actual_col)) for r in filtered]
         else:
@@ -293,6 +328,11 @@ def execute_uscf(
         else:
             value = sum(numbers)
 
-        return {"ok": True, "operation": "query", "metric": metric, "value": value, "column": column, "count": len(filtered)}
+        logger.info(f"[USCF] Aggregation: metric={metric}, column={column}, value={value}, count={len(filtered)}")
+        return {
+            "ok": True, "operation": "query", "metric": metric,
+            "value": value, "column": column, "count": len(filtered),
+            "filters": filters, "rows": filtered[:5]  # Include sample rows for context
+        }
 
     return {"ok": False, "message": f"Unknown operation: {operation}"}

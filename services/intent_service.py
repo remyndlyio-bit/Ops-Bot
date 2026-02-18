@@ -49,6 +49,58 @@ class IntentService:
         date_column = date_cols[0] if date_cols else (cols[0] if cols else "Date")
         return schema_description, cols, date_column
 
+    def _resolve_response_mode(self, result: Dict, cmd: Dict) -> str:
+        """
+        Determine ResponseMode based on priority:
+        1. SINGLE_FIELD: return_fields has 1 field OR metric=value with column
+        2. RECORD: multiple return_fields
+        3. COUNT: metric=count with no specific field requested
+        4. AGGREGATION: sum/avg/min/max
+        5. GROUPED: group_by present
+        6. CLARIFY: otherwise
+        """
+        metric = result.get("metric") or cmd.get("metric", "count")
+        return_fields = result.get("return_fields") or cmd.get("return_fields") or []
+        column = result.get("column") or cmd.get("column")
+        group_by = cmd.get("group_by")
+
+        # Priority 1: Single field requested
+        if len(return_fields) == 1:
+            return "SINGLE_FIELD"
+        if metric == "value" and column:
+            return "SINGLE_FIELD"
+
+        # Priority 2: Multiple return fields
+        if len(return_fields) > 1:
+            return "RECORD"
+
+        # Priority 5: Grouped results
+        if group_by or ("labels" in result and result["labels"]):
+            return "GROUPED"
+
+        # Priority 3/4: Aggregation metrics
+        if metric in ("sum", "avg", "min", "max"):
+            return "AGGREGATION"
+
+        if metric == "count":
+            return "COUNT"
+
+        return "CLARIFY"
+
+    def _build_filter_context(self, filters: Dict) -> str:
+        """Build human-readable context from filters (e.g., 'the Apple job')."""
+        if not filters:
+            return ""
+        parts = []
+        for k, v in filters.items():
+            if v and not str(k).startswith("_"):
+                k_lower = str(k).lower()
+                if "client" in k_lower or "name" in k_lower:
+                    parts.append(str(v))
+                elif "date" in k_lower:
+                    parts.append(f"on {v}")
+        return " ".join(parts) if parts else ""
+
     def _format_uscf_result(self, result: Dict, cmd: Dict) -> str:
         """Format USCF executor result as factual output for response maker."""
         if not result.get("ok"):
@@ -68,12 +120,17 @@ class IntentService:
         if operation == "delete":
             return result.get("message", f"Deleted {result.get('count', 0)} record(s).")
 
-        # QUERY result
-        metric = result.get("metric", "count")
+        # QUERY result - use ResponseMode resolver
+        mode = self._resolve_response_mode(result, cmd)
+        filters = result.get("filters") or cmd.get("filters") or {}
+        context = self._build_filter_context(filters)
         column = result.get("column") or cmd.get("column", "")
         count = result.get("count", 0)
+        metric = result.get("metric") or cmd.get("metric", "count")
 
-        # Date result
+        logger.info(f"[RESPONSE] mode={mode}, column={column}, metric={metric}, filters={filters}")
+
+        # Date result (special case for max on date column)
         if result.get("value_type") == "date":
             val = result.get("value")
             if val is None:
@@ -85,17 +142,44 @@ class IntentService:
             except ValueError:
                 return f"date: {val}"
 
-        # Value lookup (single cell)
-        if metric == "value":
-            val = result.get("value", "")
-            if not val:
-                return "No value found."
-            return f"{column}: {val}"
+        # SINGLE_FIELD mode: return specific field value
+        if mode == "SINGLE_FIELD":
+            val = result.get("value")
+            rows = result.get("rows", [])
+            return_fields = result.get("return_fields") or [column]
+            target_field = return_fields[0] if return_fields else column
 
-        # Grouped results
-        if "labels" in result and result["labels"]:
-            labels = result["labels"]
+            # Try to get value from result or first row
+            if val is None and rows:
+                val = rows[0].get(target_field)
+
+            if val is None or (isinstance(val, str) and not val.strip()):
+                return f"No {target_field} found{' for ' + context if context else ''}."
+
+            # Format based on value type
+            if isinstance(val, (int, float)):
+                return f"{target_field}{' for ' + context if context else ''}: ₹{val:,.2f}"
+            else:
+                return f"{target_field}{' for ' + context if context else ''}: {val}"
+
+        # RECORD mode: return multiple fields
+        if mode == "RECORD":
+            rows = result.get("rows", [])
+            return_fields = result.get("return_fields", [])
+            if not rows:
+                return "No matching records found."
+            lines = []
+            for row in rows[:10]:
+                parts = [f"{f}: {row.get(f, 'N/A')}" for f in return_fields]
+                lines.append("• " + ", ".join(parts))
+            return "\n".join(lines)
+
+        # GROUPED mode: labels + values
+        if mode == "GROUPED":
+            labels = result.get("labels", [])
             values = result.get("values", [])
+            if not labels:
+                return "No grouped results."
             lines = []
             for idx, label in enumerate(labels[:30]):
                 line = f"• {label}"
@@ -113,21 +197,28 @@ class IntentService:
                 lines.append(f"... and {len(labels) - 30} more.")
             return "\n".join(lines)
 
-        # Single value
-        value = result.get("value", 0)
-        if not isinstance(value, (int, float)):
-            return str(value) if value else "No result."
+        # AGGREGATION mode: sum/avg/min/max
+        if mode == "AGGREGATION":
+            value = result.get("value", 0)
+            if not isinstance(value, (int, float)):
+                return str(value) if value else "No result."
+            prefix = context + " " if context else ""
+            if metric == "sum":
+                return f"total {column}{' for ' + context if context else ''}: ₹{value:,.2f}"
+            elif metric == "avg":
+                return f"average {column}{' for ' + context if context else ''}: ₹{value:,.2f} (across {count} records)"
+            elif metric == "min":
+                return f"minimum {column}{' for ' + context if context else ''}: ₹{value:,.2f}"
+            elif metric == "max":
+                return f"maximum {column}{' for ' + context if context else ''}: ₹{value:,.2f}"
 
-        if metric == "count":
-            return f"count: {int(value)}"
-        elif metric == "avg":
-            return f"average {column}: ₹{value:,.2f} (across {count} records)"
-        elif metric == "min":
-            return f"minimum {column}: ₹{value:,.2f}"
-        elif metric == "max":
-            return f"maximum {column}: ₹{value:,.2f}"
-        else:  # sum
-            return f"total {column}: ₹{value:,.2f}"
+        # COUNT mode (only when no specific field requested)
+        if mode == "COUNT":
+            value = result.get("value", result.get("count", 0))
+            return f"count{' for ' + context if context else ''}: {int(value)}"
+
+        # CLARIFY fallback
+        return "Could you clarify what specific information you're looking for?"
 
     def _build_uscf_context(self, user_id: str, conversation_history: List[Dict]) -> Optional[Dict]:
         """Build context for USCF parser (helps resolve 'it', 'that', 'update it')."""
