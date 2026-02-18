@@ -122,11 +122,14 @@ def execute_uscf(
         data = cmd.get("data", {})
         if not data:
             return {"ok": False, "message": "No data provided for create."}
+        logger.info(f"[USCF] CREATE - Normalized data to write: {data}")
         if sheets_service:
             ok = sheets_service.append_row_by_columns(data)
             if ok:
                 summary = ", ".join(f"{k}: {v}" for k, v in list(data.items())[:5])
+                logger.info(f"[USCF] CREATE success: {summary}")
                 return {"ok": True, "operation": "create", "message": f"Created new record: {summary}"}
+            logger.error("[USCF] CREATE failed: append_row_by_columns returned False")
             return {"ok": False, "message": "Failed to add record to sheet."}
         return {"ok": False, "message": "Sheet service not available."}
 
@@ -157,6 +160,7 @@ def execute_uscf(
         updates = cmd.get("updates", [])
         if not updates:
             return {"ok": False, "message": "No updates specified."}
+        logger.info(f"[USCF] UPDATE - Normalized updates to apply: {updates}")
         time_range = cmd.get("time_range")
         matched = [r for r in records if _row_matches_filters(r, filters, date_column, time_range)]
         if not matched:
@@ -191,9 +195,11 @@ def execute_uscf(
                         new_value = f"{current_str} {value}".strip() if current_str else str(value)
                     elif mode == "clear":
                         new_value = ""
+                    logger.info(f"[USCF] UPDATE row {row_num}: {actual_col} = {new_value}")
                     sheets_service.update_cell_by_header(row_num, actual_col, new_value)
                 updated += 1
             update_summary = ", ".join(f"{u['field']}={u['value']}" for u in updates[:3])
+            logger.info(f"[USCF] UPDATE success: {updated} record(s)")
             return {"ok": True, "operation": "update", "message": f"Updated {updated} record(s): {update_summary}", "count": updated}
         return {"ok": False, "message": "Sheet service not available for update."}
 

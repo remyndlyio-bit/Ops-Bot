@@ -1,9 +1,11 @@
 """
 USCF Validator.
 Validates and sanitizes USCF commands against schema.
+Includes date normalization for CREATE/UPDATE operations.
 """
 from typing import Dict, Any, List, Tuple, Optional
 from utils.logger import logger
+from utils.date_utils import normalize_date_for_write, is_date_column
 
 ALLOWED_OPERATIONS = frozenset({"create", "update", "query", "delete"})
 ALLOWED_UPDATE_MODES = frozenset({"set", "increase", "decrease", "increase_percent", "decrease_percent", "append", "clear"})
@@ -106,7 +108,14 @@ def validate_uscf(
         for k, v in data.items():
             col = _normalize_column(k, columns_set)
             if col:
-                san_data[col] = _parse_smart_number(v) if isinstance(v, (str, int, float)) else v
+                # Date normalization for date columns
+                if is_date_column(col) and v is not None:
+                    normalized_date, date_error = normalize_date_for_write(v, col)
+                    if date_error:
+                        return False, None, date_error
+                    san_data[col] = normalized_date if normalized_date else v
+                else:
+                    san_data[col] = _parse_smart_number(v) if isinstance(v, (str, int, float)) else v
         if not san_data:
             return False, None, "No valid columns in 'data'. Check column names."
         sanitized["data"] = san_data
@@ -127,9 +136,16 @@ def validate_uscf(
                 continue
             if mode not in ALLOWED_UPDATE_MODES:
                 mode = "set"
-            # Parse smart numbers for numeric modes
-            if mode in ("set", "increase", "decrease", "increase_percent", "decrease_percent"):
-                value = _parse_smart_number(value)
+            # Date normalization for date columns (only for set mode)
+            if is_date_column(col) and mode == "set" and value is not None:
+                normalized_date, date_error = normalize_date_for_write(value, col)
+                if date_error:
+                    return False, None, date_error
+                value = normalized_date if normalized_date else value
+            # Parse smart numbers for numeric modes (non-date columns)
+            elif mode in ("set", "increase", "decrease", "increase_percent", "decrease_percent"):
+                if not is_date_column(col):
+                    value = _parse_smart_number(value)
             san_updates.append({"field": col, "mode": mode, "value": value})
         if not san_updates:
             return False, None, "No valid updates. Check field names and modes."

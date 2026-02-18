@@ -1,6 +1,108 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from utils.logger import logger
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Any
+
+
+def normalize_date_for_write(value: Any, column_name: str = "") -> Tuple[Optional[str], Optional[str]]:
+    """
+    Normalize a date value to ISO format (YYYY-MM-DD) for writing to sheets.
+    Handles natural language: today, yesterday, tomorrow, 15 Feb, Feb 15 2026, etc.
+    
+    Returns: (normalized_date, error_message)
+    - If successful: ("2026-02-15", None)
+    - If failed: (None, "Invalid date format...")
+    """
+    if value is None:
+        return None, None
+    
+    original = str(value).strip()
+    if not original:
+        return None, None
+    
+    logger.info(f"[DATE_NORM] Input: '{original}' for column '{column_name}'")
+    
+    today = datetime.now().date()
+    lower = original.lower().strip()
+    
+    # Handle relative dates
+    if lower == "today":
+        result = today.isoformat()
+        logger.info(f"[DATE_NORM] 'today' -> {result}")
+        return result, None
+    if lower == "yesterday":
+        result = (today - timedelta(days=1)).isoformat()
+        logger.info(f"[DATE_NORM] 'yesterday' -> {result}")
+        return result, None
+    if lower == "tomorrow":
+        result = (today + timedelta(days=1)).isoformat()
+        logger.info(f"[DATE_NORM] 'tomorrow' -> {result}")
+        return result, None
+    
+    # Already ISO format
+    try:
+        dt = datetime.strptime(original[:10], "%Y-%m-%d")
+        result = dt.date().isoformat()
+        logger.info(f"[DATE_NORM] ISO format -> {result}")
+        return result, None
+    except (ValueError, IndexError):
+        pass
+    
+    # Common date formats to try
+    formats = [
+        "%d %b %Y",      # 15 Feb 2026
+        "%d %B %Y",      # 15 February 2026
+        "%b %d %Y",      # Feb 15 2026
+        "%B %d %Y",      # February 15 2026
+        "%d %b",         # 15 Feb (assume current year)
+        "%d %B",         # 15 February
+        "%b %d",         # Feb 15
+        "%B %d",         # February 15
+        "%d/%m/%Y",      # 15/02/2026
+        "%d/%m/%y",      # 15/02/26
+        "%m/%d/%Y",      # 02/15/2026
+        "%d-%m-%Y",      # 15-02-2026
+        "%d-%m-%y",      # 15-02-26
+        "%Y/%m/%d",      # 2026/02/15
+    ]
+    
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(original, fmt)
+            # If year not in format, use current year
+            if "%Y" not in fmt and "%y" not in fmt:
+                dt = dt.replace(year=today.year)
+                # If the date is in the past by more than 6 months, assume next year
+                if (today - dt.date()).days > 180:
+                    dt = dt.replace(year=today.year + 1)
+            result = dt.date().isoformat()
+            logger.info(f"[DATE_NORM] Parsed with '{fmt}' -> {result}")
+            return result, None
+        except ValueError:
+            continue
+    
+    # Try parsing with dateutil if available (more flexible)
+    try:
+        from dateutil import parser as dateutil_parser
+        dt = dateutil_parser.parse(original, dayfirst=True, fuzzy=True)
+        result = dt.date().isoformat()
+        logger.info(f"[DATE_NORM] dateutil parsed -> {result}")
+        return result, None
+    except Exception:
+        pass
+    
+    # Failed to parse
+    logger.warning(f"[DATE_NORM] Failed to parse: '{original}'")
+    return None, f"Invalid date format for '{column_name}': '{original}'. Please use a valid date (e.g., 'today', '15 Feb 2026', '2026-02-15')."
+
+
+def is_date_column(column_name: str) -> bool:
+    """Check if a column name indicates a date field."""
+    if not column_name:
+        return False
+    lower = column_name.lower().replace(" ", "").replace("_", "")
+    date_indicators = ["date", "day", "when", "created", "updated", "due", "start", "end", "time"]
+    return any(ind in lower for ind in date_indicators)
+
 
 def parse_sheet_date(date_str: str) -> Optional[datetime]:
     """
