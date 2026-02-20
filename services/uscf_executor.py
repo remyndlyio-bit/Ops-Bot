@@ -276,9 +276,11 @@ def execute_uscf(
                     if dt:
                         dates.append(dt)
             if not dates:
-                return {"ok": True, "operation": "query", "metric": "max", "value": None, "message": "No dates found."}
+                return {"ok": True, "operation": "query", "metric": "max", "value": None, "message": "No dates found.", "rows": []}
             latest = max(dates)
-            return {"ok": True, "operation": "query", "metric": "max", "value": latest.date().isoformat(), "value_type": "date", "count": len(filtered)}
+            # Find the row with the latest date for context
+            latest_row = next((r for r in filtered if parse_sheet_date(r.get(actual_col)) == latest), filtered[0])
+            return {"ok": True, "operation": "query", "metric": "max", "value": latest.date().isoformat(), "value_type": "date", "count": len(filtered), "rows": [latest_row], "filters": filters}
 
         # Grouped aggregation
         if actual_group:
@@ -313,7 +315,7 @@ def execute_uscf(
                 sorted_labels = sorted_labels[:limit]
                 values = values[:limit]
             logger.info(f"[USCF] Grouped: metric={metric}, group_by={group_by}, groups={len(sorted_labels)}")
-            return {"ok": True, "operation": "query", "metric": metric, "labels": sorted_labels, "values": values, "count": len(filtered), "filters": filters}
+            return {"ok": True, "operation": "query", "metric": metric, "labels": sorted_labels, "values": values, "count": len(filtered), "filters": filters, "rows": filtered[:5]}
 
         # Single metric aggregation
         if actual_col:

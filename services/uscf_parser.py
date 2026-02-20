@@ -100,6 +100,8 @@ RULES:
 7. For "when was my last gig", "latest job date" → query with metric=max on date column.
 8. For "what was that job about" → query with metric=value on job/notes column, using context filters.
 9. If ambiguous, prefer the most reasonable interpretation. Don't ask for clarification unless truly impossible.
+10. CRITICAL: Do NOT add default date filters (like today or yesterday) unless the user explicitly mentions a date. If no date is specified, use empty filters {{}} or time_range: null.
+11. For follow-up questions like "And the brand name?" that reference a previous result, use the context filters from the session context if available.
 
 {session_ctx}Conversation history:
 {conv_block}

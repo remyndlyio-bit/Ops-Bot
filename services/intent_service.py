@@ -236,18 +236,144 @@ class IntentService:
                     break
         return ctx if ctx else None
 
+    def _is_followup_field_request(self, message: str, columns: List[str]) -> Optional[str]:
+        """
+        Check if message is a follow-up request for a specific field from last row.
+        Returns the requested column name if detected, None otherwise.
+        """
+        msg_lower = message.lower().strip()
+        
+        # Common follow-up patterns
+        followup_patterns = [
+            "and the", "what about", "what's the", "what is the", "how about",
+            "the ", "show me the", "tell me the", "give me the",
+        ]
+        
+        # Check if message matches follow-up pattern
+        is_followup = any(msg_lower.startswith(p) for p in followup_patterns) or msg_lower.endswith("?")
+        
+        # Check if message contains a column reference
+        for col in columns:
+            col_lower = col.lower().replace("_", " ").replace("-", " ")
+            col_variants = [col_lower, col_lower.replace(" ", "")]
+            for variant in col_variants:
+                if variant in msg_lower:
+                    return col
+        
+        # Check common field aliases
+        field_aliases = {
+            "brand": ["brand", "brand_name", "brand name"],
+            "client": ["client", "client_name", "client name"],
+            "amount": ["amount", "fees", "fee", "billing", "payment"],
+            "paid": ["paid", "payment_status", "status"],
+            "date": ["date", "job_date", "job date", "when"],
+            "job": ["job", "job_name", "work", "gig"],
+            "notes": ["notes", "note", "description"],
+        }
+        
+        for canonical, aliases in field_aliases.items():
+            for alias in aliases:
+                if alias in msg_lower:
+                    # Find matching column
+                    for col in columns:
+                        col_lower = col.lower().replace("_", " ")
+                        if canonical in col_lower or any(a in col_lower for a in aliases):
+                            return col
+        
+        return None
+
+    def _try_answer_from_context(self, user_id: str, message: str, columns: List[str]) -> Optional[str]:
+        """
+        Try to answer follow-up question directly from stored last_row_data.
+        Returns factual answer string if possible, None otherwise.
+        """
+        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+        last_row_data = ctx.get("last_row_data")
+        
+        if not last_row_data:
+            logger.info("[FOLLOWUP] No last_row_data in context")
+            return None
+        
+        # Check if this is a follow-up field request
+        requested_field = self._is_followup_field_request(message, columns)
+        if not requested_field:
+            logger.info("[FOLLOWUP] Not a follow-up field request")
+            return None
+        
+        # Try to find the field value in last_row_data (case-insensitive)
+        value = None
+        matched_col = None
+        for col, val in last_row_data.items():
+            if col.lower().replace("_", " ") == requested_field.lower().replace("_", " "):
+                value = val
+                matched_col = col
+                break
+            if requested_field.lower() in col.lower():
+                value = val
+                matched_col = col
+                break
+        
+        if value is None:
+            # Also try common aliases
+            aliases_map = {
+                "brand": ["brand", "brand_name"],
+                "client": ["client", "client_name"],
+                "amount": ["amount", "fees", "fee", "total"],
+                "paid": ["paid", "payment_status"],
+            }
+            for canonical, aliases in aliases_map.items():
+                if requested_field.lower() in aliases or canonical in requested_field.lower():
+                    for col, val in last_row_data.items():
+                        if any(a in col.lower() for a in aliases):
+                            value = val
+                            matched_col = col
+                            break
+                    if value is not None:
+                        break
+        
+        if value is None or (isinstance(value, str) and not value.strip()):
+            logger.info(f"[FOLLOWUP] Field '{requested_field}' not found or empty in last_row_data")
+            return None
+        
+        logger.info(f"[FOLLOWUP] Answered from context: {matched_col} = {value}")
+        
+        # Format the value
+        if isinstance(value, (int, float)):
+            return f"{matched_col}: ₹{value:,.2f}"
+        return f"{matched_col}: {value}"
+
     def _update_uscf_context(self, user_id: str, cmd: Dict, result: Dict):
         """Update context after command execution for future reference resolution."""
         ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+        
+        # Only update context if we got successful results with matched rows
+        matched_rows = result.get("count", 0)
+        rows = result.get("rows", [])
+        
+        if matched_rows == 0 and not rows:
+            # Don't store context for empty results
+            logger.info("[CONTEXT] No matched rows - not updating context")
+            return
+        
         filters = cmd.get("filters", {})
         # Store filters for "update it" type references
         if filters:
             ctx["current_filters"] = filters
+        
         # Store date from result
         if result.get("value_type") == "date" and result.get("value"):
             ctx["last_result_date"] = result["value"]
+        
         # Store operation type
         ctx["last_operation"] = cmd.get("operation")
+        
+        # Store last successful row data for follow-up questions
+        if rows and len(rows) > 0:
+            last_row = rows[0]
+            ctx["last_row_data"] = {k: v for k, v in last_row.items() if not str(k).startswith("_")}
+            ctx["last_row_id"] = last_row.get("_row")
+            logger.info(f"[CONTEXT] Stored last_row_id={ctx.get('last_row_id')}, fields={list(ctx['last_row_data'].keys())[:5]}")
+        
         self.memory.update_user_memory(user_id, {"uscf_context": ctx})
 
     def _handle_form_step(self, user_id: str, message: str) -> Dict:
@@ -463,6 +589,16 @@ class IntentService:
             date_cols = column_map.get("invoice_date", []) or [c for c in columns if "date" in c.lower()]
             date_column = date_cols[0] if date_cols else "Date"
 
+            # 4a. Follow-up resolver: try to answer from last successful row context
+            followup_answer = self._try_answer_from_context(user_id, message, columns)
+            if followup_answer:
+                logger.info(f"[FOLLOWUP] Answered from context: {followup_answer}")
+                # Use response maker for natural reply
+                polished = self.gemini.make_response(message, conversation_history, followup_answer)
+                response = polished if (polished and polished.strip()) else followup_answer
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             # Build context for AI (helps with "it", "that", "update it" references)
             uscf_context = self._build_uscf_context(user_id, conversation_history)
 
@@ -489,9 +625,19 @@ class IntentService:
 
             # Execute command
             exec_result = execute_uscf(sanitized, records, date_column, self.sheets)
+
+            # Handle empty results - don't store context, return safe message
+            matched_count = exec_result.get("count", 0)
+            matched_rows = exec_result.get("rows", [])
+            if not exec_result.get("ok") or (matched_count == 0 and not matched_rows):
+                if exec_result.get("operation") == "query":
+                    response = "I couldn't find any matching records. Could you try with different criteria?"
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             factual_output = self._format_uscf_result(exec_result, sanitized)
 
-            # Update context for future reference resolution
+            # Update context for future reference resolution (only if we have results)
             self._update_uscf_context(user_id, sanitized, exec_result)
 
             # Response maker: natural reply using only facts
