@@ -254,6 +254,7 @@ def execute_uscf(
 
         # Multiple return_fields requested → return row data
         if len(actual_return_fields) > 1:
+            # Return filtered view for display, but include full rows for context
             row_data = []
             for r in filtered[:20]:  # Limit to 20 rows
                 row_data.append({f: r.get(f) for f in actual_return_fields})
@@ -261,7 +262,8 @@ def execute_uscf(
             return {
                 "ok": True, "operation": "query", "metric": "record",
                 "rows": row_data, "return_fields": actual_return_fields,
-                "count": len(filtered), "filters": filters
+                "count": len(filtered), "filters": filters,
+                "_full_rows": filtered[:5]  # Full rows for context storage
             }
 
         # Date max (latest date)

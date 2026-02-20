@@ -239,20 +239,45 @@ class IntentService:
     def _is_followup_field_request(self, message: str, columns: List[str]) -> Optional[str]:
         """
         Check if message is a follow-up request for a specific field from last row.
-        Returns the requested column name if detected, None otherwise.
+        Returns the requested field keyword if detected, None otherwise.
         """
         msg_lower = message.lower().strip()
         
-        # Common follow-up patterns
+        # Common follow-up patterns that indicate user wants info from previous result
         followup_patterns = [
             "and the", "what about", "what's the", "what is the", "how about",
-            "the ", "show me the", "tell me the", "give me the",
+            "the ", "show me the", "tell me the", "give me the", "what was the",
+            "what's", "whats",
         ]
         
-        # Check if message matches follow-up pattern
-        is_followup = any(msg_lower.startswith(p) for p in followup_patterns) or msg_lower.endswith("?")
+        # Check if message matches follow-up pattern or is a short question
+        is_followup = (
+            any(msg_lower.startswith(p) for p in followup_patterns) or 
+            msg_lower.endswith("?") or
+            len(msg_lower.split()) <= 4  # Short messages like "language?" or "brand name"
+        )
         
-        # Check if message contains a column reference
+        if not is_followup:
+            return None
+        
+        # Comprehensive field aliases mapping
+        field_aliases = {
+            "brand": ["brand", "brand_name", "brand name", "brandname"],
+            "client": ["client", "client_name", "client name", "clientname", "company"],
+            "amount": ["amount", "fees", "fee", "billing", "payment", "cost", "price", "total", "value"],
+            "paid": ["paid", "payment_status", "status", "payment status", "ispaid"],
+            "date": ["date", "job_date", "job date", "jobdate", "when", "day"],
+            "job": ["job", "job_name", "job name", "jobname", "work", "gig", "project", "task"],
+            "notes": ["notes", "note", "description", "details", "info", "about"],
+            "language": ["language", "lang", "languages"],
+            "location": ["location", "place", "city", "venue", "where"],
+            "contact": ["contact", "phone", "email", "poc", "person"],
+            "production": ["production", "production_house", "production house", "productionhouse", "house"],
+            "invoice": ["invoice", "invoice_number", "invoice number", "invoicenumber", "bill"],
+            "due": ["due", "due_date", "due date", "duedate", "deadline"],
+        }
+        
+        # First check for exact column match
         for col in columns:
             col_lower = col.lower().replace("_", " ").replace("-", " ")
             col_variants = [col_lower, col_lower.replace(" ", "")]
@@ -260,86 +285,97 @@ class IntentService:
                 if variant in msg_lower:
                     return col
         
-        # Check common field aliases
-        field_aliases = {
-            "brand": ["brand", "brand_name", "brand name"],
-            "client": ["client", "client_name", "client name"],
-            "amount": ["amount", "fees", "fee", "billing", "payment"],
-            "paid": ["paid", "payment_status", "status"],
-            "date": ["date", "job_date", "job date", "when"],
-            "job": ["job", "job_name", "work", "gig"],
-            "notes": ["notes", "note", "description"],
-        }
-        
+        # Then check aliases
         for canonical, aliases in field_aliases.items():
             for alias in aliases:
                 if alias in msg_lower:
-                    # Find matching column
-                    for col in columns:
-                        col_lower = col.lower().replace("_", " ")
-                        if canonical in col_lower or any(a in col_lower for a in aliases):
-                            return col
+                    return canonical  # Return the canonical name, we'll match it to columns later
         
         return None
 
     def _try_answer_from_context(self, user_id: str, message: str, columns: List[str]) -> Optional[str]:
         """
         Try to answer follow-up question directly from stored last_row_data.
-        Returns factual answer string if possible, None otherwise.
+        Returns factual answer string if possible.
+        
+        IMPORTANT: If we have last_row_data but can't find the field, we return
+        a "not found" message instead of None, to prevent re-querying with stale filters.
         """
         ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
         last_row_data = ctx.get("last_row_data")
         
         if not last_row_data:
-            logger.info("[FOLLOWUP] No last_row_data in context")
+            logger.info("[FOLLOWUP] No last_row_data in context - allowing new query")
             return None
         
         # Check if this is a follow-up field request
         requested_field = self._is_followup_field_request(message, columns)
         if not requested_field:
-            logger.info("[FOLLOWUP] Not a follow-up field request")
+            logger.info("[FOLLOWUP] Not a follow-up field request - allowing new query")
             return None
         
-        # Try to find the field value in last_row_data (case-insensitive)
+        logger.info(f"[FOLLOWUP] Looking for field '{requested_field}' in stored row with keys: {list(last_row_data.keys())}")
+        
+        # Comprehensive alias mapping for field lookup
+        field_aliases = {
+            "brand": ["brand", "brand_name", "brandname"],
+            "client": ["client", "client_name", "clientname", "company"],
+            "amount": ["amount", "fees", "fee", "billing", "total", "cost", "price"],
+            "paid": ["paid", "payment_status", "status", "ispaid"],
+            "date": ["date", "job_date", "jobdate"],
+            "job": ["job", "job_name", "jobname", "work", "project", "task"],
+            "notes": ["notes", "note", "description", "details", "about"],
+            "language": ["language", "lang", "languages"],
+            "location": ["location", "place", "city", "venue"],
+            "contact": ["contact", "phone", "email", "poc"],
+            "production": ["production", "production_house", "productionhouse", "house"],
+            "invoice": ["invoice", "invoice_number", "invoicenumber", "bill"],
+            "due": ["due", "due_date", "duedate", "deadline"],
+        }
+        
+        # Get all aliases for the requested field
+        search_terms = [requested_field.lower()]
+        for canonical, aliases in field_aliases.items():
+            if requested_field.lower() == canonical or requested_field.lower() in aliases:
+                search_terms = aliases + [canonical]
+                break
+        
+        # Try to find the field value in last_row_data
         value = None
         matched_col = None
+        
         for col, val in last_row_data.items():
-            if col.lower().replace("_", " ") == requested_field.lower().replace("_", " "):
-                value = val
-                matched_col = col
-                break
-            if requested_field.lower() in col.lower():
-                value = val
-                matched_col = col
+            col_lower = col.lower().replace("_", "").replace(" ", "")
+            col_lower_spaced = col.lower().replace("_", " ")
+            
+            for term in search_terms:
+                term_clean = term.replace("_", "").replace(" ", "")
+                if (col_lower == term_clean or 
+                    term_clean in col_lower or 
+                    col_lower in term_clean or
+                    term in col_lower_spaced):
+                    value = val
+                    matched_col = col
+                    break
+            if value is not None:
                 break
         
-        if value is None:
-            # Also try common aliases
-            aliases_map = {
-                "brand": ["brand", "brand_name"],
-                "client": ["client", "client_name"],
-                "amount": ["amount", "fees", "fee", "total"],
-                "paid": ["paid", "payment_status"],
-            }
-            for canonical, aliases in aliases_map.items():
-                if requested_field.lower() in aliases or canonical in requested_field.lower():
-                    for col, val in last_row_data.items():
-                        if any(a in col.lower() for a in aliases):
-                            value = val
-                            matched_col = col
-                            break
-                    if value is not None:
-                        break
-        
+        # If we have context but can't find the field, return a "not found" message
+        # DO NOT return None here - that would trigger a re-query with stale filters
         if value is None or (isinstance(value, str) and not value.strip()):
-            logger.info(f"[FOLLOWUP] Field '{requested_field}' not found or empty in last_row_data")
-            return None
+            available_fields = ", ".join(list(last_row_data.keys())[:8])
+            logger.info(f"[FOLLOWUP] Field '{requested_field}' not found in stored row. Available: {available_fields}")
+            return f"I don't have '{requested_field}' information for this record. Available fields: {available_fields}"
         
-        logger.info(f"[FOLLOWUP] Answered from context: {matched_col} = {value}")
+        logger.info(f"[FOLLOWUP] Serving field from stored row without DB call: {matched_col} = {value}")
         
         # Format the value
         if isinstance(value, (int, float)):
-            return f"{matched_col}: ₹{value:,.2f}"
+            # Check if it looks like a currency field
+            col_lower = matched_col.lower() if matched_col else ""
+            if any(term in col_lower for term in ["amount", "fee", "billing", "cost", "price", "total", "payment"]):
+                return f"{matched_col}: ₹{value:,.2f}"
+            return f"{matched_col}: {value}"
         return f"{matched_col}: {value}"
 
     def _update_uscf_context(self, user_id: str, cmd: Dict, result: Dict):
@@ -349,8 +385,9 @@ class IntentService:
         # Only update context if we got successful results with matched rows
         matched_rows = result.get("count", 0)
         rows = result.get("rows", [])
+        full_rows = result.get("_full_rows", [])  # Full rows for context (not filtered by return_fields)
         
-        if matched_rows == 0 and not rows:
+        if matched_rows == 0 and not rows and not full_rows:
             # Don't store context for empty results
             logger.info("[CONTEXT] No matched rows - not updating context")
             return
@@ -367,12 +404,17 @@ class IntentService:
         # Store operation type
         ctx["last_operation"] = cmd.get("operation")
         
-        # Store last successful row data for follow-up questions
-        if rows and len(rows) > 0:
-            last_row = rows[0]
+        # Store FULL row data for follow-up questions (prefer _full_rows over rows)
+        # This ensures we have ALL columns, not just return_fields
+        source_rows = full_rows if full_rows else rows
+        if source_rows and len(source_rows) > 0:
+            last_row = source_rows[0]
+            # Store the ENTIRE row, excluding only internal keys
             ctx["last_row_data"] = {k: v for k, v in last_row.items() if not str(k).startswith("_")}
             ctx["last_row_id"] = last_row.get("_row")
-            logger.info(f"[CONTEXT] Stored last_row_id={ctx.get('last_row_id')}, fields={list(ctx['last_row_data'].keys())[:5]}")
+            all_keys = list(ctx["last_row_data"].keys())
+            logger.info(f"[CONTEXT] Stored full row with keys: {all_keys}")
+            logger.info(f"[CONTEXT] last_row_id={ctx.get('last_row_id')}, total_fields={len(all_keys)}")
         
         self.memory.update_user_memory(user_id, {"uscf_context": ctx})
 
