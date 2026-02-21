@@ -105,6 +105,7 @@ def execute_uscf(
     records: List[Dict],
     date_column: str,
     sheets_service: Any = None,
+    is_invoice_create: bool = False,
 ) -> Dict[str, Any]:
     """
     Execute a validated USCF command.
@@ -119,16 +120,32 @@ def execute_uscf(
 
     # ===== CREATE =====
     if operation == "create":
-        data = cmd.get("data", {})
+        data = dict(cmd.get("data", {}))
         if not data:
             return {"ok": False, "message": "No data provided for create."}
+        # For invoice creates: add today's date if no date column present (so get_invoice_data can find the row)
+        client_keys = [k for k in data if "client" in str(k).lower() or "production" in str(k).lower()]
+        date_keys = [k for k in data if "date" in str(k).lower()]
+        if is_invoice_create and client_keys and not date_keys and date_column:
+            from datetime import datetime as dt
+            data[date_column] = dt.now().strftime("%d-%m-%Y")
+            logger.info(f"[USCF] Invoice create: added {date_column}={data[date_column]}")
         logger.info(f"[USCF] CREATE - Normalized data to write: {data}")
         if sheets_service:
-            ok = sheets_service.append_row_by_columns(data)
+            ok, new_row = sheets_service.append_row_by_columns(data)
             if ok:
                 summary = ", ".join(f"{k}: {v}" for k, v in list(data.items())[:5])
                 logger.info(f"[USCF] CREATE success: {summary}")
-                return {"ok": True, "operation": "create", "message": f"Created new record: {summary}"}
+                result = {"ok": True, "operation": "create", "message": f"Created new record: {summary}"}
+                if new_row:
+                    result["new_row"] = new_row
+                    bill_no = (
+                        new_row.get("Bill No") or new_row.get("Bill-No") or new_row.get("BillNo")
+                        or new_row.get("bill_no")
+                    )
+                    if bill_no is not None and str(bill_no).strip():
+                        result["bill_number"] = str(bill_no).strip()
+                return result
             logger.error("[USCF] CREATE failed: append_row_by_columns returned False")
             return {"ok": False, "message": "Failed to add record to sheet."}
         return {"ok": False, "message": "Sheet service not available."}

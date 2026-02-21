@@ -129,16 +129,14 @@ def parse_sheet_date(date_str: str) -> Optional[datetime]:
     except ValueError:
         pass
 
-    # Fallback to old formats for backward compatibility
-    try:
-        parsed_date = datetime.strptime(date_str, "%d/%m/%y")
-        return parsed_date
-    except ValueError:
+    # Fallback to common formats for backward compatibility
+    for fmt in ["%d/%m/%y", "%d/%m/%Y", "%d-%m-%Y", "%d-%m-%y"]:
         try:
-            return datetime.strptime(date_str, "%d/%m/%Y")
+            return datetime.strptime(date_str, fmt)
         except ValueError:
-            logger.warning(f"Failed to parse date string: {date_str}")
-            return None
+            continue
+    logger.warning(f"Failed to parse date string: {date_str}")
+    return None
 
 def month_name_to_number(month_name: str) -> Optional[int]:
     """Converts a month name (e.g. 'April') to its numeric value (1-12)."""

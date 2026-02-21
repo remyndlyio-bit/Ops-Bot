@@ -1,7 +1,7 @@
 import gspread
 from google.oauth2.service_account import Credentials
 import os
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime
 from utils.logger import logger
 
@@ -300,15 +300,17 @@ class SheetsService:
             logger.error(f"Error getting column headers: {e}")
             return []
 
-    def append_row_by_columns(self, column_values: Dict[str, Any]) -> bool:
+    def append_row_by_columns(self, column_values: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """
         Append a new row to sheet1. column_values maps header name -> value.
         Only fills columns present in column_values; others are left blank.
+        Returns (success, new_row_data). new_row_data contains the full row as written
+        by Sheets (including formula results like Bill No), or None on failure.
         """
         if not self.client:
             self.client = self._authenticate()
             if not self.client:
-                return False
+                return False, None
         try:
             sheet = self.client.open_by_url(self.sheet_url).sheet1
             headers = [str(h).strip() for h in sheet.row_values(1)]
@@ -319,10 +321,18 @@ class SheetsService:
                 row.append(val)
             sheet.append_row(row, value_input_option="USER_ENTERED")
             logger.info(f"[SHEETS] Appended new row: {column_values}")
-            return True
+            # Fetch the last row (the one we just added) to get computed values like Bill No
+            try:
+                all_records = sheet.get_all_records()
+                new_row = dict(all_records[-1]) if all_records else {}
+                new_row = {str(k).strip(): v for k, v in new_row.items()}
+                return True, new_row
+            except Exception as e2:
+                logger.warning(f"Could not fetch new row after append: {e2}")
+                return True, {}
         except Exception as e:
             logger.error(f"Error appending row: {e}")
-            return False
+            return False, None
 
     def get_sheet_summary(self, sheet_name: str):
         """Returns a high-level summary of the sheet for metadata queries."""

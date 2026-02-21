@@ -110,7 +110,11 @@ class IntentService:
 
         # CREATE result
         if operation == "create":
-            return result.get("message", "Record created.")
+            msg = result.get("message", "Record created.")
+            bill_no = result.get("bill_number")
+            if bill_no:
+                msg += f" Invoice/Bill #: {bill_no}."
+            return msg
 
         # UPDATE result
         if operation == "update":
@@ -449,7 +453,7 @@ class IntentService:
         # All fields collected - save to sheet
         values = self.memory.complete_form(user_id)
         if values:
-            ok = self.sheets.append_row_by_columns(values)
+            ok, _ = self.sheets.append_row_by_columns(values)
             if ok:
                 summary = ", ".join(f"{k}: {v}" for k, v in values.items())
                 response = f"Done! I've added the new job: {summary}"
@@ -666,7 +670,10 @@ class IntentService:
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             # Execute command
-            exec_result = execute_uscf(sanitized, records, date_column, self.sheets)
+            is_invoice_create = "invoice" in message.lower() and sanitized.get("operation") == "create"
+            exec_result = execute_uscf(
+                sanitized, records, date_column, self.sheets, is_invoice_create=is_invoice_create
+            )
 
             # Handle empty results - don't store context, return safe message
             matched_count = exec_result.get("count", 0)
@@ -676,6 +683,25 @@ class IntentService:
                     response = "I couldn't find any matching records. Could you try with different criteria?"
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # Invoice CREATE: trigger PDF generation and include bill number in invoice_data
+            if is_invoice_create and exec_result.get("ok") and exec_result.get("operation") == "create":
+                create_data = sanitized.get("data", {})
+                client_name = (
+                    create_data.get("Client Name")
+                    or create_data.get("Production house")
+                    or create_data.get("client_name")
+                )
+                if client_name:
+                    from datetime import datetime
+                    now = datetime.now()
+                    trigger_invoice = True
+                    invoice_data = {
+                        "client_name": str(client_name).strip(),
+                        "month": now.strftime("%B"),
+                        "year": now.year,
+                        "bill_number": exec_result.get("bill_number"),
+                    }
 
             factual_output = self._format_uscf_result(exec_result, sanitized)
 
