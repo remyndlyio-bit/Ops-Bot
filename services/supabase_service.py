@@ -1,6 +1,10 @@
 """
 Supabase data access: schema for job_entries and execution of validated SQL (SELECT + INSERT).
 Uses SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY for REST; SUPABASE_DB_URL for raw SQL.
+
+IMPORTANT: On Railway/serverless use the CONNECTION POOLER URL (port 6543), not direct (5432).
+Direct (db.xxx.supabase.co:5432) often fails with "Network is unreachable".
+Dashboard → Project Settings → Database → Connection string → "Transaction" / pooler (port 6543).
 """
 
 import os
@@ -116,7 +120,12 @@ class SupabaseService:
                     return {"ok": True, "rows": rows, "rowcount": rowcount, "operation": "insert"}
         except Exception as e:
             logger.error(f"Supabase SQL execution error: {e}")
-            return {"ok": False, "error": str(e)}
+            err_msg = str(e)
+            # Don't send raw connection errors to Telegram; log pooler hint for network failures
+            if "network" in err_msg.lower() or "unreachable" in err_msg.lower() or "connection" in err_msg.lower():
+                logger.info("Tip: Use SUPABASE_DB_URL with connection pooler (port 6543), not direct (5432). See .env.example")
+                return {"ok": False, "error": "I couldn't reach the database right now. Please try again in a moment."}
+            return {"ok": False, "error": "Something went wrong with that query. Please try again."}
 
     def execute_read_only_sql(self, sql: str) -> Dict[str, Any]:
         """Alias for execute_sql (kept for backward compatibility)."""
