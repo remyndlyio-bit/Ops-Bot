@@ -31,8 +31,14 @@ create table if not exists public.job_entries (
   notes text
 );
 
--- Optional: enable RLS and add policies (adjust as needed)
--- alter table public.job_entries enable row level security;
--- create policy "Allow service role full access" on public.job_entries for all using (true) with check (true);
-
 comment on table public.job_entries is 'Job/invoice entries loaded from Excel template';
+
+-- If SELECT returns 0 rows even though data exists, RLS is likely blocking the direct DB connection.
+-- Run ONE of the following in Supabase SQL Editor:
+
+-- Option A: Disable RLS (simplest if only your backend accesses this table)
+alter table public.job_entries disable row level security;
+
+-- Option B: Keep RLS but allow the database role used by SUPABASE_DB_URL (e.g. postgres)
+-- alter table public.job_entries enable row level security;
+-- create policy "Allow backend full access" on public.job_entries for all to postgres using (true) with check (true);

@@ -226,21 +226,23 @@ class IntentService:
         return "Could you clarify what specific information you're looking for?"
 
     def _format_sql_result(self, rows: List[Dict]) -> str:
-        """Format SQL result rows into a short factual reply."""
+        """Format SQL result rows into a short factual reply. Never returns empty when rows exist."""
         if not rows:
             return "No matching records found."
+        def _fmt_val(v):
+            return v if v is not None else "N/A"
         if len(rows) == 1 and len(rows[0]) <= 3:
-            # Single row, few columns: inline
-            parts = [f"{k}: {v}" for k, v in rows[0].items() if v is not None]
-            return ", ".join(parts)
+            parts = [f"{k}: {_fmt_val(v)}" for k, v in rows[0].items()]
+            out = ", ".join(parts)
+            return out if out.strip() else "1 row (no values)"
         if len(rows) == 1:
-            lines = [f"• {k}: {v}" for k, v in rows[0].items() if v is not None]
-            return "\n".join(lines[:15])
-        # Multiple rows: summarize or list key columns
+            lines = [f"• {k}: {_fmt_val(v)}" for k, v in list(rows[0].items())[:15]]
+            out = "\n".join(lines)
+            return out if out.strip() else "1 row (no values)"
         keys = list(rows[0].keys())[:6]
         lines = []
         for r in rows[:20]:
-            parts = [f"{k}: {r.get(k)}" for k in keys if r.get(k) is not None]
+            parts = [f"{k}: {_fmt_val(r.get(k))}" for k in keys]
             lines.append("• " + ", ".join(parts))
         if len(rows) > 20:
             lines.append(f"... and {len(rows) - 20} more.")

@@ -121,9 +121,13 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Supabase SQL execution error: {e}")
             err_msg = str(e)
-            # Don't send raw connection errors to Telegram; log pooler hint for network failures
+            # Don't send raw connection errors to Telegram
             if "network" in err_msg.lower() or "unreachable" in err_msg.lower() or "connection" in err_msg.lower():
-                logger.info("Tip: Use SUPABASE_DB_URL with connection pooler (port 6543), not direct (5432). See .env.example")
+                if "db." in err_msg and "supabase.co" in err_msg:
+                    logger.info(
+                        "Tip: SUPABASE_DB_URL must use the POOLER HOST from Supabase Dashboard → Database → Connection string → "
+                        "Transaction mode (e.g. aws-0-REGION.pooler.supabase.com:6543), NOT db.PROJECT_REF.supabase.co"
+                    )
                 return {"ok": False, "error": "I couldn't reach the database right now. Please try again in a moment."}
             return {"ok": False, "error": "Something went wrong with that query. Please try again."}
 
