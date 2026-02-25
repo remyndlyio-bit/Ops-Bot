@@ -347,9 +347,7 @@ class IntentService:
         """
         Try to answer follow-up question directly from stored last_row_data.
         Returns factual answer string if possible.
-        
-        IMPORTANT: If we have last_row_data but can't find the field, we return
-        a "not found" message instead of None, to prevent re-querying with stale filters.
+        If we don't find the requested field in context, we now allow a fresh query.
         """
         ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
         last_row_data = ctx.get("last_row_data")
@@ -410,12 +408,12 @@ class IntentService:
             if value is not None:
                 break
         
-        # If we have context but can't find the field, return a "not found" message
-        # DO NOT return None here - that would trigger a re-query with stale filters
         if value is None or (isinstance(value, str) and not value.strip()):
             available_fields = ", ".join(list(last_row_data.keys())[:8])
             logger.info(f"[FOLLOWUP] Field '{requested_field}' not found in stored row. Available: {available_fields}")
-            return f"I don't have '{requested_field}' information for this record. Available fields: {available_fields}"
+            logger.info("[FOLLOWUP] Falling back to a new query for this follow-up.")
+            # Allow the main flow to run a new query instead of forcing a 'not found' reply
+            return None
         
         logger.info(f"[FOLLOWUP] Serving field from stored row without DB call: {matched_col} = {value}")
         
