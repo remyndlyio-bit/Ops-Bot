@@ -4,6 +4,19 @@ from services.gmail_service import GmailService
 from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
+from services.response_formatter import (
+    format_response,
+    format_as_job_summary_block,
+    payment_status_note,
+    STRICT_DATA_MODE,
+    ASSISTANT_MODE,
+    REMINDER_MODE,
+    ERROR_MODE,
+    clarify_phrase,
+    no_result_phrase,
+    error_calm_phrase,
+    query_invalid_phrase,
+)
 from utils.memory_service import MemoryService
 from utils.logger import logger
 from typing import Dict, List, Optional
@@ -224,6 +237,15 @@ class IntentService:
 
         # CLARIFY fallback
         return "Could you clarify what specific information you're looking for?"
+
+    def _row_has_financial_keys(self, row: Dict) -> bool:
+        """True if row looks like a job/financial record (client, fee, or date)."""
+        k = [str(x).lower() for x in row.keys()]
+        return (
+            any(c in k for c in ["client_name", "client", "production_house"])
+            or any(f in k for f in ["fees", "fee", "amount"])
+            or any(d in k for d in ["job_date", "date", "payment_date"])
+        )
 
     def _format_sql_result(self, rows: List[Dict]) -> str:
         """Format SQL result rows into a short factual reply. Never returns empty when rows exist."""
@@ -587,7 +609,11 @@ class IntentService:
                         failed += 1
 
                 if not targets:
-                    response = f"I don't see any clients with payments due in the next {approaching_days} days that need a first reminder."
+                    response = format_response(
+                        REMINDER_MODE,
+                        clarification_hint="Would you like me to check a different window or list overdue items?",
+                        reminder_sent_count=0,
+                    )
                     self._store_conversation(user_id, message, response)
                     return {
                         "operation": "ACTION_TRIGGER",
@@ -595,15 +621,13 @@ class IntentService:
                         "trigger_invoice": False,
                     }
 
-                response_parts = [f"Sent {sent} payment reminder(s)."]
-                if sent_details:
-                    response_parts.append("\n\nClients notified:")
-                    for detail in sent_details:
-                        response_parts.append(f"• {detail}")
+                response = format_response(
+                    REMINDER_MODE,
+                    reminder_sent_count=sent,
+                    reminder_details=sent_details,
+                )
                 if failed > 0:
-                    response_parts.append(f"\nFailed: {failed}.")
-                
-                response = "\n".join(response_parts)
+                    response = response.rstrip() + f"\n\nFailed to send: {failed}."
                 self._store_conversation(user_id, message, response)
                 return {
                     "operation": "ACTION_TRIGGER",
@@ -630,7 +654,7 @@ class IntentService:
                         if resolved["status"] == "found":
                             trigger_invoice = True
                             invoice_data = {"client_name": resolved["client"], "month": resolved["month"], "bill_number": params.get("bill_number"), "year": resolved.get("year")}
-                            response = f"Confirmed! I've found the record for {resolved['client']}. I'm generating the invoice now... 📄"
+                            response = f"Confirmed. I've found the record for {resolved['client']}. Generating the invoice now."
                         else:
                             response = resolved.get("message", "I don't see that invoice in my records.")
                         self._store_conversation(user_id, message, response)
@@ -654,7 +678,10 @@ class IntentService:
             columns = [c for c in JOB_ENTRIES_COLUMNS if not c.startswith("_")]
 
             if not self.supabase.db_url:
-                response = "Query service is not configured (SUPABASE_DB_URL). I can still help with payment reminders and invoice retrieval."
+                response = format_response(
+                    ERROR_MODE,
+                    error_detail="Query service isn't configured right now. I can still help with payment reminders and invoice retrieval.",
+                )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -662,33 +689,30 @@ class IntentService:
             followup_answer = self._try_answer_from_context(user_id, message, columns)
             if followup_answer:
                 logger.info(f"[FOLLOWUP] Answered from context: {followup_answer}")
-                polished = self.gemini.make_response(message, conversation_history, followup_answer)
-                response = polished if (polished and polished.strip()) else followup_answer
+                response = format_response(ASSISTANT_MODE, factual=followup_answer)
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             # Generate SQL from natural language
             sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history)
             if sql_result.get("_error"):
-                response = (
-                    "I'm not quite sure what you're asking. Could you give a bit more detail? "
-                    "For example: 'How many jobs?', 'Total fees for Garnier', or 'Last payment date'."
-                )
+                response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             sql = sql_result.get("sql")
             valid, sanitized_sql, err = validate_sql(sql)
             if not valid:
-                response = (
-                    "I couldn't turn that into a safe query. Try rephrasing, e.g. 'Total billing last month' or 'Jobs for client X'."
-                )
+                response = query_invalid_phrase()
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             exec_result = self.supabase.execute_sql(sanitized_sql)
             if not exec_result.get("ok"):
-                response = exec_result.get("error", "Query failed.") or "I couldn't run that query."
+                response = format_response(
+                    ERROR_MODE,
+                    error_detail=exec_result.get("error") or error_calm_phrase(),
+                )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -697,24 +721,33 @@ class IntentService:
 
             if op == "insert":
                 if rows:
-                    factual_output = self._format_sql_result(rows)
                     self._update_sql_context(user_id, rows)
+                    response = format_response(ASSISTANT_MODE, insert_confirmation=True)
                 else:
-                    factual_output = "Done. I've added that job."
+                    response = format_response(ASSISTANT_MODE, insert_confirmation=True)
             else:
                 if not rows:
-                    response = "I couldn't find any matching records. Try different criteria or time range?"
+                    response = format_response(ERROR_MODE)  # no_result_phrase inside
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                factual_output = self._format_sql_result(rows)
                 self._update_sql_context(user_id, rows)
-
-            polished = self.gemini.make_response(message, conversation_history, factual_output)
-            response = polished if (polished and polished.strip()) else factual_output
+                use_job_block = rows and self._row_has_financial_keys(rows[0])
+                if use_job_block:
+                    response = format_response(
+                        ASSISTANT_MODE,
+                        rows=rows,
+                        is_financial=True,
+                        add_payment_note=True,
+                    )
+                else:
+                    response = format_response(
+                        ASSISTANT_MODE,
+                        factual=self._format_sql_result(rows),
+                    )
 
         except Exception as e:
             logger.error(f"Execution failure: {e}")
-            response = "I encountered an error accessing the data records."
+            response = format_response(ERROR_MODE, error_detail=error_calm_phrase())
 
         self._store_conversation(user_id, message, response)
         return {
