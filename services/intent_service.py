@@ -238,15 +238,6 @@ class IntentService:
         # CLARIFY fallback
         return "Could you clarify what specific information you're looking for?"
 
-    def _row_has_financial_keys(self, row: Dict) -> bool:
-        """True if row looks like a job/financial record (client, fee, or date)."""
-        k = [str(x).lower() for x in row.keys()]
-        return (
-            any(c in k for c in ["client_name", "client", "production_house"])
-            or any(f in k for f in ["fees", "fee", "amount"])
-            or any(d in k for d in ["job_date", "date", "payment_date"])
-        )
-
     def _format_sql_result(self, rows: List[Dict]) -> str:
         """Format SQL result rows into a short factual reply. Never returns empty when rows exist."""
         if not rows:
@@ -731,19 +722,11 @@ class IntentService:
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                 self._update_sql_context(user_id, rows)
-                use_job_block = rows and self._row_has_financial_keys(rows[0])
-                if use_job_block:
-                    response = format_response(
-                        ASSISTANT_MODE,
-                        rows=rows,
-                        is_financial=True,
-                        add_payment_note=True,
-                    )
-                else:
-                    response = format_response(
-                        ASSISTANT_MODE,
-                        factual=self._format_sql_result(rows),
-                    )
+                response = format_response(
+                    ASSISTANT_MODE,
+                    rows=rows,
+                    add_payment_note=True,
+                )
 
         except Exception as e:
             logger.error(f"Execution failure: {e}")
