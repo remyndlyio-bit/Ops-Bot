@@ -6,3 +6,4 @@ google-credentials.json
 output/
 .DS_Store
 *.json
+.env.example

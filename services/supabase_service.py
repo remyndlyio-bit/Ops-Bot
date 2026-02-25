@@ -1,0 +1,123 @@
+"""
+Supabase data access: schema for job_entries and execution of validated SQL (SELECT + INSERT).
+Uses SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY for REST; SUPABASE_DB_URL for raw SQL.
+"""
+
+import os
+from typing import List, Dict, Any, Optional
+from utils.logger import logger
+
+# Schema for job_entries (single table); used for SQL generation and validation
+JOB_ENTRIES_COLUMNS = [
+    "id", "created_at", "job_date", "client_name", "job_description_details",
+    "job_notes", "language", "production_house", "studio", "qt", "length",
+    "fees", "advance", "added_3rd_party_cut", "bill_no", "bill_sent", "paid",
+    "payment_date", "poc_email", "poc_name", "first_reminder_sent",
+    "second_reminder_sent", "third_reminder_sent", "payment_followup",
+    "payment_details", "notes",
+]
+
+SCHEMA_DESCRIPTION = """
+Table: public.job_entries
+- job_date (date): when the job was done; use for "when", "last gig", time filters.
+- client_name (text): client or brand name.
+- job_description_details (text): job/project description.
+- job_notes (text): notes.
+- language (text): e.g. English.
+- production_house (text), studio (text): production info.
+- qt (integer): quantity.
+- length (text): e.g. 15sec, 20sec.
+- fees (integer): amount in rupees.
+- advance (numeric), added_3rd_party_cut (numeric).
+- bill_no (text), bill_sent (text), paid (text): billing status.
+- payment_date (date): when payment was received.
+- poc_email (text), poc_name (text): contact.
+- first_reminder_sent, second_reminder_sent, third_reminder_sent (timestamptz).
+- payment_followup (text), payment_details (text), notes (text).
+Use exact column names. For dates use ISO YYYY-MM-DD. TODAY for relative ranges.
+"""
+
+
+class SupabaseService:
+    def __init__(self):
+        self.url = (os.getenv("SUPABASE_URL") or "").strip()
+        self.key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+        self.db_url = (os.getenv("SUPABASE_DB_URL") or "").strip()
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None and self.url and self.key:
+            from supabase import create_client
+            self._client = create_client(self.url, self.key)
+        return self._client
+
+    def get_schema(self) -> Dict[str, Any]:
+        """Return table name, column list, and description for SQL generation."""
+        return {
+            "table": "job_entries",
+            "schema_name": "public",
+            "columns": JOB_ENTRIES_COLUMNS,
+            "description": SCHEMA_DESCRIPTION.strip(),
+        }
+
+    def execute_sql(self, sql: str) -> Dict[str, Any]:
+        """
+        Execute validated SQL (SELECT or INSERT) via direct Postgres connection.
+        SELECT: returns {"ok": True, "rows": [...], "operation": "select"}.
+        INSERT: returns {"ok": True, "rows": [...]} if RETURNING used, else {"ok": True, "rowcount": 1, "operation": "insert"}.
+        On error: {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            logger.warning("SUPABASE_DB_URL not set; cannot run raw SQL")
+            return {"ok": False, "error": "Database URL not configured (SUPABASE_DB_URL)."}
+
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+        except ImportError:
+            return {"ok": False, "error": "psycopg2 not installed (required for raw SQL)."}
+
+        sql = sql.strip().rstrip(";")
+        upper = sql.upper()
+        if not upper.startswith("SELECT") and not upper.startswith("INSERT"):
+            return {"ok": False, "error": "Only SELECT and INSERT are allowed."}
+
+        try:
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql)
+                if upper.startswith("SELECT"):
+                    rows = cur.fetchall()
+                    out = []
+                    for row in rows:
+                        d = dict(row)
+                        for k, v in d.items():
+                            if hasattr(v, "isoformat") and v is not None:
+                                d[k] = v.isoformat()
+                        out.append(d)
+                    conn.close()
+                    return {"ok": True, "rows": out, "operation": "select"}
+                else:
+                    rowcount = cur.rowcount
+                    rows = []
+                    if "RETURNING" in upper:
+                        rows = cur.fetchall()
+                        out = []
+                        for row in rows:
+                            d = dict(row)
+                            for k, v in d.items():
+                                if hasattr(v, "isoformat") and v is not None:
+                                    d[k] = v.isoformat()
+                            out.append(d)
+                        rows = out
+                    conn.close()
+                    return {"ok": True, "rows": rows, "rowcount": rowcount, "operation": "insert"}
+        except Exception as e:
+            logger.error(f"Supabase SQL execution error: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def execute_read_only_sql(self, sql: str) -> Dict[str, Any]:
+        """Alias for execute_sql (kept for backward compatibility)."""
+        return self.execute_sql(sql)

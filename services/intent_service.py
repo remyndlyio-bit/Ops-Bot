@@ -1,9 +1,9 @@
 from services.gemini_service import GeminiService
 from services.sheets_service import SheetsService
 from services.gmail_service import GmailService
-from services.uscf_parser import parse_uscf_command
-from services.uscf_validator import validate_uscf
-from services.uscf_executor import execute_uscf
+from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS
+from services.sql_generator import generate_sql
+from services.sql_validator import validate_sql
 from utils.memory_service import MemoryService
 from utils.logger import logger
 from typing import Dict, List, Optional
@@ -17,6 +17,7 @@ class IntentService:
         self.gemini = GeminiService()
         self.sheets = SheetsService()
         self.email = GmailService()
+        self.supabase = SupabaseService()
         self.memory = MemoryService()
 
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
@@ -223,6 +224,36 @@ class IntentService:
 
         # CLARIFY fallback
         return "Could you clarify what specific information you're looking for?"
+
+    def _format_sql_result(self, rows: List[Dict]) -> str:
+        """Format SQL result rows into a short factual reply."""
+        if not rows:
+            return "No matching records found."
+        if len(rows) == 1 and len(rows[0]) <= 3:
+            # Single row, few columns: inline
+            parts = [f"{k}: {v}" for k, v in rows[0].items() if v is not None]
+            return ", ".join(parts)
+        if len(rows) == 1:
+            lines = [f"• {k}: {v}" for k, v in rows[0].items() if v is not None]
+            return "\n".join(lines[:15])
+        # Multiple rows: summarize or list key columns
+        keys = list(rows[0].keys())[:6]
+        lines = []
+        for r in rows[:20]:
+            parts = [f"{k}: {r.get(k)}" for k in keys if r.get(k) is not None]
+            lines.append("• " + ", ".join(parts))
+        if len(rows) > 20:
+            lines.append(f"... and {len(rows) - 20} more.")
+        return "\n".join(lines)
+
+    def _update_sql_context(self, user_id: str, rows: List[Dict]):
+        """Store first result row for follow-up questions (same shape as USCF context)."""
+        if not rows:
+            return
+        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+        ctx["last_row_data"] = dict(rows[0])
+        ctx["last_operation"] = "query"
+        self.memory.update_user_memory(user_id, {"uscf_context": ctx})
 
     def _build_uscf_context(self, user_id: str, conversation_history: List[Dict]) -> Optional[Dict]:
         """Build context for USCF parser (helps resolve 'it', 'that', 'update it')."""
@@ -617,98 +648,65 @@ class IntentService:
                 except Exception as se:
                     logger.error(f"Overdue query failed: {se}")
 
-            # 4. USCF path: AI → JSON command → validate → execute → format → response maker
-            try:
-                records = self.sheets.get_all_records_with_row_numbers()
-            except Exception as se:
-                logger.error(f"Sheet access failed: {se}")
-                records = []
-            if not records:
-                response = "I don't have any records to work with yet."
+            # 4. SQL path: intent → generate SQL → validate → execute on Supabase → format → response
+            columns = [c for c in JOB_ENTRIES_COLUMNS if not c.startswith("_")]
+
+            if not self.supabase.db_url:
+                response = "Query service is not configured (SUPABASE_DB_URL). I can still help with payment reminders and invoice retrieval."
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # Get columns and date column
-            columns = list(records[0].keys()) if records else []
-            columns = [c for c in columns if c and not c.startswith("_")]  # Exclude internal keys
-            column_map = logic._get_column_names(columns)
-            date_cols = column_map.get("invoice_date", []) or [c for c in columns if "date" in c.lower()]
-            date_column = date_cols[0] if date_cols else "Date"
-
-            # 4a. Follow-up resolver: try to answer from last successful row context
+            # 4a. Follow-up: answer from last result row if applicable
             followup_answer = self._try_answer_from_context(user_id, message, columns)
             if followup_answer:
                 logger.info(f"[FOLLOWUP] Answered from context: {followup_answer}")
-                # Use response maker for natural reply
                 polished = self.gemini.make_response(message, conversation_history, followup_answer)
                 response = polished if (polished and polished.strip()) else followup_answer
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # Build context for AI (helps with "it", "that", "update it" references)
-            uscf_context = self._build_uscf_context(user_id, conversation_history)
-
-            # Parse intent to USCF command
-            cmd = parse_uscf_command(message, self.gemini, columns, conversation_history, uscf_context)
-
-            if cmd.get("_error"):
+            # Generate SQL from natural language
+            sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history)
+            if sql_result.get("_error"):
                 response = (
                     "I'm not quite sure what you're asking. Could you give a bit more detail? "
-                    "For example: a total amount, a date, a list of jobs, or update a specific record?"
+                    "For example: 'How many jobs?', 'Total fees for Garnier', or 'Last payment date'."
                 )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # Validate command
-            valid, sanitized, err = validate_uscf(cmd, columns)
+            sql = sql_result.get("sql")
+            valid, sanitized_sql, err = validate_sql(sql)
             if not valid:
                 response = (
-                    "I couldn't quite understand that. Could you rephrase? "
-                    "For example: 'How many jobs did I do?', 'Total billing last month', or 'Add a new job'."
+                    "I couldn't turn that into a safe query. Try rephrasing, e.g. 'Total billing last month' or 'Jobs for client X'."
                 )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # Execute command
-            is_invoice_create = "invoice" in message.lower() and sanitized.get("operation") == "create"
-            exec_result = execute_uscf(
-                sanitized, records, date_column, self.sheets, is_invoice_create=is_invoice_create
-            )
+            exec_result = self.supabase.execute_sql(sanitized_sql)
+            if not exec_result.get("ok"):
+                response = exec_result.get("error", "Query failed.") or "I couldn't run that query."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # Handle empty results - don't store context, return safe message
-            matched_count = exec_result.get("count", 0)
-            matched_rows = exec_result.get("rows", [])
-            if not exec_result.get("ok") or (matched_count == 0 and not matched_rows):
-                if exec_result.get("operation") == "query":
-                    response = "I couldn't find any matching records. Could you try with different criteria?"
+            rows = exec_result.get("rows", [])
+            op = exec_result.get("operation", "select")
+
+            if op == "insert":
+                if rows:
+                    factual_output = self._format_sql_result(rows)
+                    self._update_sql_context(user_id, rows)
+                else:
+                    factual_output = "Done. I've added that job."
+            else:
+                if not rows:
+                    response = "I couldn't find any matching records. Try different criteria or time range?"
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                factual_output = self._format_sql_result(rows)
+                self._update_sql_context(user_id, rows)
 
-            # Invoice CREATE: trigger PDF generation and include bill number in invoice_data
-            if is_invoice_create and exec_result.get("ok") and exec_result.get("operation") == "create":
-                create_data = sanitized.get("data", {})
-                client_name = (
-                    create_data.get("Client Name")
-                    or create_data.get("Production house")
-                    or create_data.get("client_name")
-                )
-                if client_name:
-                    from datetime import datetime
-                    now = datetime.now()
-                    trigger_invoice = True
-                    invoice_data = {
-                        "client_name": str(client_name).strip(),
-                        "month": now.strftime("%B"),
-                        "year": now.year,
-                        "bill_number": exec_result.get("bill_number"),
-                    }
-
-            factual_output = self._format_uscf_result(exec_result, sanitized)
-
-            # Update context for future reference resolution (only if we have results)
-            self._update_uscf_context(user_id, sanitized, exec_result)
-
-            # Response maker: natural reply using only facts
             polished = self.gemini.make_response(message, conversation_history, factual_output)
             response = polished if (polished and polished.strip()) else factual_output
 
