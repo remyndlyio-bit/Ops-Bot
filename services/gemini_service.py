@@ -158,6 +158,7 @@ class GeminiService:
             "- If a field is null, omit it naturally.\n"
             "- Convert dates to readable format (e.g. 20 Feb 2026). Mention fees naturally (e.g. ₹2000).\n"
             "- For multiple records: summarize intelligently, do not dump rows.\n"
+            "- For field_answer type: answer the user's question naturally (e.g. 'Your most recent client was Xiaomi.', 'The project was valued at ₹4,000.'). Never output raw field:value or one-word answers.\n"
             "- Output plain text only, no bullet lists or key:value format. 2–4 sentences max.\n\n"
             "TONE RULES:\n"
             "- Default: composed and minimal. Simple data retrieval stays neutral.\n"

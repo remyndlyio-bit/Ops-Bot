@@ -13,7 +13,7 @@ from services.response_formatter import (
     error_calm_phrase,
     query_invalid_phrase,
 )
-from services.response_synthesis import build_clean_payload
+from services.response_synthesis import build_clean_payload, build_field_answer_payload
 from utils.memory_service import MemoryService
 from utils.logger import logger
 from typing import Dict, List, Optional
@@ -413,15 +413,17 @@ class IntentService:
             return None
         
         logger.info(f"[FOLLOWUP] Serving field from stored row without DB call: {matched_col} = {value}")
-        
-        # Format the value
+        payload = build_field_answer_payload(matched_col, value, last_row_data)
+        response = self.gemini.synthesize_response(payload, message)
+        if response and response.strip():
+            return response
+        # Fallback if synthesis fails: minimal natural phrasing (no raw field:value)
         if isinstance(value, (int, float)):
-            # Check if it looks like a currency field
             col_lower = matched_col.lower() if matched_col else ""
-            if any(term in col_lower for term in ["amount", "fee", "billing", "cost", "price", "total", "payment"]):
-                return f"{matched_col}: ₹{value:,.2f}"
-            return f"{matched_col}: {value}"
-        return f"{matched_col}: {value}"
+            if any(term in col_lower for term in ["amount", "fee", "billing", "cost", "price", "total"]):
+                return f"The amount was ₹{value:,.0f}."
+            return f"The value is {value}."
+        return f"That was {value}."
 
     def _update_uscf_context(self, user_id: str, cmd: Dict, result: Dict):
         """Update context after command execution for future reference resolution."""
@@ -671,11 +673,11 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # 4a. Follow-up: answer from last result row if applicable
+            # 4a. Follow-up: answer from last result row via AI synthesis (no raw field:value)
             followup_answer = self._try_answer_from_context(user_id, message, columns)
             if followup_answer:
-                logger.info(f"[FOLLOWUP] Answered from context: {followup_answer}")
-                response = format_response(ASSISTANT_MODE, factual=followup_answer)
+                logger.info(f"[FOLLOWUP] Answered from context (synthesized)")
+                response = followup_answer
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 

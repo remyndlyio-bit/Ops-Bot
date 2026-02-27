@@ -78,3 +78,25 @@ def build_clean_payload(rows: List[Dict], operation: str = "select") -> Dict[str
         return {"type": "job_summary", "data": row}
 
     return {"type": "multi_record", "data": cleaned[:20], "total_count": len(rows)}
+
+
+def build_field_answer_payload(
+    field_name: str,
+    value: Any,
+    full_row: Dict,
+) -> Dict[str, Any]:
+    """
+    Build structured payload for follow-up field extraction.
+    Used when user asks for a single field from the last result (e.g. "what was the client?")
+    related_context gives AI optional context for natural phrasing.
+    """
+    # Build related_context from other non-null fields (exclude the asked field)
+    related = _clean_row({k: v for k, v in full_row.items() if str(k).lower() != str(field_name).lower()})
+    related_context = dict(list(related.items())[:6])
+    v_clean = _clean_value(value)
+    return {
+        "type": "field_answer",
+        "field_name": FIELD_ALIASES.get(str(field_name).lower(), field_name),
+        "value": v_clean,
+        "related_context": related_context,
+    }
