@@ -6,17 +6,14 @@ from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
 from services.response_formatter import (
     format_response,
-    format_as_job_summary_block,
-    payment_status_note,
-    STRICT_DATA_MODE,
     ASSISTANT_MODE,
     REMINDER_MODE,
     ERROR_MODE,
     clarify_phrase,
-    no_result_phrase,
     error_calm_phrase,
     query_invalid_phrase,
 )
+from services.response_synthesis import build_clean_payload
 from utils.memory_service import MemoryService
 from utils.logger import logger
 from typing import Dict, List, Optional
@@ -716,15 +713,14 @@ class IntentService:
                     response = format_response(ASSISTANT_MODE, insert_confirmation=True)
             else:
                 if not rows:
-                    response = format_response(ERROR_MODE)  # no_result_phrase inside
+                    response = format_response(ERROR_MODE)
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                 self._update_sql_context(user_id, rows)
-                response = format_response(
-                    ASSISTANT_MODE,
-                    rows=rows,
-                    add_payment_note=True,
-                )
+                payload = build_clean_payload(rows, "select")
+                response = self.gemini.synthesize_response(payload, message)
+                if not response or not response.strip():
+                    response = "I found matching records but couldn't format the reply. Try asking again?"
 
         except Exception as e:
             logger.error(f"Execution failure: {e}")

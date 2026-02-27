@@ -142,6 +142,51 @@ class GeminiService:
             logger.warning(f"AI schema generation failed: {e}")
         return None
 
+    def synthesize_response(self, structured_payload: dict, user_message: str) -> Optional[str]:
+        """
+        AI synthesis layer: convert clean structured JSON into natural response.
+        Uses ONLY provided data; no hallucination; omits nulls gracefully; concise.
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key:
+            return None
+
+        system = (
+            "You are a smart, professional personal operations assistant. "
+            "You must generate a natural, human-like response using ONLY the provided structured data. "
+            "Do not invent missing information. Do not assume values. Do not expose technical fields. "
+            "If a field is null, omit it naturally. Keep responses concise (2–4 sentences max). "
+            "Sound intelligent and confident but not overly enthusiastic. "
+            "Convert dates to readable format (e.g. 20 Feb 2026). "
+            "Mention fees naturally (e.g. ₹2000). "
+            "Mention payment status naturally when available. "
+            "For multiple records: summarize intelligently, do not dump rows. "
+            "Output plain text only, no bullet lists or key:value format."
+        )
+
+        try:
+            payload_str = json.dumps(structured_payload, default=str)
+        except (TypeError, ValueError):
+            payload_str = str(structured_payload)
+
+        full_prompt = (
+            f"{system}\n\n"
+            f"DATA:\n{payload_str}\n\n"
+            f"USER ASKED: {user_message}\n\n"
+            "Your response:"
+        )
+
+        try:
+            out = self._call_api(
+                full_prompt,
+                generation_config={"temperature": 0.2, "maxOutputTokens": 300},
+            )
+            if out and isinstance(out, str) and out.strip():
+                return out.strip()
+        except Exception as e:
+            logger.warning(f"Response synthesis failed: {e}")
+        return None
+
     def make_response(
         self,
         user_message: str,
