@@ -114,10 +114,21 @@ class InvoiceService:
                 logger.info(f"[QUERY] Invoice resolved successfully - Client: {res_client}, Matches: {len(matches)}")
                 return {"status": "found", "data": matches, "client": res_client, "month": month or "Request"}
 
-        # 2. Client + Month Search
+        # 2. Client presence and Client + Month Search
         client_exists = False
+        search_term = client.strip().lower() if client else ""
+
+        # 2a. Detect whether the client exists at all in the sheet (ignoring month).
+        if client:
+            for row in clean_records:
+                row_client = str(row.get("Client Name", "")).strip().lower()
+                row_prod = str(row.get("Production house", "")).strip().lower()
+                if search_term and (search_term in row_client or search_term in row_prod):
+                    client_exists = True
+                    break
+
+        # 2b. If both client and month are provided, narrow down by month/year.
         if client and month:
-            search_term = client.strip().lower()
             month_matches = []
             from utils.date_utils import parse_sheet_date, month_name_to_number
             target_month = month_name_to_number(month)
@@ -126,7 +137,8 @@ class InvoiceService:
             # Use provided year or current year (normalized to 2 digits for sheet comparison)
             year_val = params.get("year")
             target_year = year_val if (year_val and year_val != 0) else datetime.now().year
-            if target_year > 2000: target_year -= 2000
+            if target_year > 2000:
+                target_year -= 2000
             
             logger.info(f"[QUERY] Filtering by Client + Month - Client='{search_term}' | Month={target_month} | Year={target_year}")
             logger.info(f"[QUERY] Checking columns: 'Client Name', 'Production house' for client match")
@@ -138,7 +150,7 @@ class InvoiceService:
                 row_prod = str(row.get("Production house", "")).strip().lower()
                 
                 if search_term and (search_term in row_client or search_term in row_prod):
-                    client_exists = True # We found at least one client record
+                    client_exists = True  # We found at least one client record
                     client_matches_count += 1
                     
                     # Handle datetime objects that Google Sheets might return
@@ -163,12 +175,24 @@ class InvoiceService:
                 logger.info(f"[QUERY] Invoice resolved successfully - Client: {client}, Month: {month}, Matches: {len(month_matches)}")
                 return {"status": "found", "data": month_matches, "client": client, "month": month}
 
-        # 3. Decision Logic for Not Found
+        # 3. Decision Logic for Not Found / Missing Parameters
         if not client_exists and client:
             return {"status": "client_not_found", "message": f"I don't see any records for {client} in my current sheet."}
         
+        if client_exists and client and not month:
+            return {
+                "status": "need_month",
+                "message": f"I do see records for {client}, but I need a month to pick the right invoice. For example: 'Get invoice for {client} for March'.",
+            }
+        
         if client_exists and client and month:
-             return {"status": "invoice_not_found", "message": f"I found records for {client}, but no invoice matching {month} {target_year + 2000 if target_year < 100 else target_year}."}
+            return {
+                "status": "invoice_not_found",
+                "message": (
+                    f"I found records for {client}, but no invoice matching {month} "
+                    f"{target_year + 2000 if target_year < 100 else target_year}."
+                ),
+            }
 
         # 4. Multiple Matches Guard
         if len(matches) > 1:
