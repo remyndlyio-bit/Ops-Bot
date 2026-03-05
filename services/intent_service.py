@@ -1,7 +1,7 @@
 from services.gemini_service import GeminiService
 from services.sheets_service import SheetsService
 from services.gmail_service import GmailService
-from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS
+from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS, _COLUMN_SCHEMA_FROM_ENV
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
 from services.response_formatter import (
@@ -23,12 +23,29 @@ class IntentService:
     # Cache AI-generated schema by column names so we don't call the AI on every message
     _schema_cache: Dict[tuple, str] = {}
 
+    # Ordered fields for the "add new job" conversational form.
+    _FORM_JOB_FIELDS: List[str] = [
+        "job_date",
+        "client_name",
+        "brand_name",
+        "job_description_details",
+        "job_notes",
+        "language",
+        "production_house",
+        "studio",
+        "qt",
+        "length",
+        "fees",
+    ]
+
     def __init__(self):
         self.gemini = GeminiService()
         self.sheets = SheetsService()
         self.email = GmailService()
         self.supabase = SupabaseService()
         self.memory = MemoryService()
+        # Column schema (if provided via COLUMN_SCHEMA env) for AI validation.
+        self.column_schema = _COLUMN_SCHEMA_FROM_ENV or {}
 
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
         """Store user message and bot response in conversation history."""
@@ -480,9 +497,37 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "form_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Store the current answer
+        # Validate and store the current answer using AI + COLUMN_SCHEMA (if available)
         current_field = fields[step]
-        self.memory.set_form_value(user_id, current_field, message.strip())
+        schema_entry = self.column_schema.get(current_field) if isinstance(self.column_schema, dict) else None
+        try:
+            validation = self.gemini.validate_field_value(
+                column_name=current_field,
+                user_input=message,
+                column_schema_entry=schema_entry,
+            )
+        except Exception as e:
+            logger.warning(f"Field validation fallback for {current_field}: {e}")
+            validation = {
+                "is_valid": True,
+                "normalized_value": message.strip(),
+                "error_message": None,
+                "clarification_question": None,
+            }
+
+        if not validation.get("is_valid", True):
+            # Stay on the same step; ask user to correct the value.
+            error_msg = validation.get("error_message") or "That doesn't look right for this field."
+            clarification = validation.get("clarification_question")
+            details = error_msg
+            if clarification:
+                details = f"{error_msg} {clarification}"
+            response = f"{details}\n\nWhat's the {current_field}?"
+            self._store_conversation(user_id, message, response)
+            return {"operation": "form_in_progress", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        normalized_value = validation.get("normalized_value", message.strip())
+        self.memory.set_form_value(user_id, current_field, normalized_value)
         self.memory.advance_form_step(user_id)
 
         # Check if there's a next field
@@ -509,9 +554,10 @@ class IntentService:
 
     def _start_add_job_form(self, user_id: str, message: str) -> Dict:
         """Start the 'add new job' form by asking for the first field."""
-        fields = self.sheets.get_first_n_columns(5)
+        # Prefer explicit job-entry schema driven by _FORM_JOB_FIELDS; fallback to sheet columns if empty.
+        fields = list(self._FORM_JOB_FIELDS) if self._FORM_JOB_FIELDS else self.sheets.get_first_n_columns(5)
         if not fields:
-            response = "I couldn't get the column headers from your sheet. Please check the sheet connection."
+            response = "I couldn't determine which columns to use for a new job. Please check your sheet configuration."
             self._store_conversation(user_id, message, response)
             return {"operation": "form_error", "response": response, "trigger_invoice": False, "invoice_data": {}}
         self.memory.start_form(user_id, fields)

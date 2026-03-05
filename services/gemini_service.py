@@ -380,6 +380,108 @@ class GeminiService:
                 "error_message": friendly_error,
             }
 
+    def validate_field_value(
+        self,
+        column_name: str,
+        user_input: str,
+        column_schema_entry: Optional[Dict] = None,
+    ) -> Dict:
+        """
+        Use the AI model to validate and normalize a single form field value.
+
+        Returns a dict:
+        {
+            "is_valid": bool,
+            "normalized_value": Any,
+            "error_message": str | None,
+            "clarification_question": str | None,
+        }
+
+        On AI errors or if AI is not initialized, it falls back to accepting the
+        raw user_input as-is (is_valid=True).
+        """
+        self._ensure_initialized()
+        # Fallback: if AI isn't ready, accept raw value
+        if not self._initialized or not self.api_key:
+            return {
+                "is_valid": True,
+                "normalized_value": user_input.strip(),
+                "error_message": None,
+                "clarification_question": None,
+            }
+
+        entry = column_schema_entry or {}
+        col_type = str(entry.get("type", "string")).strip().lower() or "string"
+        description = str(entry.get("description", "")).strip()
+
+        try:
+            schema_json = json.dumps(entry, ensure_ascii=False)
+        except (TypeError, ValueError):
+            schema_json = "{}"
+
+        prompt = (
+            "You are a STRICT field validator for a multi-step form in an operations bot.\n\n"
+            "You receive a single column definition and one user-provided value.\n"
+            "Your job is to decide if the value is valid for that column, optionally normalize it,\n"
+            "and, when invalid, provide a short error message and/or a simple clarification question.\n\n"
+            "COLUMN DEFINITION:\n"
+            f"- name: {column_name}\n"
+            f"- type: {col_type}\n"
+            f"- description: {description or '(none)'}\n"
+            f"- raw_schema_entry: {schema_json}\n\n"
+            f"USER_INPUT: {user_input!r}\n\n"
+            "TYPE RULES:\n"
+            "- type 'date': accept natural language dates like '5 March 2026', '05/03/26', 'yesterday';\n"
+            "  normalize to ISO 'YYYY-MM-DD'. Reject impossible dates.\n"
+            "- type 'number': accept integers or decimals; strip currency symbols and commas when obvious\n"
+            "  (e.g. '₹2,500' -> 2500). Reject values that clearly are not numeric.\n"
+            "- type 'boolean': map 'yes/no', 'y/n', 'true/false', '1/0', 'paid/unpaid', etc. to true/false.\n"
+            "- type 'string': accept any non-empty text; trim whitespace; you may lightly normalize spacing/casing.\n\n"
+            "OUTPUT REQUIREMENTS:\n"
+            "- You MUST return ONLY a single JSON object with EXACTLY these keys:\n"
+            "  {\"is_valid\": bool,\n"
+            "   \"normalized_value\": any or null,\n"
+            "   \"error_message\": string or null,\n"
+            "   \"clarification_question\": string or null}\n"
+            "- When is_valid is true, error_message and clarification_question should be null.\n"
+            "- When is_valid is false, set error_message to a SHORT, user-facing explanation (1 sentence),\n"
+            "  and optionally a concise clarification_question (e.g. 'Can you give the date as YYYY-MM-DD?').\n"
+            "- Do NOT include any extra keys or text outside the JSON object."
+        )
+
+        try:
+            generation_config = {
+                "responseMimeType": "application/json",
+                "temperature": 0,
+                "maxOutputTokens": 512,
+            }
+            raw_text = self._call_api(prompt, generation_config=generation_config)
+            if not raw_text:
+                raise Exception("Empty response from AI API")
+            raw_text = raw_text.strip()
+            if raw_text.startswith("```"):
+                lines = raw_text.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                raw_text = "\n".join(lines)
+            parsed = json.loads(raw_text)
+            # Ensure all keys exist with sane defaults
+            parsed.setdefault("is_valid", True)
+            parsed.setdefault("normalized_value", user_input.strip())
+            parsed.setdefault("error_message", None)
+            parsed.setdefault("clarification_question", None)
+            return parsed
+        except Exception as e:
+            logger.warning(f"AI field validation failed for {column_name}: {e}")
+            return {
+                "is_valid": True,
+                "normalized_value": user_input.strip(),
+                "error_message": None,
+                "clarification_question": None,
+            }
+
     def generate_response(self, user_message: str, backend_result: str) -> str:
         fallback = "I don't see this information in my records yet."
         self._ensure_initialized()
