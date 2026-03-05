@@ -154,7 +154,8 @@ async def whatsapp_webhook(
             year=data.get("year")
         )
 
-    return PlainTextResponse("OK")
+    # Return an empty 204 so Twilio does not send an extra 'OK' message.
+    return Response(status_code=204)
 
 async def _keep_typing(chat_id: int, stop_event: asyncio.Event):
     """Send typing action every 4 seconds until stop_event is set."""

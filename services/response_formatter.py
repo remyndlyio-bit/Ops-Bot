@@ -24,7 +24,7 @@ def format_response(
     """Non-query paths: reminders, errors, insert confirmation, follow-up factual."""
     if mode == ASSISTANT_MODE:
         if insert_confirmation:
-            return "Done. I've added that job."
+            return "All set — I’ve logged that job in your records."
         return factual.strip() if factual else ""
 
     if mode == REMINDER_MODE:

@@ -19,7 +19,8 @@ Production-ready FastAPI backend for Twilio WhatsApp invoice automation.
 Create a `.env` file based on `.env.example`:
 - `TWILIO_ACCOUNT_SID`: From Twilio Console.
 - `TWILIO_AUTH_TOKEN`: From Twilio Console.
-- `TWILIO_WHATSAPP_NUMBER`: Your Twilio WhatsApp Sandbox/Production number.
+- `TWILIO_WHATSAPP_NUMBER`: Your Twilio WhatsApp Sandbox/Production number (e.g. `whatsapp:+14155238886`).
+- `BASE_URL`: Public URL where this FastAPI app is deployed (e.g. `https://your-app.up.railway.app`).
 - `GOOGLE_CREDS_JSON`: Service Account JSON (either the full JSON string or a path to the JSON file).
 - `SHEET_URL`: The URL of your Google Sheet.
 
@@ -45,6 +46,14 @@ python main.py
 1. Connect your GitHub repository to Railway.
 2. Add the environment variables in the Railway dashboard.
 3. Railway will automatically pick up the `Procfile` and deploy.
+
+### 5. Twilio WhatsApp Webhook Configuration
+To activate WhatsApp:
+1. Ensure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`, and `BASE_URL` are set in Railway (or your `.env`).
+2. In the Twilio Console, go to your WhatsApp Sandbox or WhatsApp-enabled number.
+3. Set the **“When a message comes in”** webhook URL to:
+   - `https://your-app.up.railway.app/webhooks/whatsapp` (replace with your actual `BASE_URL`).
+4. Save the configuration, then send a WhatsApp message to your Twilio number to start chatting with the bot.
 
 ## Project Structure
 - `main.py`: FastAPI application and webhook route.
