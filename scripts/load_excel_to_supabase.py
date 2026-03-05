@@ -24,6 +24,7 @@ create table if not exists public.job_entries (
   created_at timestamptz default now(),
   job_date date,
   client_name text,
+  brand_name text,
   job_description_details text,
   job_notes text,
   language text,
@@ -55,9 +56,9 @@ DEFAULT_EXCEL = None
 
 # Column names in Excel (Main Sheet) → same as DB columns
 COLUMNS = [
-    "job_date", "client_name", "job_description_details", "job_notes",
-    "language", "production_house", "studio", "qt", "length", "fees",
-    "advance", "added_3rd_party_cut", "bill_no", "bill_sent", "paid",
+    "job_date", "client_name", "brand_name", "job_description_details",
+    "job_notes", "language", "production_house", "studio", "qt", "length",
+    "fees", "advance", "added_3rd_party_cut", "bill_no", "bill_sent", "paid",
     "payment_date", "poc_email", "poc_name", "first_reminder_sent",
     "second_reminder_sent", "third_reminder_sent", "payment_followup",
     "payment_details", "notes",

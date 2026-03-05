@@ -8,23 +8,140 @@ Dashboard → Project Settings → Database → Connection string → "Transacti
 """
 
 import os
+import json
 from typing import List, Dict, Any, Optional
 from utils.logger import logger
 
-# Schema for job_entries (single table); used for SQL generation and validation
-JOB_ENTRIES_COLUMNS = [
-    "id", "created_at", "job_date", "client_name", "job_description_details",
-    "job_notes", "language", "production_house", "studio", "qt", "length",
-    "fees", "advance", "added_3rd_party_cut", "bill_no", "bill_sent", "paid",
-    "payment_date", "poc_email", "poc_name", "first_reminder_sent",
-    "second_reminder_sent", "third_reminder_sent", "payment_followup",
-    "payment_details", "notes",
-]
 
-SCHEMA_DESCRIPTION = """
+def _build_schema_description(column_schema: Dict[str, Dict[str, Any]]) -> str:
+    """
+    Build a human-readable schema description from a COLUMN_SCHEMA-style mapping.
+
+    Expected shape (from env JSON or code):
+    {
+        "job_date": {
+            "description": "The date on which the job was executed",
+            "type": "date"
+        },
+        ...
+    }
+    """
+    lines: List[str] = ["Table: public.job_entries"]
+    for name, meta in column_schema.items():
+        if not isinstance(meta, dict):
+            # Fallback if user only provided a description string
+            desc = str(meta).strip()
+            if desc:
+                lines.append(f"- {name}: {desc}")
+            else:
+                lines.append(f"- {name}")
+            continue
+
+        desc = str(meta.get("description", "")).strip()
+        col_type = str(meta.get("type", "")).strip() or "text"
+
+        if desc:
+            lines.append(f"- {name} ({col_type}): {desc}")
+        else:
+            lines.append(f"- {name} ({col_type})")
+
+    lines.append("Use exact column names. For dates use ISO YYYY-MM-DD.")
+    return "\n".join(lines)
+
+
+def _load_column_schema_from_env() -> Optional[Dict[str, Dict[str, Any]]]:
+    """
+    Optionally load a structured column schema from the COLUMN_SCHEMA env variable.
+
+    COLUMN_SCHEMA should be JSON, for example:
+
+    {
+        "job_date": {
+            "description": "The date on which the job was executed",
+            "type": "date"
+        },
+        "client_name": {
+            "description": "Entity from where the job was procured",
+            "type": "string"
+        }
+    }
+    """
+    raw = (os.getenv("COLUMN_SCHEMA") or "").strip()
+    if not raw:
+        return None
+
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Failed to parse COLUMN_SCHEMA env as JSON: {e}")
+        return None
+
+    if not isinstance(data, dict):
+        logger.warning("COLUMN_SCHEMA env must be a JSON object mapping column_name -> {description, type}.")
+        return None
+
+    # Normalize keys to strings and values to dicts
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for key, value in data.items():
+        col_name = str(key).strip()
+        if not col_name:
+            continue
+        if isinstance(value, dict):
+            normalized[col_name] = value
+        else:
+            # Allow simple "column": "description" format as a convenience
+            normalized[col_name] = {"description": str(value), "type": "string"}
+
+    if not normalized:
+        return None
+
+    logger.info(f"Loaded COLUMN_SCHEMA from env with {len(normalized)} columns.")
+    return normalized
+
+
+_COLUMN_SCHEMA_FROM_ENV = _load_column_schema_from_env()
+
+# Schema for job_entries (single table); used for SQL generation and validation.
+# If COLUMN_SCHEMA env is provided, derive columns and description from it.
+if _COLUMN_SCHEMA_FROM_ENV:
+    JOB_ENTRIES_COLUMNS = ["id", "created_at"] + list(_COLUMN_SCHEMA_FROM_ENV.keys())
+    SCHEMA_DESCRIPTION = _build_schema_description(_COLUMN_SCHEMA_FROM_ENV)
+else:
+    JOB_ENTRIES_COLUMNS = [
+        "id",
+        "created_at",
+        "job_date",
+        "client_name",
+        "brand_name",
+        "job_description_details",
+        "job_notes",
+        "language",
+        "production_house",
+        "studio",
+        "qt",
+        "length",
+        "fees",
+        "advance",
+        "added_3rd_party_cut",
+        "bill_no",
+        "bill_sent",
+        "paid",
+        "payment_date",
+        "poc_email",
+        "poc_name",
+        "first_reminder_sent",
+        "second_reminder_sent",
+        "third_reminder_sent",
+        "payment_followup",
+        "payment_details",
+        "notes",
+    ]
+
+    SCHEMA_DESCRIPTION = """
 Table: public.job_entries
 - job_date (date): when the job was done; use for "when", "last gig", time filters.
-- client_name (text): client or brand name.
+- client_name (text): client name or organization.
+- brand_name (text): brand or product (e.g. Titan, Tanishq, Surf Excel).
 - job_description_details (text): job/project description.
 - job_notes (text): notes.
 - language (text): e.g. English.
