@@ -9,6 +9,7 @@ Dashboard → Project Settings → Database → Connection string → "Transacti
 
 import os
 import json
+from datetime import date, datetime
 from typing import List, Dict, Any, Optional
 from utils.logger import logger
 
@@ -251,3 +252,232 @@ class SupabaseService:
     def execute_read_only_sql(self, sql: str) -> Dict[str, Any]:
         """Alias for execute_sql (kept for backward compatibility)."""
         return self.execute_sql(sql)
+
+    def insert_job_entry(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Safely insert a job_entries record using parameterized SQL.
+        Returns {"ok": True, "row": {...}} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured (SUPABASE_DB_URL)."}
+
+        if not record or not isinstance(record, dict):
+            return {"ok": False, "error": "No data provided to insert."}
+
+        # Remove disallowed keys
+        cleaned = {k: v for k, v in record.items() if k and k not in {"id", "created_at"}}
+        if not cleaned:
+            return {"ok": False, "error": "No insertable fields provided."}
+
+        allowed = set(JOB_ENTRIES_COLUMNS)
+        cleaned = {k: v for k, v in cleaned.items() if k in allowed}
+        if not cleaned:
+            return {"ok": False, "error": "No valid fields to insert (check column names)." }
+
+        # Normalize some common types to strings for Postgres
+        for k, v in list(cleaned.items()):
+            if isinstance(v, (date, datetime)):
+                cleaned[k] = v.isoformat()[:10]
+
+        cols = list(cleaned.keys())
+        placeholders = ", ".join(["%s"] * len(cols))
+        col_list = ", ".join([f'"{c}"' for c in cols])
+        sql = f'INSERT INTO public.job_entries ({col_list}) VALUES ({placeholders}) RETURNING *'
+        values = [cleaned[c] for c in cols]
+
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+        except ImportError:
+            return {"ok": False, "error": "psycopg2 not installed (required for DB inserts)."}
+
+        try:
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, values)
+                row = cur.fetchone()
+            conn.close()
+            out = dict(row) if row else {}
+            for k, v in list(out.items()):
+                if hasattr(v, "isoformat") and v is not None:
+                    out[k] = v.isoformat()
+            return {"ok": True, "row": out}
+        except Exception as e:
+            logger.error(f"Supabase insert error: {e}")
+            return {"ok": False, "error": "Failed to insert record."}
+
+    def fetch_job_entries_for_invoice(
+        self,
+        client_name: str,
+        month: Optional[int] = None,
+        year: Optional[int] = None,
+        bill_no: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fetch job_entries rows for invoice generation.
+        - If bill_no provided: match by bill_no exactly.
+        - Else match by client_name (ILIKE) and optional month/year on job_date.
+        Returns {"ok": True, "rows": [...]} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured (SUPABASE_DB_URL)."}
+
+        if not client_name and not bill_no:
+            return {"ok": False, "error": "client_name or bill_no is required."}
+
+        where = []
+        params: List[Any] = []
+
+        if bill_no:
+            where.append("bill_no = %s")
+            params.append(str(bill_no).strip())
+        else:
+            where.append("client_name ILIKE %s")
+            params.append(f"%{client_name.strip()}%")
+
+        if month:
+            where.append("EXTRACT(MONTH FROM job_date) = %s")
+            params.append(int(month))
+        if year:
+            where.append("EXTRACT(YEAR FROM job_date) = %s")
+            params.append(int(year))
+
+        sql = (
+            "SELECT * FROM public.job_entries "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY job_date ASC "
+            "LIMIT 500"
+        )
+
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+        except ImportError:
+            return {"ok": False, "error": "psycopg2 not installed (required for DB queries)."}
+
+        try:
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+            conn.close()
+            out = []
+            for row in rows:
+                d = dict(row)
+                for k, v in d.items():
+                    if hasattr(v, "isoformat") and v is not None:
+                        d[k] = v.isoformat()
+                out.append(d)
+            return {"ok": True, "rows": out}
+        except Exception as e:
+            logger.error(f"Supabase fetch invoice rows error: {e}")
+            return {"ok": False, "error": "Failed to fetch invoice rows."}
+
+    def update_job_entry_field(self, row_id: str, field: str, value: Any) -> Dict[str, Any]:
+        """
+        Update a single field of a job_entries row by id (UUID).
+        Used e.g. to set first_reminder_sent = now() after sending a reminder.
+        Returns {"ok": True} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured (SUPABASE_DB_URL)."}
+        if field not in JOB_ENTRIES_COLUMNS or field in ("id", "created_at"):
+            return {"ok": False, "error": f"Invalid or read-only field: {field}."}
+        if hasattr(value, "isoformat"):
+            value = value.isoformat()
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(f'UPDATE public.job_entries SET "{field}" = %s WHERE id = %s', (value, row_id))
+                conn.close()
+            return {"ok": True}
+        except Exception as e:
+            logger.error(f"Supabase update_job_entry_field error: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def fetch_reminder_targets(
+        self,
+        approaching_days: int = 7,
+        payment_terms_days: int = 30,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch job_entries that are unpaid, have poc_email, first_reminder_sent is null,
+        and (job_date + payment_terms_days) is within [today, today + approaching_days].
+        Returns list of dicts with id, client_name, poc_email, job_date, fees, bill_no, etc.
+        """
+        if not self.db_url:
+            return []
+        sql = """
+        SELECT id, client_name, poc_email, job_date, fees, bill_no,
+               (job_date + (%s::int || ' days')::interval)::date AS due_date
+        FROM public.job_entries
+        WHERE (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
+          AND poc_email IS NOT NULL AND TRIM(poc_email::text) != ''
+          AND first_reminder_sent IS NULL
+          AND job_date IS NOT NULL
+          AND (job_date + (%s::int || ' days')::interval)::date >= CURRENT_DATE
+          AND (job_date + (%s::int || ' days')::interval)::date <= CURRENT_DATE + (%s::int || ' days')::interval
+        ORDER BY job_date ASC
+        LIMIT 100
+        """
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, (payment_terms_days, payment_terms_days, payment_terms_days, approaching_days))
+                rows = cur.fetchall()
+            conn.close()
+            out = []
+            for r in rows:
+                d = dict(r)
+                for k, v in d.items():
+                    if hasattr(v, "isoformat") and v is not None:
+                        d[k] = v.isoformat()
+                out.append(d)
+            return out
+        except Exception as e:
+            logger.error(f"Supabase fetch_reminder_targets error: {e}")
+            return []
+
+    def fetch_overdue_jobs(self, payment_terms_days: int = 30) -> List[Dict[str, Any]]:
+        """
+        Fetch job_entries that are unpaid and (job_date + payment_terms_days) < today.
+        """
+        if not self.db_url:
+            return []
+        sql = """
+        SELECT id, client_name, job_date, fees, bill_no, poc_email,
+               (job_date + (%s::int || ' days')::interval)::date AS due_date
+        FROM public.job_entries
+        WHERE (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
+          AND job_date IS NOT NULL
+          AND (job_date + (%s::int || ' days')::interval)::date < CURRENT_DATE
+        ORDER BY (job_date + (%s::int || ' days')::interval)::date ASC
+        LIMIT 100
+        """
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, (payment_terms_days, payment_terms_days, payment_terms_days))
+                rows = cur.fetchall()
+            conn.close()
+            out = []
+            for r in rows:
+                d = dict(r)
+                for k, v in d.items():
+                    if hasattr(v, "isoformat") and v is not None:
+                        d[k] = v.isoformat()
+                out.append(d)
+            return out
+        except Exception as e:
+            logger.error(f"Supabase fetch_overdue_jobs error: {e}")
+            return []

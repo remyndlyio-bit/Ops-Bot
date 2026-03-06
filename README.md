@@ -1,65 +1,59 @@
-# WhatsApp Invoice Automation Backend
+# Ops Bot – WhatsApp & Telegram
 
-Production-ready FastAPI backend for Twilio WhatsApp invoice automation.
+Production-ready FastAPI backend for conversational ops: job entries, invoices, payment reminders, and queries. Data lives in **Supabase** (`public.job_entries`).
 
 ## Features
-- **Twilio WhatsApp Integration**: Handles incoming webhooks and sends automated replies.
-- **Google Sheets Source of Truth**: Fetches invoice data directly from Google Sheets.
-- **Intent Parsing**: Supports `help`, `status`, and `invoice for <client> <month>` commands.
-- **Railway Ready**: Optimized for deployment on Railway.app.
+- **Twilio WhatsApp & Telegram**: Incoming webhooks, text and media (e.g. invoice PDFs).
+- **Supabase as source of truth**: All job entries, invoice data, and reminder state in Postgres.
+- **Natural language**: Queries (“total billing for Garnier”), add job, send invoice, payment reminders, overdue list.
+- **Invoice PDFs**: Generated from Supabase rows and sent via WhatsApp or Telegram.
+- **Railway ready**: Procfile and env-based config.
 
-## Commands
-- `help`: Show available commands.
-- `status`: Check if the bot is healthy.
-- `invoice for nikkunj july`: Get a summary of the invoice for a specific client and month.
+## Commands (examples)
+- “Add a job” / “New job” → multi-step form (job_date, client_name, brand_name, fees, …).
+- “Send invoice for Garnier for March” → PDF generated from Supabase and sent.
+- “Payment reminders” / “Send reminders” → approaching-due jobs (by `job_date` + terms), email sent, `first_reminder_sent` updated.
+- “Overdue invoices” → list of unpaid jobs past due.
+- “Total billing this year” / “Last client” / “How many jobs for X?” → SQL over `job_entries`.
 
-## Setup Instructions
+## Setup
 
-### 1. Environment Variables
-Create a `.env` file based on `.env.example`:
-- `TWILIO_ACCOUNT_SID`: From Twilio Console.
-- `TWILIO_AUTH_TOKEN`: From Twilio Console.
-- `TWILIO_WHATSAPP_NUMBER`: Your Twilio WhatsApp Sandbox/Production number (e.g. `whatsapp:+14155238886`).
-- `BASE_URL`: Public URL where this FastAPI app is deployed (e.g. `https://your-app.up.railway.app`).
-- `GOOGLE_CREDS_JSON`: Service Account JSON (either the full JSON string or a path to the JSON file).
-- `SHEET_URL`: The URL of your Google Sheet.
+### 1. Environment variables
+Create a `.env` from `.env.example`:
 
-### 2. Google Sheets Configuration
-1. Create a Google Service Account in Google Cloud Console.
-2. Download the JSON key and save it as `google-credentials.json`.
-3. Share your Google Sheet with the service account email (with Editor access).
-4. Ensure your sheet has the following headers:
-   - `client_name`
-   - `invoice_month`
-   - `description`
-   - `quantity`
-   - `rate`
-   - `amount`
+- **Twilio**: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER` (e.g. `whatsapp:+14155238886`).
+- **App URL**: `BASE_URL` (e.g. `https://your-app.up.railway.app`).
+- **Telegram**: `TELEGRAM_BOT_TOKEN`.
+- **AI**: `AI_KEY` (OpenRouter API key for intent/SQL generation).
+- **Supabase**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL` (use the **pooler** connection string, port 6543).
 
-### 3. Local Development
+Optional: `COLUMN_SCHEMA` – JSON mapping column names to `{description, type}` for job_entries (used for prompts and validation).
+
+### 2. Supabase
+- Create a project and the `public.job_entries` table (see `scripts/load_excel_to_supabase.py` for `CREATE TABLE` and column list, or run the script once to create the table).
+- Set `SUPABASE_DB_URL` to the **Transaction (pooler)** connection string from Dashboard → Project Settings → Database.
+
+### 3. Local development
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
-### 4. Deployment to Railway
-1. Connect your GitHub repository to Railway.
-2. Add the environment variables in the Railway dashboard.
-3. Railway will automatically pick up the `Procfile` and deploy.
+### 4. Deploy to Railway
+1. Connect the repo to Railway.
+2. Set all environment variables in the dashboard.
+3. Deploy; the `Procfile` runs the web process.
 
-### 5. Twilio WhatsApp Webhook Configuration
-To activate WhatsApp:
-1. Ensure `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`, and `BASE_URL` are set in Railway (or your `.env`).
-2. In the Twilio Console, go to your WhatsApp Sandbox or WhatsApp-enabled number.
-3. Set the **“When a message comes in”** webhook URL to:
-   - `https://your-app.up.railway.app/webhooks/whatsapp` (replace with your actual `BASE_URL`).
-4. Save the configuration, then send a WhatsApp message to your Twilio number to start chatting with the bot.
+### 5. WhatsApp webhook
+In Twilio Console → WhatsApp Sandbox (or your number) → “When a message comes in”:
+- URL: `https://your-app.up.railway.app/webhooks/whatsapp` (your `BASE_URL` + `/webhooks/whatsapp`).
 
-## Project Structure
-- `main.py`: FastAPI application and webhook route.
+## Project structure
+- `main.py`: FastAPI app, webhooks (WhatsApp, Telegram), background invoice send.
 - `services/`:
-  - `intent_service.py`: Logic for parsing WhatsApp commands.
-  - `sheets_service.py`: Google Sheets integration.
-  - `invoice_service.py`: Calculation and summary formatting.
-  - `whatsapp_service.py`: Twilio API integration.
-- `utils/`: Common utilities like logging.
+  - `intent_service.py`: Routing, add-job form, invoice/reminder/overdue, NL → SQL.
+  - `supabase_service.py`: Supabase client, SQL run, `job_entries` fetch/insert/update (incl. invoice and reminders).
+  - `invoice_service.py`, `invoice_generation_service.py`: Invoice summary and PDF.
+  - `gemini_service.py`: Intent parsing, SQL generation, response synthesis, field validation.
+  - `whatsapp_service.py`, `telegram_service.py`: Messaging.
+- `utils/`: Logging, date helpers, memory.

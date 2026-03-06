@@ -1,7 +1,7 @@
 """
 USCF Executor.
-Executes validated USCF commands against Google Sheets.
-Returns structured results for the response maker.
+Executes validated USCF commands against in-memory records (e.g. from Supabase).
+Create/update/delete require a Supabase path elsewhere; this executor is for query-style ops on provided records.
 """
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -107,6 +107,7 @@ def execute_uscf(
     sheets_service: Any = None,
     is_invoice_create: bool = False,
 ) -> Dict[str, Any]:
+    # sheets_service deprecated; create/update/delete are handled via Supabase in intent_service.
     """
     Execute a validated USCF command.
     Returns structured result dict.
@@ -131,24 +132,7 @@ def execute_uscf(
             data[date_column] = dt.now().strftime("%d-%m-%Y")
             logger.info(f"[USCF] Invoice create: added {date_column}={data[date_column]}")
         logger.info(f"[USCF] CREATE - Normalized data to write: {data}")
-        if sheets_service:
-            ok, new_row = sheets_service.append_row_by_columns(data)
-            if ok:
-                summary = ", ".join(f"{k}: {v}" for k, v in list(data.items())[:5])
-                logger.info(f"[USCF] CREATE success: {summary}")
-                result = {"ok": True, "operation": "create", "message": f"Created new record: {summary}"}
-                if new_row:
-                    result["new_row"] = new_row
-                    bill_no = (
-                        new_row.get("Bill No") or new_row.get("Bill-No") or new_row.get("BillNo")
-                        or new_row.get("bill_no")
-                    )
-                    if bill_no is not None and str(bill_no).strip():
-                        result["bill_number"] = str(bill_no).strip()
-                return result
-            logger.error("[USCF] CREATE failed: append_row_by_columns returned False")
-            return {"ok": False, "message": "Failed to add record to sheet."}
-        return {"ok": False, "message": "Sheet service not available."}
+        return {"ok": False, "message": "Create is handled via Supabase (add job / form). Use the conversational flow."}
 
     # ===== DELETE =====
     if operation == "delete":
@@ -159,16 +143,7 @@ def execute_uscf(
         matched = [r for r in records if _row_matches_filters(r, filters, date_column, time_range)]
         if not matched:
             return {"ok": True, "operation": "delete", "message": "No matching records to delete.", "count": 0}
-        # Delete rows (from bottom to top to preserve row numbers)
-        if sheets_service:
-            deleted = 0
-            for row in sorted(matched, key=lambda r: r.get("_row", 0), reverse=True):
-                row_num = row.get("_row")
-                if row_num:
-                    # sheets_service would need a delete_row method
-                    deleted += 1
-            return {"ok": True, "operation": "delete", "message": f"Would delete {len(matched)} record(s).", "count": len(matched)}
-        return {"ok": False, "message": "Sheet service not available for delete."}
+        return {"ok": True, "operation": "delete", "message": f"Would delete {len(matched)} record(s). Delete is not implemented (data in Supabase).", "count": len(matched)}
 
     # ===== UPDATE =====
     if operation == "update":
@@ -182,43 +157,7 @@ def execute_uscf(
         matched = [r for r in records if _row_matches_filters(r, filters, date_column, time_range)]
         if not matched:
             return {"ok": True, "operation": "update", "message": "No matching records to update.", "count": 0}
-        if sheets_service:
-            updated = 0
-            for row in matched:
-                row_num = row.get("_row")
-                if not row_num:
-                    continue
-                for upd in updates:
-                    field = upd.get("field")
-                    mode = upd.get("mode", "set")
-                    value = upd.get("value")
-                    actual_col = _get_col(field, row, key_map)
-                    if not actual_col:
-                        continue
-                    current = row.get(actual_col)
-                    new_value = value
-                    if mode == "set":
-                        new_value = value
-                    elif mode == "increase":
-                        new_value = _numeric_value(current) + _numeric_value(value)
-                    elif mode == "decrease":
-                        new_value = _numeric_value(current) - _numeric_value(value)
-                    elif mode == "increase_percent":
-                        new_value = _numeric_value(current) * (1 + _numeric_value(value) / 100)
-                    elif mode == "decrease_percent":
-                        new_value = _numeric_value(current) * (1 - _numeric_value(value) / 100)
-                    elif mode == "append":
-                        current_str = str(current).strip() if current else ""
-                        new_value = f"{current_str} {value}".strip() if current_str else str(value)
-                    elif mode == "clear":
-                        new_value = ""
-                    logger.info(f"[USCF] UPDATE row {row_num}: {actual_col} = {new_value}")
-                    sheets_service.update_cell_by_header(row_num, actual_col, new_value)
-                updated += 1
-            update_summary = ", ".join(f"{u['field']}={u['value']}" for u in updates[:3])
-            logger.info(f"[USCF] UPDATE success: {updated} record(s)")
-            return {"ok": True, "operation": "update", "message": f"Updated {updated} record(s): {update_summary}", "count": updated}
-        return {"ok": False, "message": "Sheet service not available for update."}
+        return {"ok": False, "message": "Update is not implemented via USCF (data in Supabase)."}
 
     # ===== QUERY =====
     if operation == "query":

@@ -63,9 +63,12 @@ class InvoiceGenerationService:
             # Table Rows
             pdf.set_font("Helvetica", "", 10)
             for idx, row in enumerate(client_data, 1):
-                date_val = str(row.get("Date", "")).strip()
-                job_val = str(row.get("Job", "")).strip()
-                fees_val = self._parse_fees(row.get("Fees", "0"))
+                date_val = str(row.get("job_date", row.get("Date", ""))).strip()
+                job_val = str(row.get("job_description_details", row.get("Job", ""))).strip()
+                brand_val = str(row.get("brand_name", "")).strip()
+                if brand_val and brand_val.lower() != "none":
+                    job_val = f"{brand_val} — {job_val}" if job_val else brand_val
+                fees_val = self._parse_fees(row.get("fees", row.get("Fees", "0")))
                 
                 # Dynamic height based on job description length
                 pdf.cell(12, 10, str(idx), 1, 0, "C")

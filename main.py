@@ -6,7 +6,6 @@ import os
 import asyncio
 import httpx
 from services.intent_service import IntentService
-from services.sheets_service import SheetsService
 from services.invoice_service import InvoiceService
 from services.whatsapp_service import WhatsAppService
 from services.telegram_service import TelegramService # Added TelegramService import
@@ -28,7 +27,9 @@ async def favicon():
     return Response(status_code=204)
 
 # Initialize Services
-sheets_service = SheetsService()
+from services.supabase_service import SupabaseService
+from utils.date_utils import month_name_to_number
+supabase_service = SupabaseService()
 whatsapp_service = WhatsAppService()
 telegram_service = TelegramService() # Initialized TelegramService
 invoice_gen_service = InvoiceGenerationService()
@@ -74,18 +75,25 @@ def health_check():
 async def process_and_send_invoice(to_number: str, client_name: str, month: str, platform: str = "whatsapp", chat_id: int = None, bill_number: str = None, year: int = None):
     """
     Background task to generate PDF and send it via WhatsApp or Telegram.
-    Follows: Send PDF first, then confirmation message.
+    Data is fetched from Supabase job_entries.
     """
     try:
-        # 1. Fetch Data
-        data = sheets_service.get_invoice_data(client_name, month, year=year)
-        if not data:
+        month_num = month_name_to_number(month) if month else None
+        if not year:
+            from datetime import datetime
+            year = datetime.now().year
+        if bill_number:
+            result = supabase_service.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number)
+        else:
+            result = supabase_service.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year)
+        if not result.get("ok") or not result.get("rows"):
             logger.warning(f"No data found for invoice generation: {client_name} - {month} (Year: {year})")
             return
-        
+        data = result["rows"]
+
         # 2. Process Summary
-        summary = InvoiceService.process_invoice_data(data, client_name, month)
-        
+        summary = InvoiceService.process_invoice_data(data, client_name, month or "Request")
+
         # 3. Generate PDF
         pdf_path = invoice_gen_service.generate_pdf(summary, data)
         if not pdf_path:

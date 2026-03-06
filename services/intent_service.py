@@ -1,7 +1,7 @@
 from services.gemini_service import GeminiService
-from services.sheets_service import SheetsService
 from services.gmail_service import GmailService
 from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS, _COLUMN_SCHEMA_FROM_ENV
+from utils.date_utils import month_name_to_number, number_to_month_name
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
 from services.response_formatter import (
@@ -40,7 +40,6 @@ class IntentService:
 
     def __init__(self):
         self.gemini = GeminiService()
-        self.sheets = SheetsService()
         self.email = GmailService()
         self.supabase = SupabaseService()
         self.memory = MemoryService()
@@ -538,15 +537,15 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "form_in_progress", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # All fields collected - save to sheet
+        # All fields collected - save to Supabase job_entries
         values = self.memory.complete_form(user_id)
         if values:
-            ok, _ = self.sheets.append_row_by_columns(values)
-            if ok:
+            insert_result = self.supabase.insert_job_entry(values)
+            if insert_result.get("ok"):
                 summary = ", ".join(f"{k}: {v}" for k, v in values.items())
                 response = f"Done! I've added the new job: {summary}"
             else:
-                response = "I collected all the info but couldn't save it to the sheet. Please try again later."
+                response = "I collected all the info but couldn't save it. Please try again later."
         else:
             response = "Something went wrong completing the form."
         self._store_conversation(user_id, message, response)
@@ -554,10 +553,9 @@ class IntentService:
 
     def _start_add_job_form(self, user_id: str, message: str) -> Dict:
         """Start the 'add new job' form by asking for the first field."""
-        # Prefer explicit job-entry schema driven by _FORM_JOB_FIELDS; fallback to sheet columns if empty.
-        fields = list(self._FORM_JOB_FIELDS) if self._FORM_JOB_FIELDS else self.sheets.get_first_n_columns(5)
+        fields = list(self._FORM_JOB_FIELDS) if self._FORM_JOB_FIELDS else []
         if not fields:
-            response = "I couldn't determine which columns to use for a new job. Please check your sheet configuration."
+            response = "I couldn't determine which columns to use for a new job."
             self._store_conversation(user_id, message, response)
             return {"operation": "form_error", "response": response, "trigger_invoice": False, "invoice_data": {}}
         self.memory.start_form(user_id, fields)
@@ -602,29 +600,33 @@ class IntentService:
             is_reminder_query = any(k in message.lower() for k in reminder_keywords)
             if is_reminder_query:
                 logger.info("[REMINDER] Detected payment reminder query")
-                records = self.sheets.get_all_records_with_row_numbers()
-                logger.info(f"[REMINDER] Loaded {len(records)} records for reminder scan")
                 approaching_days = 7
-                # For now we treat sheet 'Date' as the due date (no extra payment terms shift)
-                payment_terms_days = 0
-
-                targets = logic.get_approaching_due_reminder_targets(
-                    records,
+                payment_terms_days = 30
+                targets = self.supabase.fetch_reminder_targets(
                     approaching_days=approaching_days,
                     payment_terms_days=payment_terms_days,
                 )
+                logger.info(f"[REMINDER] Loaded {len(targets)} reminder targets from Supabase")
 
                 sent = 0
                 failed = 0
                 sent_details = []
-                
+                from datetime import datetime as dt_now
                 for t in targets:
-                    to_email = t["email"]
-                    client = t["client"]
-                    invoice_number = t.get("invoice_number", "N/A")
-                    amount_due = t.get("amount_due", "₹0.00")
-                    due_date_str = t["due_date"].strftime("%Y-%m-%d")
+                    to_email = (t.get("poc_email") or "").strip()
+                    client = (t.get("client_name") or "Client").strip()
+                    invoice_number = (t.get("bill_no") or "N/A")
+                    if isinstance(invoice_number, (int, float)):
+                        invoice_number = str(invoice_number)
+                    fees_val = t.get("fees") or 0
+                    try:
+                        amount_due = f"₹{float(fees_val):,.2f}"
+                    except (TypeError, ValueError):
+                        amount_due = "₹0.00"
+                    due_date_str = (t.get("due_date") or "").strip()[:10] or "N/A"
 
+                    if not to_email:
+                        continue
                     ok = self.email.send_payment_reminder(
                         to_email=to_email,
                         client_name=client,
@@ -633,10 +635,9 @@ class IntentService:
                         due_date_str=due_date_str,
                     )
                     if ok:
-                        # Mark FirstReminderSent as True
-                        upd_ok = self.sheets.update_cell_by_header(t["_row"], "FirstReminderSent", "True")
-                        if not upd_ok:
-                            logger.error(f"[REMINDER] Email sent but failed to mark FirstReminderSent for row {t['_row']}")
+                        row_id = t.get("id")
+                        if row_id:
+                            self.supabase.update_job_entry_field(row_id, "first_reminder_sent", dt_now.utcnow().isoformat())
                         sent += 1
                         sent_details.append(f"{client} ({invoice_number}) - {to_email}")
                     else:
@@ -669,44 +670,81 @@ class IntentService:
                     "trigger_invoice": False,
                 }
 
-            # 2. Invoice retrieval (keyword-based; use LLM only to extract params)
+            # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
             is_retrieval = any(w in message.lower() for w in ["get", "download", "send", "give", "show", "retrieve", "fetch"]) and "invoice" in message.lower()
             if is_retrieval:
-                schema_info = logic.get_schema_for_intent()
+                schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
                 intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
                 params = intent_result.get("parameters", {})
                 if intent_result.get("operation") != "GEMINI_ERROR":
-                    all_records = []
-                    try:
-                        sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
-                        all_records = sheet.get_all_records()
-                    except Exception as se:
-                        logger.error(f"Sheet access failed: {se}")
-                    if all_records:
-                        from services.invoice_service import InvoiceService
-                        resolved = InvoiceService.resolve_invoice_pdf(params, all_records)
-                        if resolved["status"] == "found":
-                            trigger_invoice = True
-                            invoice_data = {"client_name": resolved["client"], "month": resolved["month"], "bill_number": params.get("bill_number"), "year": resolved.get("year")}
-                            response = f"Confirmed. I've found the record for {resolved['client']}. Generating the invoice now."
-                        else:
-                            response = resolved.get("message", "I don't see that invoice in my records.")
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
+                    client_name = (params.get("client_name") or "").strip()
+                    month_name = (params.get("month") or "").strip()
+                    year_val = params.get("year")
+                    bill_number = (params.get("bill_number") or "").strip() or None
+                    month_num = month_name_to_number(month_name) if month_name else None
+                    if not year_val:
+                        from datetime import datetime
+                        year_val = datetime.now().year
 
-            # 3. Overdue / payment followup (keyword-based)
+                    if not client_name and not bill_number:
+                        response = "I need a client name or bill number to find an invoice. For example: 'Send invoice for Garnier for March'."
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                    if client_name and not month_num and not bill_number:
+                        response = f"I see you want an invoice for {client_name}. Which month? For example: 'Send invoice for {client_name} for March'."
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                    if bill_number:
+                        result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number)
+                    else:
+                        result = self.supabase.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year_val)
+                    if not result.get("ok"):
+                        response = result.get("error", "I couldn't fetch invoice data. Please try again.")
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                    rows = result.get("rows") or []
+                    if not rows:
+                        if client_name and month_num:
+                            response = f"I found no invoice for {client_name} for {month_name or month_num} {year_val}."
+                        else:
+                            response = f"I don't see any records for {client_name or 'that bill'} in my records."
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                    trigger_invoice = True
+                    display_client = (rows[0].get("client_name") or client_name or "Client").strip()
+                    month_display = month_name
+                    if not month_display and rows and rows[0].get("job_date"):
+                        jd = str(rows[0]["job_date"])[:10]
+                        if len(jd) >= 7:
+                            try:
+                                month_display = number_to_month_name(int(jd[5:7]))
+                            except (ValueError, TypeError):
+                                pass
+                    if not month_display:
+                        month_display = "Request"
+                    invoice_data = {"client_name": display_client, "month": month_display, "bill_number": bill_number, "year": year_val}
+                    response = f"Confirmed. I've found the record for {display_client}. Generating the invoice now."
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
+
+            # 3. Overdue / payment followup (keyword-based; data from Supabase)
             overdue_keywords = ["overdue", "due date", "passed due", "past due", "late payment", "follow up", "followup", "payment followup", "payment status"]
             is_overdue = any(k in message.lower() for k in overdue_keywords) and ("invoice" in message.lower() or "client" in message.lower() or "payment" in message.lower())
             if is_overdue:
-                try:
-                    sheet = self.sheets.client.open_by_url(self.sheets.sheet_url).sheet1
-                    all_records = sheet.get_all_records()
-                    overdue_invoices = logic.get_overdue_invoices(all_records)
-                    response = logic.format_overdue_invoices_response(overdue_invoices, payment_terms_days=30)
-                    self._store_conversation(user_id, message, response)
-                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                except Exception as se:
-                    logger.error(f"Overdue query failed: {se}")
+                overdue_jobs = self.supabase.fetch_overdue_jobs(payment_terms_days=30)
+                if not overdue_jobs:
+                    response = "Great news! I don't see any invoices that have passed their due date."
+                else:
+                    lines = [f"I found {len(overdue_jobs)} invoice(s) past due:\n"]
+                    for j in overdue_jobs[:20]:
+                        client = (j.get("client_name") or "Unknown").strip()
+                        due = (j.get("due_date") or "")[:10]
+                        bill = j.get("bill_no") or ""
+                        lines.append(f"• {client}" + (f" (Due: {due})" if due else "") + (f" — Bill #{bill}" if bill else ""))
+                    response = "\n".join(lines)
+                self._store_conversation(user_id, message, response)
+                return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             # 4. SQL path: intent → generate SQL → validate → execute on Supabase → format → response
             columns = [c for c in JOB_ENTRIES_COLUMNS if not c.startswith("_")]
