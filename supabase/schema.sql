@@ -58,6 +58,24 @@ comment on table public.job_entries is 'Job/invoice entries loaded from Excel te
 -- -- ALTER TABLE public.job_entries ALTER COLUMN user_id SET NOT NULL;
 -- ============================================================
 
+-- ============================================================
+-- User configuration table (bank details, one row per user)
+-- ============================================================
+create table if not exists public.user_config (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid unique not null references public.users(id) on delete cascade,
+  bank_account_name text,
+  bank_account_number text,
+  bank_ifsc text,
+  bank_name text,
+  upi_id text,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+comment on table public.user_config is 'Per-user configuration: bank details for invoice generation';
+alter table public.user_config disable row level security;
+
 -- If SELECT returns 0 rows even though data exists, RLS is likely blocking the direct DB connection.
 -- Run ONE of the following in Supabase SQL Editor:
 

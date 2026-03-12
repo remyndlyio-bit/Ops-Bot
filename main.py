@@ -226,7 +226,15 @@ async def process_and_send_invoice(
         if os.path.exists(candidate_path):
             pdf_path = candidate_path
         else:
-            pdf_path = invoice_gen_service.generate_pdf(summary, data)
+            bank_details = None
+            if user_id:
+                bank_result = supabase_service.get_user_bank_details(user_id)
+                if bank_result.get("ok") and bank_result.get("data"):
+                    bank_details = bank_result["data"]
+                    logger.info(f"[INVOICE] Loaded bank details for user_id={user_id}")
+                else:
+                    logger.info(f"[INVOICE] No bank details found for user_id={user_id}, using defaults")
+            pdf_path = invoice_gen_service.generate_pdf(summary, data, bank_details=bank_details)
         if not pdf_path:
             logger.error("Failed to generate PDF")
             return

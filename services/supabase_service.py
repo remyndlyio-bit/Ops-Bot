@@ -499,3 +499,93 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Supabase fetch_overdue_jobs error: {e}")
             return []
+
+    # --- User Config (bank details) ---
+
+    _BANK_DETAIL_FIELDS = [
+        "bank_account_name", "bank_account_number", "bank_ifsc",
+        "bank_name", "upi_id",
+    ]
+
+    def get_user_bank_details(self, user_id: str) -> Dict[str, Any]:
+        """
+        Fetch bank details from user_config for a given user_id.
+        Returns {"ok": True, "data": {...}} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        if not user_id:
+            return {"ok": False, "error": "user_id is required."}
+
+        sql = "SELECT * FROM public.user_config WHERE user_id = %s LIMIT 1"
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, (str(user_id),))
+                row = cur.fetchone()
+            conn.close()
+            if not row:
+                logger.info(f"[BANK] No bank details found for user_id={user_id}")
+                return {"ok": True, "data": None}
+            out = dict(row)
+            for k, v in list(out.items()):
+                if hasattr(v, "isoformat") and v is not None:
+                    out[k] = v.isoformat()
+            logger.info(f"[BANK] Retrieved bank details for user_id={user_id}")
+            return {"ok": True, "data": out}
+        except Exception as e:
+            logger.error(f"Supabase get_user_bank_details error: {e}")
+            return {"ok": False, "error": "Failed to retrieve bank details."}
+
+    def upsert_user_config(self, user_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Insert or update user_config row for a given user_id.
+        Only bank-detail fields are written; unknown keys are ignored.
+        Returns {"ok": True, "data": {...}} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        if not user_id:
+            return {"ok": False, "error": "user_id is required."}
+
+        cleaned = {k: v for k, v in config.items() if k in self._BANK_DETAIL_FIELDS and v}
+        if not cleaned:
+            return {"ok": False, "error": "No valid bank detail fields provided."}
+
+        cols = list(cleaned.keys())
+        values = [cleaned[c] for c in cols]
+
+        col_list = ", ".join([f'"{c}"' for c in cols])
+        placeholders = ", ".join(["%s"] * len(cols))
+        update_set = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in cols])
+
+        sql = (
+            f'INSERT INTO public.user_config (user_id, {col_list}) '
+            f"VALUES (%s, {placeholders}) "
+            f"ON CONFLICT (user_id) DO UPDATE SET {update_set}, "
+            f"updated_at = now() "
+            f"RETURNING *"
+        )
+        params = [str(user_id)] + values
+
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+            conn.close()
+            out = dict(row) if row else {}
+            for k, v in list(out.items()):
+                if hasattr(v, "isoformat") and v is not None:
+                    out[k] = v.isoformat()
+            logger.info(f"[BANK] Upserted bank details for user_id={user_id}: fields={cols}")
+            return {"ok": True, "data": out}
+        except Exception as e:
+            logger.error(f"Supabase upsert_user_config error: {e}")
+            return {"ok": False, "error": "Failed to save bank details."}

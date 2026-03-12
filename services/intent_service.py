@@ -38,6 +38,23 @@ class IntentService:
         "fees",
     ]
 
+    # Ordered fields for the "update bank details" conversational form.
+    _FORM_BANK_FIELDS: List[str] = [
+        "bank_account_name",
+        "bank_name",
+        "bank_account_number",
+        "bank_ifsc",
+        "upi_id",
+    ]
+
+    _BANK_FIELD_PROMPTS: Dict[str, str] = {
+        "bank_account_name": "Account Holder Name",
+        "bank_name": "Bank Name (e.g. HDFC, SBI, ICICI)",
+        "bank_account_number": "Account Number",
+        "bank_ifsc": "IFSC Code",
+        "upi_id": "UPI ID (or type 'skip' to skip)",
+    }
+
     # Small-talk trigger words / phrases (case-insensitive, matched as whole tokens)
     _SMALL_TALK_TRIGGERS = {
         "hi", "hey", "hello", "hiya", "howdy", "yo", "sup", "heya",
@@ -540,8 +557,45 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "form_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Validate and store the current answer using AI + COLUMN_SCHEMA (if available)
+        # Detect form type: bank detail form vs job form
+        is_bank_form = all(f in self._FORM_BANK_FIELDS for f in fields)
         current_field = fields[step]
+
+        # For bank forms: accept raw input (skip AI validation)
+        if is_bank_form:
+            value = message.strip()
+            # Allow 'skip' for optional upi_id field
+            if current_field == "upi_id" and value.lower() in ("skip", "none", "na", "n/a", "-"):
+                value = ""
+            self.memory.set_form_value(user_id, current_field, value)
+            self.memory.advance_form_step(user_id)
+
+            next_step = step + 1
+            if next_step < len(fields):
+                next_field = fields[next_step]
+                prompt = self._BANK_FIELD_PROMPTS.get(next_field, next_field)
+                response = f"Got it! Now, what's the {prompt}?"
+                self._store_conversation(user_id, message, response)
+                return {"operation": "form_in_progress", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # All bank fields collected — upsert to user_config
+            values = self.memory.complete_form(user_id)
+            if values:
+                # Remove empty/skipped values
+                values = {k: v for k, v in values.items() if v}
+                result = self.supabase.upsert_user_config(user_id, values)
+                if result.get("ok"):
+                    response = "Your bank details have been saved successfully! Use @mybankdetails to view them."
+                else:
+                    response = f"I collected the details but couldn't save them: {result.get('error', 'Unknown error')}. Please try again."
+            else:
+                response = "Something went wrong completing the form."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "bank_config_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # --- Job entry form path (existing logic) ---
+
+        # Validate and store the current answer using AI + COLUMN_SCHEMA (if available)
         schema_entry = self.column_schema.get(current_field) if isinstance(self.column_schema, dict) else None
         try:
             validation = self.gemini.validate_field_value(
@@ -609,6 +663,42 @@ class IntentService:
         self._store_conversation(user_id, message, response)
         return {"operation": "form_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+    def _start_bank_details_form(self, user_id: str, message: str) -> Dict:
+        """Start the 'update bank details' form by asking for the first field."""
+        fields = list(self._FORM_BANK_FIELDS)
+        self.memory.start_form(user_id, fields)
+        first_prompt = self._BANK_FIELD_PROMPTS.get(fields[0], fields[0])
+        response = (
+            "Let's update your bank details! I'll ask you one field at a time.\n\n"
+            f"First, what's the {first_prompt}?\n\n"
+            "(Type 'cancel' anytime to stop.)"
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "bank_form_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _show_bank_details(self, user_id: str, message: str) -> Dict:
+        """Show stored bank details for the user with masked account number."""
+        result = self.supabase.get_user_bank_details(user_id)
+        if not result.get("ok"):
+            response = f"I couldn't retrieve your bank details: {result.get('error', 'Unknown error')}."
+        elif not result.get("data"):
+            response = "You haven't set up bank details yet. Use @updatebankdetails to add them."
+        else:
+            bd = result["data"]
+            acct = bd.get("bank_account_number") or ""
+            masked_acct = f"****{acct[-4:]}" if len(acct) >= 4 else acct or "Not set"
+            lines = [
+                "Your stored bank details:\n",
+                f"Account Holder: {bd.get('bank_account_name') or 'Not set'}",
+                f"Bank Name: {bd.get('bank_name') or 'Not set'}",
+                f"Account Number: {masked_acct}",
+                f"IFSC Code: {bd.get('bank_ifsc') or 'Not set'}",
+                f"UPI ID: {bd.get('upi_id') or 'Not set'}",
+                "\nUse @updatebankdetails to change these.",
+            ]
+            response = "\n".join(lines)
+        self._store_conversation(user_id, message, response)
+        return {"operation": "bank_details_view", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _detect_small_talk(self, message: str) -> Optional[str]:
         """
@@ -684,6 +774,14 @@ class IntentService:
             if any(t in message.lower() for t in add_job_triggers):
                 return self._start_add_job_form(user_id, message)
 
+            # 0b2. @updatebankdetails — start bank details form
+            msg_lower = message.strip().lower()
+            if msg_lower in ("@updatebankdetails", "update bank details", "set bank details", "change bank details"):
+                return self._start_bank_details_form(user_id, message)
+
+            # 0b3. @mybankdetails — show stored bank details (masked)
+            if msg_lower in ("@mybankdetails", "my bank details", "show bank details", "view bank details"):
+                return self._show_bank_details(user_id, message)
 
             # 0c. Small talk — respond directly, skip all data paths
             small_talk_response = self._detect_small_talk(message)
@@ -869,7 +967,9 @@ class IntentService:
                         pdf_path = pdf_candidate if os.path.exists(pdf_candidate) else None
                         if not pdf_path:
                             summary = InvoiceService.process_invoice_data(rows, display_client, month_display)
-                            pdf_path = InvoiceGenerationService().generate_pdf(summary, rows)
+                            bank_result = self.supabase.get_user_bank_details(user_id)
+                            bank_details = bank_result.get("data") if bank_result.get("ok") else None
+                            pdf_path = InvoiceGenerationService().generate_pdf(summary, rows, bank_details=bank_details)
 
                         if not pdf_path:
                             response = "I tried to generate the invoice PDF but something went wrong. Please try again."
@@ -995,5 +1095,7 @@ class IntentService:
             "I'm your conversational assistant! You can naturally ask me to:\n"
             "- 'Add a lead for John Doe'\n"
             "- 'Get me Garnier invoice for April'\n"
+            "- @updatebankdetails — set or update your bank details\n"
+            "- @mybankdetails — view your saved bank details\n"
             "How can I help you today?"
         )
