@@ -5,6 +5,19 @@ from num2words import num2words
 from typing import List, Dict
 from utils.logger import logger
 
+
+def sanitize_pdf_text(text):
+    if text is None:
+        return ""
+    text = str(text)
+    text = text.replace("—", "-")
+    text = text.replace("–", "-")
+    text = text.replace("₹", "Rs ")
+    text = text.replace("“", '"')
+    text = text.replace("”", '"')
+    return text
+
+
 class InvoiceGenerationService:
     def __init__(self):
         pass
@@ -17,113 +30,137 @@ class InvoiceGenerationService:
             pdf = FPDF()
             pdf.add_page()
             pdf.set_auto_page_break(auto=True, margin=15)
-            
+
+            # Optional Unicode font (DejaVu). Place DejaVuSans.ttf in a /fonts directory.
+            font_family = "Helvetica"
+            try:
+                fonts_dir = os.path.join(os.path.dirname(__file__), "..", "fonts")
+                font_path = os.path.join(fonts_dir, "DejaVuSans.ttf")
+                pdf.add_font("DejaVu", "", font_path, uni=True)
+                font_family = "DejaVu"
+            except Exception as e:
+                logger.warning(f"Could not load DejaVu font, falling back to Helvetica: {e}")
+
             # Colors
             primary_color = (0, 0, 0)
             gray_color = (128, 128, 128)
-            
+
             # Header - Name & Details
-            pdf.set_font("Helvetica", "B", 20)
-            pdf.cell(100, 10, "Darshit Mody", ln=0)
-            
-            pdf.set_font("Helvetica", "B", 12)
+            pdf.set_font(font_family, "B", 20)
+            pdf.cell(100, 10, sanitize_pdf_text("Darshit Mody"), ln=0)
+
+            pdf.set_font(font_family, "B", 12)
             pdf.set_text_color(*gray_color)
-            pdf.cell(90, 10, "INVOICE", ln=1, align="R")
+            pdf.cell(90, 10, sanitize_pdf_text("INVOICE"), ln=1, align="R")
             pdf.set_text_color(*primary_color)
-            
-            pdf.set_font("Helvetica", "", 10)
-            pdf.cell(100, 5, "Voice Over Artist", ln=0)
-            pdf.cell(90, 5, f"Invoice #: {datetime.now().strftime('%y%m%d')}-{summary['client'][:3].upper()}", ln=1, align="R")
-            
-            pdf.cell(100, 5, "Residence Address: [Your Address]", ln=0)
-            pdf.cell(90, 5, f"Date: {datetime.now().strftime('%d-%m-%Y')}", ln=1, align="R")
-            
-            pdf.cell(100, 5, "Email: [Your Email]", ln=0)
-            pdf.cell(90, 5, "Terms: Immediate", ln=1, align="R")
-            
+
+            pdf.set_font(font_family, "", 10)
+            pdf.cell(100, 5, sanitize_pdf_text("Voice Over Artist"), ln=0)
+            client_prefix = sanitize_pdf_text(summary.get("client", "")[:3].upper())
+            invoice_no = sanitize_pdf_text(f"Invoice #: {datetime.now().strftime('%y%m%d')}-{client_prefix}")
+            pdf.cell(90, 5, invoice_no, ln=1, align="R")
+
+            pdf.cell(100, 5, sanitize_pdf_text("Residence Address: [Your Address]"), ln=0)
+            pdf.cell(90, 5, sanitize_pdf_text(f"Date: {datetime.now().strftime('%d-%m-%Y')}"), ln=1, align="R")
+
+            pdf.cell(100, 5, sanitize_pdf_text("Email: [Your Email]"), ln=0)
+            pdf.cell(90, 5, sanitize_pdf_text("Terms: Immediate"), ln=1, align="R")
+
             pdf.ln(10)
-            
+
             # Client Info
-            pdf.set_font("Helvetica", "B", 12)
-            pdf.cell(0, 7, "Invoice To:", ln=1)
-            pdf.set_font("Helvetica", "", 11)
-            pdf.cell(0, 6, summary.get("client", "Client Name"), ln=1)
-            pdf.cell(0, 6, "Production House", ln=1)
-            
+            pdf.set_font(font_family, "B", 12)
+            pdf.cell(0, 7, sanitize_pdf_text("Invoice To:"), ln=1)
+            pdf.set_font(font_family, "", 11)
+            client_name = sanitize_pdf_text(summary.get("client", "Client Name"))
+            pdf.cell(0, 6, client_name, ln=1)
+            pdf.cell(0, 6, sanitize_pdf_text("Production House"), ln=1)
+
             pdf.ln(10)
-            
+
             # Table Header
-            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_font(font_family, "B", 10)
             pdf.set_fill_color(240, 240, 240)
-            pdf.cell(12, 10, "Sr.", 1, 0, "C", True)
-            pdf.cell(25, 10, "Date", 1, 0, "C", True)
-            pdf.cell(113, 10, "Particulars / Job Description", 1, 0, "L", True)
-            pdf.cell(40, 10, "Fees (INR)", 1, 1, "R", True)
-            
+            pdf.cell(12, 10, sanitize_pdf_text("Sr."), 1, 0, "C", True)
+            pdf.cell(25, 10, sanitize_pdf_text("Date"), 1, 0, "C", True)
+            pdf.cell(113, 10, sanitize_pdf_text("Particulars / Job Description"), 1, 0, "L", True)
+            pdf.cell(40, 10, sanitize_pdf_text("Fees (INR)"), 1, 1, "R", True)
+
             # Table Rows
-            pdf.set_font("Helvetica", "", 10)
+            pdf.set_font(font_family, "", 10)
             for idx, row in enumerate(client_data, 1):
-                date_val = str(row.get("job_date", row.get("Date", ""))).strip()
-                job_val = str(row.get("job_description_details", row.get("Job", ""))).strip()
-                brand_val = str(row.get("brand_name", "")).strip()
+                date_val = sanitize_pdf_text(str(row.get("job_date", row.get("Date", ""))).strip())
+                job_val = sanitize_pdf_text(str(row.get("job_description_details", row.get("Job", ""))).strip())
+                brand_val_raw = row.get("brand_name", "")
+                brand_val = sanitize_pdf_text(brand_val_raw).strip()
                 if brand_val and brand_val.lower() != "none":
-                    job_val = f"{brand_val} — {job_val}" if job_val else brand_val
+                    job_val = f"{brand_val} - {job_val}" if job_val else brand_val
                 fees_val = self._parse_fees(row.get("fees", row.get("Fees", "0")))
-                
+
                 # Dynamic height based on job description length
-                pdf.cell(12, 10, str(idx), 1, 0, "C")
+                pdf.cell(12, 10, sanitize_pdf_text(str(idx)), 1, 0, "C")
                 pdf.cell(25, 10, date_val, 1, 0, "C")
                 pdf.cell(113, 10, job_val, 1, 0, "L")
-                pdf.cell(40, 10, f"{fees_val:,.2f}", 1, 1, "R")
-            
+                pdf.cell(40, 10, sanitize_pdf_text(f"{fees_val:,.2f}"), 1, 1, "R")
+
             # Totals
-            pdf.set_font("Helvetica", "B", 11)
-            pdf.cell(150, 10, "TOTAL", 1, 0, "R")
-            pdf.cell(40, 10, f"{summary.get('total', 0):,.2f}", 1, 1, "R")
-            
+            pdf.set_font(font_family, "B", 11)
+            pdf.cell(150, 10, sanitize_pdf_text("TOTAL"), 1, 0, "R")
+            pdf.cell(40, 10, sanitize_pdf_text(f"{summary.get('total', 0):,.2f}"), 1, 1, "R")
+
             pdf.ln(5)
             # In Words
             total = summary.get("total", 0)
-            total_words = num2words(total, lang='en_IN').capitalize()
-            pdf.set_font("Helvetica", "I", 10)
-            pdf.cell(0, 10, f"Amount in Words: {total_words} Only", ln=1)
-            
+            total_words = sanitize_pdf_text(num2words(total, lang="en_IN").capitalize())
+            pdf.set_font(font_family, "I", 10)
+            pdf.cell(0, 10, sanitize_pdf_text(f"Amount in Words: {total_words} Only"), ln=1)
+
             pdf.ln(10)
-            
+
             # Footer / Bank Details
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.cell(0, 6, "BANK ACCOUNT DETAILS:", ln=1)
-            pdf.set_font("Helvetica", "", 10)
-            pdf.cell(0, 5, "Bank Name: [Your Bank Name]", ln=1)
-            pdf.cell(0, 5, "Account Holder: Darshit Mody", ln=1)
-            pdf.cell(0, 5, "Account Number: [Your Account Number]", ln=1)
-            pdf.cell(0, 5, "IFSC Code: [Your IFSC Code]", ln=1)
-            
+            pdf.set_font(font_family, "B", 10)
+            pdf.cell(0, 6, sanitize_pdf_text("BANK ACCOUNT DETAILS:"), ln=1)
+            pdf.set_font(font_family, "", 10)
+            pdf.cell(0, 5, sanitize_pdf_text("Bank Name: [Your Bank Name]"), ln=1)
+            pdf.cell(0, 5, sanitize_pdf_text("Account Holder: Darshit Mody"), ln=1)
+            pdf.cell(0, 5, sanitize_pdf_text("Account Number: [Your Account Number]"), ln=1)
+            pdf.cell(0, 5, sanitize_pdf_text("IFSC Code: [Your IFSC Code]"), ln=1)
+
             pdf.ln(5)
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.cell(0, 6, "Terms and Conditions:", ln=1)
-            pdf.set_font("Helvetica", "", 9)
-            pdf.cell(0, 5, "- Advance payments should be made within 2 working days from invoice date.", ln=1)
-            pdf.cell(0, 5, "- Payment should be made in favor of 'Darshit Mody'.", ln=1)
-            
+            pdf.set_font(font_family, "B", 10)
+            pdf.cell(0, 6, sanitize_pdf_text("Terms and Conditions:"), ln=1)
+            pdf.set_font(font_family, "", 9)
+            pdf.cell(
+                0,
+                5,
+                sanitize_pdf_text("- Advance payments should be made within 2 working days from invoice date."),
+                ln=1,
+            )
+            pdf.cell(
+                0,
+                5,
+                sanitize_pdf_text("- Payment should be made in favor of 'Darshit Mody'."),
+                ln=1,
+            )
+
             # Save
             os.makedirs("output", exist_ok=True)
-            output_filename = f"Invoice_{summary['client']}_{summary['month']}.pdf".replace(" ", "_")
+            safe_client = sanitize_pdf_text(summary.get("client", "Client")).replace(" ", "_")
+            safe_month = sanitize_pdf_text(summary.get("month", "Period")).replace(" ", "_")
+            output_filename = f"Invoice_{safe_client}_{safe_month}.pdf"
             output_path = os.path.join("output", output_filename)
             pdf.output(output_path)
-            
+
             logger.info(f"PDF generated successfully manually with fpdf2: {output_path}")
             return output_path
 
-        except Exception as e:
-            logger.error(f"Failed to generate invoice PDF with fpdf2: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+        except Exception:
+            logger.error("Failed to generate invoice PDF", exc_info=True)
             return None
 
     def _parse_fees(self, fees_str: str) -> float:
         try:
-            clean = str(fees_str).replace('₹', '').replace(',', '').strip()
+            clean = str(fees_str).replace("₹", "").replace(",", "").strip()
             return float(clean) if clean else 0.0
         except ValueError:
             return 0.0
