@@ -27,11 +27,6 @@ create table if not exists public.job_entries (
   brand_name text,
   job_description_details text,
   job_notes text,
-  language text,
-  production_house text,
-  studio text,
-  qt integer,
-  length text,
   fees integer,
   advance numeric,
   added_3rd_party_cut numeric,
@@ -44,7 +39,6 @@ create table if not exists public.job_entries (
   first_reminder_sent timestamptz,
   second_reminder_sent timestamptz,
   third_reminder_sent timestamptz,
-  payment_followup text,
   payment_details text,
   notes text
 );
@@ -57,13 +51,12 @@ DEFAULT_EXCEL = None
 # Column names in Excel (Main Sheet) → same as DB columns
 COLUMNS = [
     "job_date", "client_name", "brand_name", "job_description_details",
-    "job_notes", "language", "production_house", "studio", "qt", "length",
-    "fees", "advance", "added_3rd_party_cut", "bill_no", "bill_sent", "paid",
+    "job_notes", "fees", "advance", "added_3rd_party_cut", "bill_no", "bill_sent", "paid",
     "payment_date", "poc_email", "poc_name", "first_reminder_sent",
-    "second_reminder_sent", "third_reminder_sent", "payment_followup",
+    "second_reminder_sent", "third_reminder_sent",
     "payment_details", "notes",
 ]
-INTEGER_COLUMNS = {"qt", "fees"}
+INTEGER_COLUMNS = {"fees"}
 DATE_COLUMNS = {
     "job_date", "payment_date", "first_reminder_sent",
     "second_reminder_sent", "third_reminder_sent",

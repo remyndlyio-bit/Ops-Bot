@@ -26,7 +26,6 @@ create table if not exists public.job_entries (
   first_reminder_sent timestamptz,
   second_reminder_sent timestamptz,
   third_reminder_sent timestamptz,
-  payment_followup text,
   payment_details text,
   notes text
 );

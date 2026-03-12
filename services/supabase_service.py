@@ -116,11 +116,6 @@ else:
         "brand_name",
         "job_description_details",
         "job_notes",
-        "language",
-        "production_house",
-        "studio",
-        "qt",
-        "length",
         "fees",
         "advance",
         "added_3rd_party_cut",
@@ -133,7 +128,6 @@ else:
         "first_reminder_sent",
         "second_reminder_sent",
         "third_reminder_sent",
-        "payment_followup",
         "payment_details",
         "notes",
     ]
@@ -145,17 +139,13 @@ Table: public.job_entries
 - brand_name (text): brand or product (e.g. Titan, Tanishq, Surf Excel).
 - job_description_details (text): job/project description.
 - job_notes (text): notes.
-- language (text): e.g. English.
-- production_house (text), studio (text): production info.
-- qt (integer): quantity.
-- length (text): e.g. 15sec, 20sec.
 - fees (integer): amount in rupees.
 - advance (numeric), added_3rd_party_cut (numeric).
 - bill_no (text), bill_sent (text), paid (text): billing status.
 - payment_date (date): when payment was received.
 - poc_email (text), poc_name (text): contact.
 - first_reminder_sent, second_reminder_sent, third_reminder_sent (timestamptz).
-- payment_followup (text), payment_details (text), notes (text).
+- payment_details (text), notes (text).
 Use exact column names. For dates use ISO YYYY-MM-DD. TODAY for relative ranges.
 """
 
