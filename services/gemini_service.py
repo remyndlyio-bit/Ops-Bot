@@ -310,7 +310,7 @@ class GeminiService:
             "CONFIDENCE: Only set a non-NEED_CLARIFICATION operation if confidence >= 0.7.\n\n"
             "STRICT SCHEMA (MUST RETURN ALL KEYS):\n"
             "{\n"
-            '  "operation": "READ_ENTITY | AGGREGATE_ENTITY | CREATE_ENTITY | UPDATE_ENTITY | ACTION_TRIGGER | SCHEDULE_REMINDER | SMALL_TALK | NEED_CLARIFICATION | UNKNOWN",\n'
+            '  "operation": "READ_ENTITY | AGGREGATE_ENTITY | CREATE_ENTITY | UPDATE_ENTITY | ACTION_TRIGGER | SCHEDULE_REMINDER | SEND_EMAIL | SMALL_TALK | NEED_CLARIFICATION | UNKNOWN",\n'
             '  "entity": "client | invoice | job | payment | project | bank_details | gst_details | reminder | communication_log | null",\n'
             '  "confidence": number (0.0 to 1.0),\n'
             '  "clarification_question": string | null (concise question when ambiguous),\n'

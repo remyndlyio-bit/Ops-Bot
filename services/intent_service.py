@@ -780,12 +780,27 @@ class IntentService:
                 }
 
             # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
-            is_retrieval = any(w in message.lower() for w in ["get", "download", "send", "give", "show", "retrieve", "fetch"]) and "invoice" in message.lower()
+            msg_lower = message.lower()
+            is_retrieval = any(w in msg_lower for w in ["get", "download", "send", "give", "show", "retrieve", "fetch"]) and "invoice" in msg_lower
             if is_retrieval:
                 schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
                 intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
                 params = intent_result.get("parameters", {})
                 if intent_result.get("operation") != "GEMINI_ERROR":
+                    # Email-specific override: if user explicitly mentions sending over email,
+                    # treat this as SEND_EMAIL instead of a generic ACTION_TRIGGER.
+                    email_keywords = [
+                        "email invoice",
+                        "send invoice over email",
+                        "send over email",
+                        "mail the invoice",
+                        "mail invoice",
+                        "share invoice via email",
+                        "forward invoice",
+                    ]
+                    if "email" in msg_lower or "e-mail" in msg_lower or any(k in msg_lower for k in email_keywords):
+                        intent_result["operation"] = "SEND_EMAIL"
+
                     client_name = (params.get("client_name") or "").strip()
                     month_name = (params.get("month") or "").strip()
                     year_val = params.get("year")
@@ -820,7 +835,6 @@ class IntentService:
                             response = f"I don't see any records for {client_name or 'that bill'} in my records."
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                    trigger_invoice = True
                     display_client = (rows[0].get("client_name") or client_name or "Client").strip()
                     month_display = month_name
                     if not month_display and rows and rows[0].get("job_date"):
@@ -833,6 +847,50 @@ class IntentService:
                     if not month_display:
                         month_display = "Request"
                     invoice_data = {"client_name": display_client, "month": month_display, "bill_number": bill_number, "year": year_val}
+
+                    # Decide between generating/sending invoice via WhatsApp/Telegram vs email
+                    if intent_result.get("operation") == "SEND_EMAIL":
+                        poc_email = (rows[0].get("poc_email") or "").strip()
+                        if not poc_email:
+                            response = f"I found the invoice for {display_client} but there's no contact email (poc_email) stored."
+                            self._store_conversation(user_id, message, response)
+                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                        # Reuse existing PDF if present; otherwise generate it
+                        from services.invoice_service import InvoiceService
+                        from services.invoice_generation_service import InvoiceGenerationService
+
+                        safe_client = display_client.replace(" ", "_")
+                        safe_month = month_display.replace(" ", "_")
+                        pdf_candidate = os.path.join("output", f"Invoice_{safe_client}_{safe_month}.pdf")
+
+                        pdf_path = pdf_candidate if os.path.exists(pdf_candidate) else None
+                        if not pdf_path:
+                            summary = InvoiceService.process_invoice_data(rows, display_client, month_display)
+                            pdf_path = InvoiceGenerationService().generate_pdf(summary, rows)
+
+                        if not pdf_path:
+                            response = "I tried to generate the invoice PDF but something went wrong. Please try again."
+                            self._store_conversation(user_id, message, response)
+                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                        # Send via Resend with attachment
+                        ok = self.email.send_invoice_email(
+                            to_email=poc_email,
+                            client_name=display_client,
+                            month=month_display,
+                            year=year_val,
+                            pdf_path=pdf_path,
+                        )
+                        if ok:
+                            response = f"The invoice has been sent to {poc_email}."
+                        else:
+                            response = "I couldn't send the invoice email. Please check the email configuration and try again."
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                    # Default path: generate PDF and send via WhatsApp/Telegram (existing behavior)
+                    trigger_invoice = True
                     response = f"Confirmed. I've found the record for {display_client}. Generating the invoice now."
                     self._store_conversation(user_id, message, response)
                     return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}

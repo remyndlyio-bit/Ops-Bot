@@ -1,6 +1,6 @@
 import os
 import httpx
-from typing import Optional
+from typing import Optional, List, Dict
 from utils.logger import logger
 
 
@@ -55,7 +55,14 @@ class ResendEmailService:
         )
         return self.send_email(to_email=to_email, subject=subject, body=body, bcc=self.reminder_bcc)
 
-    def send_email(self, to_email: str, subject: str, body: str, bcc: str = None) -> bool:
+    def send_email(
+        self,
+        to_email: str,
+        subject: str,
+        body: str,
+        bcc: str = None,
+        attachments: Optional[List[Dict[str, str]]] = None,
+    ) -> bool:
         if not to_email:
             logger.error("[RESEND] Missing recipient email")
             return False
@@ -72,14 +79,14 @@ class ResendEmailService:
 
         logger.info(
             f"[RESEND] Preparing email -> To={to_email} | BCC={bcc_list or None} | "
-            f"Subject={subject} | DryRun={self.dry_run}"
+            f"Subject={subject} | Attachments={bool(attachments)} | DryRun={self.dry_run}"
         )
 
         if self.dry_run:
             logger.info(f"[RESEND] DRY RUN BODY:\n{body}")
             return True
 
-        payload = {
+        payload: Dict[str, object] = {
             "from": from_header,
             "to": [to_email],
             "subject": subject,
@@ -87,6 +94,8 @@ class ResendEmailService:
         }
         if bcc_list:
             payload["bcc"] = bcc_list
+        if attachments:
+            payload["attachments"] = attachments
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -113,4 +122,45 @@ class ResendEmailService:
         except Exception as e:
             logger.error(f"[RESEND] Exception while sending email -> To={to_email} | Error={e}")
             return False
+
+    def send_invoice_email(
+        self,
+        to_email: str,
+        client_name: str,
+        month: str,
+        year: Optional[int],
+        pdf_path: str,
+    ) -> bool:
+        """
+        Send an invoice email with the PDF attached.
+        """
+        if not os.path.exists(pdf_path):
+            logger.error(f"[RESEND] Invoice PDF not found at path: {pdf_path}")
+            return False
+
+        subject = f"Invoice – {client_name} – {month} {year}" if year else f"Invoice – {client_name} – {month}"
+        body = (
+            f"Hi {client_name},\n\n"
+            f"Please find your invoice for {month} {year or ''} attached.\n\n"
+            f"If you have any questions about the details or payment, just reply to this email.\n\n"
+            f"Thanks,\n{self.from_name}\n"
+        )
+
+        try:
+            import base64
+
+            with open(pdf_path, "rb") as f:
+                content_b64 = base64.b64encode(f.read()).decode("ascii")
+        except Exception as e:
+            logger.error(f"[RESEND] Failed to read/encode invoice PDF at {pdf_path}: {e}")
+            return False
+
+        attachments = [
+            {
+                "filename": os.path.basename(pdf_path),
+                "content": content_b64,
+            }
+        ]
+
+        return self.send_email(to_email=to_email, subject=subject, body=body, attachments=attachments)
 
