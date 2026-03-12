@@ -27,6 +27,7 @@ create table if not exists public.job_entries (
   brand_name text,
   job_description_details text,
   job_notes text,
+  client_billing_details text,
   fees integer,
   advance numeric,
   added_3rd_party_cut numeric,
@@ -51,7 +52,7 @@ DEFAULT_EXCEL = None
 # Column names in Excel (Main Sheet) → same as DB columns
 COLUMNS = [
     "job_date", "client_name", "brand_name", "job_description_details",
-    "job_notes", "fees", "advance", "added_3rd_party_cut", "bill_no", "bill_sent", "paid",
+    "job_notes", "client_billing_details", "fees", "advance", "added_3rd_party_cut", "bill_no", "bill_sent", "paid",
     "payment_date", "poc_email", "poc_name", "first_reminder_sent",
     "second_reminder_sent", "third_reminder_sent",
     "payment_details", "notes",

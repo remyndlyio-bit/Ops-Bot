@@ -9,6 +9,7 @@ create table if not exists public.job_entries (
   client_name text,
   job_description_details text,
   job_notes text,
+  client_billing_details text,
   language text,
   production_house text,
   studio text,

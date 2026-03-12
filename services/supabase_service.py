@@ -116,6 +116,7 @@ else:
         "brand_name",
         "job_description_details",
         "job_notes",
+        "client_billing_details",
         "fees",
         "advance",
         "added_3rd_party_cut",
@@ -139,6 +140,7 @@ Table: public.job_entries
 - brand_name (text): brand or product (e.g. Titan, Tanishq, Surf Excel).
 - job_description_details (text): job/project description.
 - job_notes (text): notes.
+- client_billing_details (text): billing instructions or special terms for this client.
 - fees (integer): amount in rupees.
 - advance (numeric), added_3rd_party_cut (numeric).
 - bill_no (text), bill_sent (text), paid (text): billing status.
