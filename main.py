@@ -8,8 +8,9 @@ import httpx
 from services.intent_service import IntentService
 from services.invoice_service import InvoiceService
 from services.whatsapp_service import WhatsAppService
-from services.telegram_service import TelegramService # Added TelegramService import
+from services.telegram_service import TelegramService  # Added TelegramService import
 from services.invoice_generation_service import InvoiceGenerationService
+from services.resend_email_service import ResendEmailService
 from utils.logger import logger
 
 # Load environment variables
@@ -29,10 +30,12 @@ async def favicon():
 # Initialize Services
 from services.supabase_service import SupabaseService
 from utils.date_utils import month_name_to_number
+
 supabase_service = SupabaseService()
 whatsapp_service = WhatsAppService()
-telegram_service = TelegramService() # Initialized TelegramService
+telegram_service = TelegramService()  # Initialized TelegramService
 invoice_gen_service = InvoiceGenerationService()
+email_service = ResendEmailService()
 intent_service = IntentService()
 
 UPDATE_MESSAGE = (
@@ -72,7 +75,126 @@ async def startup_event():
 def health_check():
     return {"status": "healthy", "version": "1.0.0"}
 
-async def process_and_send_invoice(to_number: str, client_name: str, month: str, platform: str = "whatsapp", chat_id: int = None, bill_number: str = None, year: int = None):
+
+def send_invoice_email(
+    client_name: str,
+    month: str,
+    year: int,
+    file_path: str,
+    rows: list,
+    platform: str = "telegram",
+    chat_id: int | None = None,
+) -> None:
+    """
+    Send the generated invoice PDF via email using poc_email from job_entries.
+    - If poc_email is missing, log and optionally notify the Telegram user.
+    - On success, confirm in Telegram; on failure, log and notify.
+    """
+    # 1. Look up poc_email
+    poc_email = None
+    for row in rows or []:
+        val = (row.get("poc_email") or "").strip()
+        if val:
+            poc_email = val
+            break
+
+    if not poc_email:
+        logger.warning("Invoice generated but client email (poc_email) is missing.")
+        if platform == "telegram" and chat_id:
+            # Best-effort notification; ignore failures here.
+            try:
+                import asyncio as _asyncio
+
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(
+                        telegram_service.send_text_message(
+                            chat_id,
+                            "Invoice generated but client email is missing.",
+                        )
+                    )
+                else:
+                    loop.run_until_complete(
+                        telegram_service.send_text_message(
+                            chat_id,
+                            "Invoice generated but client email is missing.",
+                        )
+                    )
+            except Exception as notify_err:
+                logger.warning(f"Failed to notify Telegram about missing email: {notify_err}")
+        return
+
+    # 2. Send email with PDF attached
+    try:
+        ok = email_service.send_invoice_email(
+            to_email=poc_email,
+            client_name=client_name,
+            month=month,
+            year=year,
+            pdf_path=file_path,
+        )
+    except Exception as e:
+        ok = False
+        logger.error(f"Invoice generated but email sending failed (exception): {e}")
+
+    if not ok:
+        logger.error("Invoice generated but email sending failed.")
+        if platform == "telegram" and chat_id:
+            try:
+                import asyncio as _asyncio
+
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(
+                        telegram_service.send_text_message(
+                            chat_id,
+                            "Invoice generated but email sending failed.",
+                        )
+                    )
+                else:
+                    loop.run_until_complete(
+                        telegram_service.send_text_message(
+                            chat_id,
+                            "Invoice generated but email sending failed.",
+                        )
+                    )
+            except Exception as notify_err:
+                logger.warning(f"Failed to notify Telegram about email failure: {notify_err}")
+        return
+
+    # 3. On success, confirm in Telegram
+    if platform == "telegram" and chat_id:
+        try:
+            import asyncio as _asyncio
+
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(
+                    telegram_service.send_text_message(
+                        chat_id,
+                        f"Invoice has been emailed to {poc_email}.",
+                    )
+                )
+            else:
+                loop.run_until_complete(
+                    telegram_service.send_text_message(
+                        chat_id,
+                        f"Invoice has been emailed to {poc_email}.",
+                    )
+                )
+        except Exception as notify_err:
+            logger.warning(f"Failed to send Telegram confirmation for emailed invoice: {notify_err}")
+
+
+async def process_and_send_invoice(
+    to_number: str,
+    client_name: str,
+    month: str,
+    platform: str = "whatsapp",
+    chat_id: int = None,
+    bill_number: str = None,
+    year: int = None,
+):
     """
     Background task to generate PDF and send it via WhatsApp or Telegram.
     Data is fetched from Supabase job_entries.
@@ -94,8 +216,16 @@ async def process_and_send_invoice(to_number: str, client_name: str, month: str,
         # 2. Process Summary
         summary = InvoiceService.process_invoice_data(data, client_name, month or "Request")
 
-        # 3. Generate PDF
-        pdf_path = invoice_gen_service.generate_pdf(summary, data)
+        # 3. Generate or reuse PDF
+        safe_client = (summary.get("client") or client_name or "Client").replace(" ", "_")
+        safe_month = (summary.get("month") or month or "Period").replace(" ", "_")
+        os.makedirs("output", exist_ok=True)
+        candidate_path = os.path.join("output", f"Invoice_{safe_client}_{safe_month}.pdf")
+
+        if os.path.exists(candidate_path):
+            pdf_path = candidate_path
+        else:
+            pdf_path = invoice_gen_service.generate_pdf(summary, data)
         if not pdf_path:
             logger.error("Failed to generate PDF")
             return
@@ -132,6 +262,16 @@ async def process_and_send_invoice(to_number: str, client_name: str, month: str,
             )
             # 6. Then send confirmation
             await telegram_service.send_text_message(chat_id, confirmation_text)
+            # 7. Then send the same PDF over email (if possible)
+            send_invoice_email(
+                client_name=summary.get("client", client_name),
+                month=summary.get("month", month or "Request"),
+                year=year,
+                file_path=pdf_path,
+                rows=data,
+                platform="telegram",
+                chat_id=chat_id,
+            )
 
     except Exception as e:
         logger.error(f"Error in process_and_send_invoice task: {e}")
