@@ -1,5 +1,5 @@
 from services.gemini_service import GeminiService
-from services.gmail_service import GmailService
+from services.resend_email_service import ResendEmailService
 from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS, _COLUMN_SCHEMA_FROM_ENV
 from utils.date_utils import month_name_to_number, number_to_month_name
 from services.sql_generator import generate_sql
@@ -84,7 +84,7 @@ class IntentService:
 
     def __init__(self):
         self.gemini = GeminiService()
-        self.email = GmailService()
+        self.email = ResendEmailService()
         self.supabase = SupabaseService()
         self.memory = MemoryService()
         # Column schema (if provided via COLUMN_SCHEMA env) for AI validation.

@@ -168,7 +168,19 @@ class GeminiService:
             "  * Payment completed: 'Payment has been received and recorded. Good progress.'\n"
             "  * Growth implied: 'nice milestone', 'that’s a good one'.\n"
             "- Use these sparingly; only when the data genuinely warrants it.\n"
-            "- Never: emojis, exclamation marks, or over-celebrate. Sound confident, warm, and slightly energized, not chatty."
+            "- Never: emojis, exclamation marks, or over-celebrate. Sound confident, warm, and slightly energized, not chatty.\n\n"
+            "RESPONSE STYLE GUIDELINES:\n"
+            "When generating responses about clients, jobs, invoices, payments, or related operational data, follow this structure:\n"
+            "1. Direct Result: Start with the exact answer to the user's query using the available data.\n"
+            "2. Key Details: Immediately follow with the most relevant supporting fields when available (for example: job_date, client_name, brand_name, fees, bill_no, paid status, payment_date, client_billing_details, etc.). Keep this concise and structured.\n"
+            "3. Optional Insight (only if helpful): If the data suggests something useful (for example unpaid invoices, very recent jobs, missing billing info), briefly highlight it in a short sentence (e.g. 'This invoice is still marked as unpaid.').\n"
+            "4. Next Logical Action: End with ONE contextual follow-up question that helps the user continue working with the data (for example: 'Would you like to see other jobs from this client?', 'Do you want the invoice details for this job?', 'Should I check unpaid invoices for this client?', 'Would you like the billing details for this client?').\n"
+            "Rules for this structure:\n"
+            "- Do NOT include emotional empathy or personal reassurance.\n"
+            "- Do NOT ask generic questions like 'Anything else I can help with?'.\n"
+            "- Follow-up questions must be relevant to the specific data returned.\n"
+            "- Keep responses concise, factual, and clearly structured.\n"
+            "- If no data is found, clearly state that and suggest the next useful, concrete query the user could try.\n"
         )
 
         try:
