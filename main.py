@@ -194,6 +194,7 @@ async def process_and_send_invoice(
     chat_id: int = None,
     bill_number: str = None,
     year: int = None,
+    user_id: str = None,
 ):
     """
     Background task to generate PDF and send it via WhatsApp or Telegram.
@@ -205,9 +206,9 @@ async def process_and_send_invoice(
             from datetime import datetime
             year = datetime.now().year
         if bill_number:
-            result = supabase_service.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number)
+            result = supabase_service.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=user_id)
         else:
-            result = supabase_service.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year)
+            result = supabase_service.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year, user_id=user_id)
         if not result.get("ok") or not result.get("rows"):
             logger.warning(f"No data found for invoice generation: {client_name} - {month} (Year: {year})")
             return
@@ -299,7 +300,8 @@ async def whatsapp_webhook(
             From, data["client_name"], data["month"], 
             platform="whatsapp",
             bill_number=data.get("bill_number"),
-            year=data.get("year")
+            year=data.get("year"),
+            user_id=From,
         )
 
     # Return an empty 204 so Twilio does not send an extra 'OK' message.
@@ -353,7 +355,8 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
                 None, data_inv["client_name"], data_inv["month"], 
                 platform="telegram", chat_id=chat_id,
                 bill_number=data_inv.get("bill_number"),
-                year=data_inv.get("year")
+                year=data_inv.get("year"),
+                user_id=user_id,
             )
 
         return {"status": "ok"}

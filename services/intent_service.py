@@ -584,6 +584,7 @@ class IntentService:
         # All fields collected - save to Supabase job_entries
         values = self.memory.complete_form(user_id)
         if values:
+            values["user_id"] = user_id
             insert_result = self.supabase.insert_job_entry(values)
             if insert_result.get("ok"):
                 summary = ", ".join(f"{k}: {v}" for k, v in values.items())
@@ -714,6 +715,7 @@ class IntentService:
                 targets = self.supabase.fetch_reminder_targets(
                     approaching_days=approaching_days,
                     payment_terms_days=payment_terms_days,
+                    user_id=user_id,
                 )
                 logger.info(f"[REMINDER] Loaded {len(targets)} reminder targets from Supabase")
 
@@ -820,9 +822,9 @@ class IntentService:
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                     if bill_number:
-                        result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number)
+                        result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=user_id)
                     else:
-                        result = self.supabase.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year_val)
+                        result = self.supabase.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year_val, user_id=user_id)
                     if not result.get("ok"):
                         response = result.get("error", "I couldn't fetch invoice data. Please try again.")
                         self._store_conversation(user_id, message, response)
@@ -899,7 +901,7 @@ class IntentService:
             overdue_keywords = ["overdue", "due date", "passed due", "past due", "late payment", "follow up", "followup", "payment followup", "payment status"]
             is_overdue = any(k in message.lower() for k in overdue_keywords) and ("invoice" in message.lower() or "client" in message.lower() or "payment" in message.lower())
             if is_overdue:
-                overdue_jobs = self.supabase.fetch_overdue_jobs(payment_terms_days=30)
+                overdue_jobs = self.supabase.fetch_overdue_jobs(payment_terms_days=30, user_id=user_id)
                 if not overdue_jobs:
                     response = "Great news! I don't see any invoices that have passed their due date."
                 else:
@@ -933,7 +935,7 @@ class IntentService:
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             # Generate SQL from natural language
-            sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history)
+            sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history, user_id=user_id)
             if sql_result.get("_error"):
                 response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
                 self._store_conversation(user_id, message, response)

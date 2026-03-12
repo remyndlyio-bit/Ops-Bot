@@ -111,6 +111,7 @@ else:
     JOB_ENTRIES_COLUMNS = [
         "id",
         "created_at",
+        "user_id",
         "job_date",
         "client_name",
         "brand_name",
@@ -135,6 +136,7 @@ else:
 
     SCHEMA_DESCRIPTION = """
 Table: public.job_entries
+- user_id (uuid): owner of the row; every SELECT must filter by user_id, every INSERT must include user_id.
 - job_date (date): when the job was done; use for "when", "last gig", time filters.
 - client_name (text): client name or organization.
 - brand_name (text): brand or product (e.g. Titan, Tanishq, Surf Excel).
@@ -256,6 +258,10 @@ class SupabaseService:
         if not record or not isinstance(record, dict):
             return {"ok": False, "error": "No data provided to insert."}
 
+        # Require user_id for multi-tenant isolation
+        if "user_id" not in record or not record["user_id"]:
+            return {"ok": False, "error": "user_id is required for every insert."}
+
         # Remove disallowed keys
         cleaned = {k: v for k, v in record.items() if k and k not in {"id", "created_at"}}
         if not cleaned:
@@ -305,11 +311,13 @@ class SupabaseService:
         month: Optional[int] = None,
         year: Optional[int] = None,
         bill_no: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Fetch job_entries rows for invoice generation.
         - If bill_no provided: match by bill_no exactly.
         - Else match by client_name (ILIKE) and optional month/year on job_date.
+        - If user_id provided, results are scoped to that user.
         Returns {"ok": True, "rows": [...]} or {"ok": False, "error": "..."}.
         """
         if not self.db_url:
@@ -320,6 +328,10 @@ class SupabaseService:
 
         where = []
         params: List[Any] = []
+
+        if user_id:
+            where.append("user_id = %s")
+            params.append(str(user_id))
 
         if bill_no:
             where.append("bill_no = %s")
@@ -395,15 +407,18 @@ class SupabaseService:
         self,
         approaching_days: int = 7,
         payment_terms_days: int = 30,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch job_entries that are unpaid, have poc_email, first_reminder_sent is null,
         and (job_date + payment_terms_days) is within [today, today + approaching_days].
+        If user_id provided, results are scoped to that user.
         Returns list of dicts with id, client_name, poc_email, job_date, fees, bill_no, etc.
         """
         if not self.db_url:
             return []
-        sql = """
+        user_clause = "AND user_id = %s" if user_id else ""
+        sql = f"""
         SELECT id, client_name, poc_email, job_date, fees, bill_no,
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
@@ -413,16 +428,20 @@ class SupabaseService:
           AND job_date IS NOT NULL
           AND (job_date + (%s::int || ' days')::interval)::date >= CURRENT_DATE
           AND (job_date + (%s::int || ' days')::interval)::date <= CURRENT_DATE + (%s::int || ' days')::interval
+          {user_clause}
         ORDER BY job_date ASC
         LIMIT 100
         """
+        params = [payment_terms_days, payment_terms_days, payment_terms_days, approaching_days]
+        if user_id:
+            params.append(str(user_id))
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
             conn = psycopg2.connect(self.db_url)
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql, (payment_terms_days, payment_terms_days, payment_terms_days, approaching_days))
+                cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
             conn.close()
             out = []
@@ -437,29 +456,36 @@ class SupabaseService:
             logger.error(f"Supabase fetch_reminder_targets error: {e}")
             return []
 
-    def fetch_overdue_jobs(self, payment_terms_days: int = 30) -> List[Dict[str, Any]]:
+    def fetch_overdue_jobs(self, payment_terms_days: int = 30, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Fetch job_entries that are unpaid and (job_date + payment_terms_days) < today.
+        If user_id provided, results are scoped to that user.
         """
         if not self.db_url:
             return []
-        sql = """
+        user_clause = "AND user_id = %s" if user_id else ""
+        sql = f"""
         SELECT id, client_name, job_date, fees, bill_no, poc_email,
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
         WHERE (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
           AND job_date IS NOT NULL
           AND (job_date + (%s::int || ' days')::interval)::date < CURRENT_DATE
+          {user_clause}
         ORDER BY (job_date + (%s::int || ' days')::interval)::date ASC
         LIMIT 100
         """
+        params = [payment_terms_days, payment_terms_days]
+        if user_id:
+            params.append(str(user_id))
+        params.append(payment_terms_days)
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
             conn = psycopg2.connect(self.db_url)
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql, (payment_terms_days, payment_terms_days, payment_terms_days))
+                cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
             conn.close()
             out = []

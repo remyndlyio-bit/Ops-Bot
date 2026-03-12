@@ -17,6 +17,7 @@ def build_sql_prompt(
     schema_description: str,
     columns: List[str],
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    user_id: Optional[str] = None,
 ) -> str:
     today = date.today().isoformat()
     columns_str = ", ".join(columns[:40])
@@ -42,6 +43,12 @@ ALLOWED COLUMNS (use exactly): {columns_str}
 
 TABLE: public.job_entries (columns id and created_at are auto-generated; do not include them in INSERT).
 
+MULTI-TENANT RULE (MANDATORY):
+- The current user_id is '{user_id or 'UNKNOWN'}'.
+- Every SELECT MUST include WHERE user_id = '{user_id or 'UNKNOWN'}' (combine with AND if other conditions exist).
+- Every INSERT MUST include user_id = '{user_id or 'UNKNOWN'}' as a column/value.
+- NEVER omit user_id from any query.
+
 RULES FOR SELECT:
 1. Use only columns from the list above. Use snake_case for column names.
 2. Relative dates: "last month" = date between first and last day of previous month. "this year" = year = {today[:4]}. "last 7 days" = job_date >= CURRENT_DATE - 7.
@@ -52,7 +59,7 @@ RULES FOR SELECT:
 
 RULES FOR INSERT:
 7. Use when the user wants to ADD a job, LOG a job, RECORD an entry, or CREATE a new row (e.g. "add a job for Garnier", "log: Xiaomi, 2000, 15sec", "new entry: client X, fees 5000").
-8. INSERT INTO public.job_entries (col1, col2, ...) VALUES (val1, val2, ...). Use only columns that the user provided; omit id and created_at. Use NULL for missing optional fields or omit the column.
+8. INSERT INTO public.job_entries (user_id, col1, col2, ...) VALUES ('{user_id or 'UNKNOWN'}', val1, val2, ...). Use only columns that the user provided; omit id and created_at. Use NULL for missing optional fields or omit the column.
 9. Quote text values with single quotes; escape single quotes by doubling. Dates as 'YYYY-MM-DD'. Numbers without quotes.
 10. Prefer RETURNING * at the end of INSERT so the new row is returned.
 
@@ -68,6 +75,7 @@ def generate_sql(
     gemini_service: GeminiService,
     supabase_service: SupabaseService,
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate a single SELECT SQL from user message.
@@ -77,7 +85,7 @@ def generate_sql(
     schema_description = schema["description"]
     columns = schema["columns"]
 
-    prompt = build_sql_prompt(message, schema_description, columns, conversation_history)
+    prompt = build_sql_prompt(message, schema_description, columns, conversation_history, user_id=user_id)
     try:
         raw = gemini_service._call_api(prompt, generation_config={
             "temperature": 0,
