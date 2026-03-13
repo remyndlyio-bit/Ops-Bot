@@ -27,7 +27,7 @@ def build_sql_prompt(
     context_block = ""
     if conversation_history:
         lines = []
-        for msg in conversation_history[-6:]:
+        for msg in conversation_history[-10:]:
             role = "User" if msg.get("role") == "user" else "Assistant"
             lines.append(f"{role}: {msg.get('content', '')}")
         context_block = "Recent conversation:\n" + "\n".join(lines) + "\n\n"

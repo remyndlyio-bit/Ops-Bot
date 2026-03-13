@@ -632,11 +632,25 @@ class IntentService:
         insert_result = self.supabase.insert_job_entry(record)
         if insert_result.get("ok"):
             brand = extracted.get("brand_name", "")
+            client = extracted.get("client_name", "")
             response = f"Job saved! ✅ {brand} has been added to your records."
+            # Store last job context so user can reference "this job" in follow-up
+            self.memory.update_user_memory(user_id, {
+                "last_saved_job": {
+                    "brand_name": brand,
+                    "client_name": client,
+                    "job_date": extracted.get("job_date"),
+                    "job_description_details": extracted.get("job_description_details"),
+                    "fees": extracted.get("fees"),
+                    "db_client_name": record.get("client_name"),  # what's actually in client_name col
+                }
+            })
         else:
             logger.error(f"[SMART_CAPTURE] Insert failed: {insert_result.get('error')}")
             response = "I couldn't save the job. Please try again."
-        self._store_conversation(user_id, "", response)
+        # Build a summary of what was saved for conversation context
+        summary = ", ".join(f"{k}: {v}" for k, v in extracted.items() if v is not None)
+        self._store_conversation(user_id, f"Save job: {summary}", response)
         return {"operation": "form_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _show_smart_capture_confirmation(self, user_id: str, extracted: Dict) -> Dict:
@@ -668,7 +682,9 @@ class IntentService:
             "step": 0,
         }
         self.memory.start_form(user_id, [], form_override=form_data)
-        self._store_conversation(user_id, "", response)
+        # Store the extracted details as user message for context
+        summary = ", ".join(f"{k}: {v}" for k, v in extracted.items() if v is not None)
+        self._store_conversation(user_id, f"Job details: {summary}", response)
         return {"operation": "smart_capture_confirm", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _start_smart_capture(self, user_id: str, message: str) -> Dict:
@@ -1138,6 +1154,22 @@ class IntentService:
                     if not year_val:
                         from datetime import datetime
                         year_val = datetime.now().year
+
+                    # Resolve "this job" / missing client from last saved job context
+                    if not client_name and not bill_number:
+                        last_job = user_mem.get("last_saved_job")
+                        if last_job:
+                            # Use the DB column value (brand stored as client_name)
+                            client_name = last_job.get("db_client_name") or last_job.get("brand_name", "")
+                            if not month_name and last_job.get("job_date"):
+                                try:
+                                    job_month = int(last_job["job_date"][5:7])
+                                    month_name = number_to_month_name(job_month)
+                                    month_num = job_month
+                                    year_val = int(last_job["job_date"][:4])
+                                except (ValueError, IndexError):
+                                    pass
+                            logger.info(f"[INVOICE] Resolved from last_saved_job: client={client_name}, month={month_name}")
 
                     if not client_name and not bill_number:
                         response = "I need a client name or bill number to find an invoice. For example: 'Send invoice for Garnier for March'."
