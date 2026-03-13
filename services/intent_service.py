@@ -1326,7 +1326,7 @@ class IntentService:
                     # Check if bank details exist before generating invoice
                     bank_result = self.supabase.get_user_bank_details(user_id)
                     bank_details = bank_result.get("data") if bank_result.get("ok") else None
-                    if not bank_details or not bank_details.get("account_number"):
+                    if not bank_details or not bank_details.get("bank_account_number"):
                         # No bank details - prompt user to add them
                         self.memory.update_user_memory(user_id, {
                             "pending_invoice": invoice_data
