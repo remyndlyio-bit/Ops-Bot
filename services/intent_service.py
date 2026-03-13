@@ -1083,7 +1083,7 @@ class IntentService:
                 conv = self.memory.get_conversation_history(user_id)
                 if conv and len(conv) >= 2:
                     last_assistant = conv[-1].get("content", "").lower() if conv[-1].get("role") == "assistant" else ""
-                    if "generate an invoice" in last_assistant or "would you like" in last_assistant:
+                    if "generate an invoice" in last_assistant and "would you like" in last_assistant:
                         # Generate invoice for the last job we found
                         ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
                         last_row = ctx.get("last_row_data") if ctx else None
@@ -1241,7 +1241,10 @@ class IntentService:
                 if name:
                     name = name.title()
             
-            self.supabase.upsert_user_profile(user_id, platform, {"name": name})
+            result = self.supabase.upsert_user_profile(user_id, platform, {"name": name})
+            if not result.get("ok"):
+                logger.error(f"[ONBOARDING] Failed to save name for {user_id}: {result.get('error')}")
+                # Still respond but log the error
             
             response = (
                 f"Nice to meet you, {name}! 🎉\n\n"
@@ -1341,7 +1344,8 @@ class IntentService:
     def _complete_onboarding(self, user_id: str, message: str) -> Dict:
         """Complete the onboarding process."""
         # Mark as onboarded
-        self.supabase.upsert_user_profile(user_id, "", {"onboarded_at": "now()"})  # Will be handled in upsert method
+        from datetime import datetime
+        self.supabase.upsert_user_profile(user_id, "", {"onboarded_at": datetime.now().isoformat()})
         
         response = (
             "✅ You're all set! Here's how to use me:\n\n"

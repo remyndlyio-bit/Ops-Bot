@@ -634,8 +634,8 @@ class SupabaseService:
         """
         if not self.db_url:
             return {"ok": False, "error": "Database URL not configured."}
-        if not user_id or not platform:
-            return {"ok": False, "error": "user_id and platform are required."}
+        if not user_id:
+            return {"ok": False, "error": "user_id is required."}
 
         # Merge with existing profile if updating
         existing = self.get_user_profile(user_id)
@@ -647,10 +647,10 @@ class SupabaseService:
             profile = current
 
         # Add/update platform and timestamps
-        profile["platform"] = platform
-        if not profile.get("onboarded_at") and profile.get("name"):
-            from datetime import datetime
-            profile["onboarded_at"] = datetime.now().isoformat()
+        if platform:  # Only set platform if provided
+            profile["platform"] = platform
+        if not profile.get("platform"):
+            profile["platform"] = "telegram" if user_id.isdigit() else "whatsapp"
 
         # Convert JSONB field to string for PostgreSQL
         if "preferences" in profile:
@@ -660,9 +660,11 @@ class SupabaseService:
             # If it's already a string (from DB), keep it as is
 
         # Build dynamic upsert query
-        # Remove system columns from profile dict to avoid duplication
+        # Remove system columns and None values to avoid issues
+        skip_cols = {'user_id', 'updated_at', 'created_at', 'id'}
         profile_for_update = {k: v for k, v in profile.items() 
-                             if k not in ['user_id', 'updated_at', 'created_at']}
+                             if k not in skip_cols and v is not None}
+        logger.info(f"[PROFILE] Upsert cols for {user_id}: {list(profile_for_update.keys())}")
         cols = list(profile_for_update.keys())
         values = [profile_for_update[c] for c in cols]
         
@@ -695,6 +697,8 @@ class SupabaseService:
             conn = psycopg2.connect(self.db_url)
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                logger.info(f"[PROFILE] SQL: {sql}")
+                logger.info(f"[PROFILE] Params: {params}")
                 cur.execute(sql, params)
                 row = cur.fetchone()
             conn.close()
