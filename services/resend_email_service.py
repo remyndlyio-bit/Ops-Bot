@@ -1,6 +1,6 @@
 import os
 import httpx
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union
 from utils.logger import logger
 
 
@@ -31,6 +31,24 @@ class ResendEmailService:
             logger.error("[RESEND] Missing RESEND_API key – emails will not be sent.")
         if not self.from_email:
             logger.error("[RESEND] Missing RESEND_FROM_EMAIL – emails will not be sent.")
+
+    def _normalize_emails(self, email_input: Union[str, List[str]]) -> List[str]:
+        """
+        Normalize email addresses into a clean list.
+        Supports semicolon and comma separators, and handles list inputs.
+        """
+        if not email_input:
+            return []
+
+        if isinstance(email_input, list):
+            return [e.strip() for e in email_input if e.strip()]
+
+        if isinstance(email_input, str):
+            # Replace semicolons with commas, then split
+            emails = email_input.replace(";", ",").split(",")
+            return [e.strip() for e in emails if e.strip()]
+
+        return []
 
     def _build_from_header(self) -> Optional[str]:
         if not self.from_email:
@@ -75,12 +93,18 @@ class ResendEmailService:
             logger.error("[RESEND] Invalid from header")
             return False
 
-        bcc_list = [e.strip() for e in (bcc or "").split(";") if e.strip()]
+        # Normalize recipient emails
+        to_emails = self._normalize_emails(to_email)
+        bcc_list = self._normalize_emails(bcc) if bcc else []
 
         logger.info(
-            f"[RESEND] Preparing email -> To={to_email} | BCC={bcc_list or None} | "
+            f"[RESEND] Preparing email -> To={to_emails} | BCC={bcc_list or None} | "
             f"Subject={subject} | Attachments={bool(attachments)} | DryRun={self.dry_run}"
         )
+
+        if not to_emails:
+            logger.error("[RESEND] No valid recipient emails after normalization")
+            return False
 
         if self.dry_run:
             logger.info(f"[RESEND] DRY RUN BODY:\n{body}")
@@ -88,7 +112,7 @@ class ResendEmailService:
 
         payload: Dict[str, object] = {
             "from": from_header,
-            "to": [to_email],
+            "to": to_emails,
             "subject": subject,
             "text": body,
         }
@@ -111,16 +135,16 @@ class ResendEmailService:
                 except Exception:
                     data = {}
                 message_id = data.get("id") or data.get("message") or "<no-id>"
-                logger.info(f"[RESEND] Email sent -> To={to_email} | BCC={bcc_list or None} | ID={message_id}")
+                logger.info(f"[RESEND] Email sent -> To={to_emails} | BCC={bcc_list or None} | ID={message_id}")
                 return True
             else:
                 logger.error(
-                    f"[RESEND] Failed to send email -> To={to_email} | "
+                    f"[RESEND] Failed to send email -> To={to_emails} | "
                     f"Status={resp.status_code} | Body={resp.text[:500]}"
                 )
                 return False
         except Exception as e:
-            logger.error(f"[RESEND] Exception while sending email -> To={to_email} | Error={e}")
+            logger.error(f"[RESEND] Exception while sending email -> To={to_emails} | Error={e}")
             return False
 
     def send_invoice_email(
