@@ -667,7 +667,26 @@ class IntentService:
 
         result = self.supabase.upsert_user_config(user_id, parsed)
         if result.get("ok"):
-            response = "Your bank details have been saved successfully! Say 'my bank details' to view them."
+            # Check if there's a pending invoice to generate
+            user_mem = self.memory.get_user_memory(user_id)
+            pending_invoice = user_mem.get("pending_invoice")
+            if pending_invoice:
+                # Clear pending invoice flag
+                self.memory.update_user_memory(user_id, {"pending_invoice": None})
+                client_name = pending_invoice.get("client_name", "Client")
+                response = (
+                    "Your bank details have been saved! ✅\n\n"
+                    f"Now generating the invoice for {client_name}..."
+                )
+                self._store_conversation(user_id, message, response)
+                return {
+                    "operation": "bank_config_complete",
+                    "response": response,
+                    "trigger_invoice": True,
+                    "invoice_data": pending_invoice
+                }
+            else:
+                response = "Your bank details have been saved successfully! Say 'my bank details' to view them."
         else:
             response = f"I couldn't save your bank details: {result.get('error', 'Unknown error')}. Please try again."
         self._store_conversation(user_id, message, response)
