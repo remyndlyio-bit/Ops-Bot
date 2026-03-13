@@ -335,11 +335,119 @@ async def _keep_typing(chat_id: int, stop_event: asyncio.Event):
         except asyncio.TimeoutError:
             pass
 
+async def _handle_reminder_callback(callback_query: dict):
+    """Handle inline button presses from the reminder worker notifications."""
+    cb_id = callback_query.get("id")
+    cb_data = callback_query.get("data", "")
+    chat_id = callback_query["message"]["chat"]["id"]
+    message_id = callback_query["message"]["message_id"]
+
+    # Acknowledge the button press immediately
+    await telegram_service.answer_callback_query(cb_id)
+
+    if cb_data == "remind:skip:all":
+        await telegram_service.edit_message_text(
+            chat_id, message_id, "⏭ Reminders skipped. You can always send them manually later."
+        )
+        return
+
+    # Parse callback_data: remind:<job_id>:<level>
+    parts = cb_data.split(":")
+    if len(parts) != 3 or parts[0] != "remind":
+        return
+    job_id, level = parts[1], parts[2]
+
+    # Fetch the job row to get email details
+    fetch_sql = f"SELECT * FROM public.job_entries WHERE id = {int(job_id)}"
+    result = supabase_service.execute_sql(fetch_sql)
+    if not result.get("ok") or not result.get("rows"):
+        await telegram_service.edit_message_text(
+            chat_id, message_id, "❌ Could not find that invoice. It may have been deleted."
+        )
+        return
+
+    row = result["rows"][0]
+    poc_email = row.get("poc_email")
+    if not poc_email:
+        await telegram_service.edit_message_text(
+            chat_id, message_id,
+            f"❌ No email on file for {row.get('client_name', 'this client')}. "
+            f"Please add a POC email first."
+        )
+        return
+
+    # Build email
+    bill_no = row.get("bill_no") or "N/A"
+    client_name = row.get("client_name") or "Client"
+    poc_name = row.get("poc_name") or client_name
+    fees = row.get("fees")
+    try:
+        amount_str = f"₹{int(float(fees)):,}"
+    except (ValueError, TypeError):
+        amount_str = str(fees) if fees else "N/A"
+
+    subject_map = {
+        "first": f"First Payment Reminder – Invoice #{bill_no}",
+        "second": f"Second Payment Reminder – Invoice #{bill_no}",
+        "third": f"Final Payment Reminder – Invoice #{bill_no}",
+    }
+    subject = subject_map.get(level, f"Payment Reminder – Invoice #{bill_no}")
+
+    # Get sender name from user profile
+    user_id = str(chat_id)
+    profile = supabase_service.get_user_profile(user_id)
+    sender_name = "Team"
+    if profile.get("ok") and profile.get("data"):
+        sender_name = profile["data"].get("name") or sender_name
+
+    body = (
+        f"Hi {poc_name},\n\n"
+        f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
+        f"Amount Due: {amount_str}\n\n"
+        f"Please let us know if payment has already been processed.\n\n"
+        f"Best regards,\n{sender_name}\n"
+    )
+
+    # Send email
+    ok = email_service.send_email(to_email=poc_email, subject=subject, body=body)
+
+    if not ok:
+        await telegram_service.edit_message_text(
+            chat_id, message_id,
+            f"❌ Failed to send reminder email to {poc_email}. Please try again later."
+        )
+        return
+
+    # Update DB flag
+    flag_map = {
+        "first": "first_reminder_sent",
+        "second": "second_reminder_sent",
+        "third": "third_reminder_sent",
+    }
+    flag_col = flag_map.get(level)
+    if flag_col:
+        update_sql = f"UPDATE public.job_entries SET {flag_col} = true WHERE id = {int(job_id)}"
+        supabase_service.execute_sql(update_sql)
+
+    label_map = {"first": "First", "second": "Second", "third": "Final"}
+    label = label_map.get(level, level.title())
+    await telegram_service.edit_message_text(
+        chat_id, message_id,
+        f"✅ {label} reminder sent to {poc_email} for invoice #{bill_no}."
+    )
+
+
 @app.post("/webhooks/telegram")
 async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
     """Telegram Webhook"""
     try:
         data = await request.json()
+
+        # Handle inline button callbacks (e.g. reminder confirmations)
+        if "callback_query" in data:
+            await _handle_reminder_callback(data["callback_query"])
+            return {"status": "ok"}
+
         if "message" not in data:
             return {"status": "ok"}
 

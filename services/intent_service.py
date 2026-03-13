@@ -16,9 +16,11 @@ from services.response_formatter import (
 )
 from services.response_synthesis import build_clean_payload, build_field_answer_payload
 from utils.memory_service import MemoryService
+from utils.pending_reminders import get_pending, clear_pending, remove_single
 from utils.logger import logger
 from typing import Dict, List, Optional
 import json
+import re
 
 class IntentService:
     # Cache AI-generated schema by column names so we don't call the AI on every message
@@ -1056,6 +1058,109 @@ class IntentService:
         
         return response
 
+    def _handle_pending_reminder(self, user_id: str, message: str) -> Optional[Dict]:
+        """
+        Check if a WhatsApp user has pending reminders and is replying with
+        a number (e.g. '1', '2') to send, or 'skip' to dismiss.
+        Returns a response dict if handled, None otherwise.
+        """
+        pending = get_pending(user_id)
+        if not pending:
+            return None
+
+        msg = message.strip().lower()
+
+        # "skip" / "skip all" → clear pending
+        if msg in ("skip", "skip all", "no", "cancel"):
+            clear_pending(user_id)
+            response = "⏭ Reminders skipped. You can always send them manually later."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Check for a number reply like "1", "2", "send 1", "#1"
+        num_match = re.search(r"(\d+)", msg)
+        if not num_match:
+            return None  # Not a reminder reply, let normal flow handle it
+
+        idx = int(num_match.group(1))
+        if idx < 1 or idx > len(pending):
+            response = f"Please reply with a number between 1 and {len(pending)}, or 'skip' to skip all."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        reminder = pending[idx - 1]
+        job_id = reminder.get("id")
+        level = reminder.get("_reminder_level", "first")
+        poc_email = reminder.get("poc_email")
+        bill_no = reminder.get("bill_no") or "N/A"
+        client_name = reminder.get("client_name") or "Client"
+        poc_name = reminder.get("poc_name") or client_name
+        fees = reminder.get("fees")
+
+        if not poc_email:
+            response = f"❌ No email on file for {client_name}. Please add a POC email first."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        try:
+            amount_str = f"₹{int(float(fees)):,}"
+        except (ValueError, TypeError):
+            amount_str = str(fees) if fees else "N/A"
+
+        subject_map = {
+            "first": f"First Payment Reminder – Invoice #{bill_no}",
+            "second": f"Second Payment Reminder – Invoice #{bill_no}",
+            "third": f"Final Payment Reminder – Invoice #{bill_no}",
+        }
+        subject = subject_map.get(level, f"Payment Reminder – Invoice #{bill_no}")
+
+        # Get sender name
+        profile = self.supabase.get_user_profile(user_id)
+        sender_name = "Team"
+        if profile.get("ok") and profile.get("data"):
+            sender_name = profile["data"].get("name") or sender_name
+
+        body = (
+            f"Hi {poc_name},\n\n"
+            f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
+            f"Amount Due: {amount_str}\n\n"
+            f"Please let us know if payment has already been processed.\n\n"
+            f"Best regards,\n{sender_name}\n"
+        )
+
+        ok = self.email.send_email(to_email=poc_email, subject=subject, body=body)
+
+        if not ok:
+            response = f"❌ Failed to send reminder email to {poc_email}. Please try again later."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Update DB flag
+        flag_map = {
+            "first": "first_reminder_sent",
+            "second": "second_reminder_sent",
+            "third": "third_reminder_sent",
+        }
+        flag_col = flag_map.get(level)
+        if flag_col and job_id:
+            update_sql = f"UPDATE public.job_entries SET {flag_col} = true WHERE id = {int(job_id)}"
+            self.supabase.execute_sql(update_sql)
+
+        # Remove this reminder from pending list
+        remove_single(user_id, job_id)
+
+        label_map = {"first": "First", "second": "Second", "third": "Final"}
+        label = label_map.get(level, level.title())
+        response = f"✅ {label} reminder sent to {poc_email} for invoice #{bill_no}."
+
+        # If more pending, remind user
+        remaining = get_pending(user_id)
+        if remaining:
+            response += f"\n\n{len(remaining)} reminder(s) still pending. Reply with a number or 'skip'."
+
+        self._store_conversation(user_id, message, response)
+        return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
     def process_request(self, user_id: str, message: str) -> Dict:
         """
         Main handler: keyword-based branches for reminder/invoice/overdue;
@@ -1083,6 +1188,11 @@ class IntentService:
             form_state = self.memory.get_form_state(user_id)
             if form_state:
                 return self._handle_form_step(user_id, message)
+
+            # 0+. Check for pending payment reminders (WhatsApp reply flow)
+            reminder_result = self._handle_pending_reminder(user_id, message)
+            if reminder_result:
+                return reminder_result
 
             # 0a. Check if user is responding with job data (awaiting smart capture input)
             user_mem = self.memory.get_user_memory(user_id)
