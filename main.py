@@ -426,7 +426,7 @@ async def _handle_reminder_callback(callback_query: dict):
     }
     flag_col = flag_map.get(level)
     if flag_col:
-        update_sql = f"UPDATE public.job_entries SET {flag_col} = true WHERE id = {int(job_id)}"
+        update_sql = f"UPDATE public.job_entries SET {flag_col} = NOW() WHERE id = {int(job_id)}"
         supabase_service.execute_sql(update_sql)
 
     label_map = {"first": "First", "second": "Second", "third": "Final"}

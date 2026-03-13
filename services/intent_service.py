@@ -1143,7 +1143,7 @@ class IntentService:
         }
         flag_col = flag_map.get(level)
         if flag_col and job_id:
-            update_sql = f"UPDATE public.job_entries SET {flag_col} = true WHERE id = {int(job_id)}"
+            update_sql = f"UPDATE public.job_entries SET {flag_col} = NOW() WHERE id = {int(job_id)}"
             self.supabase.execute_sql(update_sql)
 
         # Remove this reminder from pending list

@@ -44,36 +44,36 @@ SELECT
     poc_name,
     fees,
     bill_no,
-    invoice_sent_date,
+    bill_sent,
     first_reminder_sent,
     second_reminder_sent,
     third_reminder_sent
 FROM public.job_entries
 WHERE
-    (paid IS NULL OR paid = '' OR LOWER(paid) IN ('false', 'no', 'unpaid'))
-    AND invoice_sent_date IS NOT NULL
+    (paid IS NULL OR TRIM(paid) = '' OR LOWER(paid) IN ('false', 'no', 'unpaid'))
+    AND bill_sent IS NOT NULL AND TRIM(bill_sent) <> ''
     AND (
         -- First reminder: 15+ days, not yet sent
         (
-            (first_reminder_sent IS NULL OR first_reminder_sent = false)
-            AND invoice_sent_date <= CURRENT_DATE - INTERVAL '{first_days} days'
+            first_reminder_sent IS NULL
+            AND bill_sent::date <= CURRENT_DATE - INTERVAL '{first_days} days'
         )
         OR
         -- Second reminder: 30+ days, first sent, second not
         (
-            first_reminder_sent = true
-            AND (second_reminder_sent IS NULL OR second_reminder_sent = false)
-            AND invoice_sent_date <= CURRENT_DATE - INTERVAL '{second_days} days'
+            first_reminder_sent IS NOT NULL
+            AND second_reminder_sent IS NULL
+            AND bill_sent::date <= CURRENT_DATE - INTERVAL '{second_days} days'
         )
         OR
         -- Third reminder: 45+ days, second sent, third not
         (
-            second_reminder_sent = true
-            AND (third_reminder_sent IS NULL OR third_reminder_sent = false)
-            AND invoice_sent_date <= CURRENT_DATE - INTERVAL '{third_days} days'
+            second_reminder_sent IS NOT NULL
+            AND third_reminder_sent IS NULL
+            AND bill_sent::date <= CURRENT_DATE - INTERVAL '{third_days} days'
         )
     )
-ORDER BY user_id, invoice_sent_date ASC
+ORDER BY user_id, bill_sent ASC
 """.format(
     first_days=FIRST_REMINDER_DAYS,
     second_days=SECOND_REMINDER_DAYS,
@@ -84,10 +84,10 @@ ORDER BY user_id, invoice_sent_date ASC
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def _determine_reminder_level(row: dict) -> str:
-    """Return 'first', 'second', or 'third' based on current flag state."""
-    if not row.get("first_reminder_sent"):
+    """Return 'first', 'second', or 'third' based on current flag state (timestamptz: NULL = not sent)."""
+    if row.get("first_reminder_sent") is None:
         return "first"
-    if not row.get("second_reminder_sent"):
+    if row.get("second_reminder_sent") is None:
         return "second"
     return "third"
 
