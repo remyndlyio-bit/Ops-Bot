@@ -52,7 +52,7 @@ MULTI-TENANT RULE (MANDATORY):
 RULES FOR SELECT:
 1. Use only columns from the list above. Use snake_case for column names.
 2. Relative dates: "last month" = date between first and last day of previous month. "this year" = year = {today[:4]}. "last 7 days" = job_date >= CURRENT_DATE - 7.
-   For month ranges, use date_trunc: job_date >= date_trunc('month', '2026-02-01') AND job_date < (date_trunc('month', '2026-02-01') + interval '1 month').
+   For month ranges, use date_trunc with explicit cast: job_date >= date_trunc('month', '2026-02-01'::date) AND job_date < (date_trunc('month', '2026-02-01'::date) + interval '1 month').
 3. "how many", "count" → SELECT COUNT(*) ... For "total fees", "sum" → SELECT SUM(fees) ...
 4. "latest", "last job", "most recent" → ORDER BY job_date DESC LIMIT 1.
 5. Client/brand: WHERE client_name ILIKE '%name%' or = 'Name'.
