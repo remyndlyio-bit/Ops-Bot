@@ -52,6 +52,7 @@ FROM public.job_entries
 WHERE
     (paid IS NULL OR TRIM(paid) = '' OR LOWER(paid) IN ('false', 'no', 'unpaid'))
     AND bill_sent IS NOT NULL AND TRIM(bill_sent) <> ''
+    AND bill_sent ~ '^\d{4}-\d{2}-\d{2}'
     AND (
         -- First reminder: 15+ days, not yet sent
         (
