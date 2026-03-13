@@ -660,8 +660,9 @@ class SupabaseService:
             # If it's already a string (from DB), keep it as is
 
         # Build dynamic upsert query
-        # Remove user_id from profile dict if present to avoid duplication
-        profile_for_update = {k: v for k, v in profile.items() if k != 'user_id'}
+        # Remove system columns from profile dict to avoid duplication
+        profile_for_update = {k: v for k, v in profile.items() 
+                             if k not in ['user_id', 'updated_at', 'created_at']}
         cols = list(profile_for_update.keys())
         values = [profile_for_update[c] for c in cols]
         
