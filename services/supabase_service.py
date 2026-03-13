@@ -353,6 +353,8 @@ class SupabaseService:
             "ORDER BY job_date ASC "
             "LIMIT 500"
         )
+        logger.info(f"[INVOICE DEBUG] SQL: {sql}")
+        logger.info(f"[INVOICE DEBUG] Params: {params}")
 
         try:
             import psycopg2
