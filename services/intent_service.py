@@ -1067,7 +1067,48 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # 4a. Follow-up: answer from last result row via AI synthesis (no raw field:value)
+            # 4a. Check for invoice confirmation (Yes/No after being asked)
+            msg_lower = message.strip().lower()
+            if msg_lower in ("yes", "y", "sure", "ok", "okay", "please do", "generate", "create"):
+                # Check if we recently asked about invoice generation
+                conv = self.memory.get_conversation_history(user_id)
+                if conv and len(conv) >= 2:
+                    last_assistant = conv[-1].get("content", "").lower() if conv[-1].get("role") == "assistant" else ""
+                    if "generate an invoice" in last_assistant or "would you like" in last_assistant:
+                        # Generate invoice for the last job we found
+                        ctx = self._get_uscf_context(user_id)
+                        last_row = ctx.get("last_row_data") if ctx else None
+                        if last_row:
+                            client_name = last_row.get("client_name", "Client")
+                            job_date = last_row.get("job_date")
+                            month = None
+                            if job_date:
+                                try:
+                                    from datetime import datetime
+                                    if isinstance(job_date, str):
+                                        job_dt = datetime.fromisoformat(job_date[:10])
+                                    else:
+                                        job_dt = job_date
+                                    month = job_dt.strftime("%B")
+                                except:
+                                    pass
+                            
+                            invoice_data = {
+                                "client_name": client_name,
+                                "month": month or "Period",
+                                "bill_number": None,
+                                "year": job_date.year if job_date else None
+                            }
+                            response = f"Generating invoice for {client_name}..."
+                            self._store_conversation(user_id, message, response)
+                            return {
+                                "operation": "ACTION_TRIGGER",
+                                "response": response,
+                                "trigger_invoice": True,
+                                "invoice_data": invoice_data
+                            }
+
+            # 4b. Follow-up: answer from last result row via AI synthesis (no raw field:value)
             followup_answer = self._try_answer_from_context(user_id, message, columns)
             if followup_answer:
                 logger.info(f"[FOLLOWUP] Answered from context (synthesized)")
