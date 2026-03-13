@@ -1255,40 +1255,39 @@ class IntentService:
             return {"operation": "onboarding_name", "response": response, "trigger_invoice": False, "invoice_data": {}}
         
         elif not profile.get("company_name"):
-            # Step 2: Get company name
+            # Step 2: Get company name, then complete onboarding
             company = message.strip()
             if company.lower() in ("skip", "no", "n/a"):
                 company = profile.get("name", "Your Business")
             
-            self.supabase.upsert_user_profile(user_id, platform, {"company_name": company})
+            # Save company name AND mark as onboarded in one call
+            from datetime import datetime
+            self.supabase.upsert_user_profile(user_id, platform, {
+                "company_name": company,
+                "onboarded_at": datetime.now().isoformat()
+            })
             
+            user_name = profile.get("name", "there")
             response = (
-                f"Great! Now let's talk about your existing data.\n\n"
-                "How would you like to add your jobs?\n\n"
-                "1️⃣ Upload Excel file (.xlsx)\n"
-                "2️⃣ Paste CSV data\n"
-                "3️⃣ Manual entry (I'll guide you)\n"
-                "4️⃣ Start fresh (no existing data)\n\n"
-                "Just reply with 1, 2, 3, or 4"
+                f"Great, {user_name}! You're all set! ✅\n\n"
+                "Here's how to use me:\n\n"
+                "📊 View data:\n"
+                "• 'How many jobs this month?'\n"
+                "• 'Total fees for Client X'\n\n"
+                "📄 Generate invoices:\n"
+                "• 'Send invoice to Client for March'\n\n"
+                "✏️ Add jobs:\n"
+                "• 'Add a job for Client X'\n\n"
+                "💳 Bank details:\n"
+                "• 'Update bank details'\n\n"
+                "Try it now! Say 'Add a job' to get started."
             )
             self._store_conversation(user_id, message, response)
-            return {"operation": "onboarding_company", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            return {"operation": "onboarding_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
         
         else:
-            # Step 3: Handle data import choice
-            choice = message.strip().lower()
-            if choice in ("1", "upload", "excel"):
-                return self._handle_excel_import(user_id, message)
-            elif choice in ("2", "csv", "paste"):
-                return self._handle_csv_import(user_id, message)
-            elif choice in ("3", "manual"):
-                return self._handle_manual_entry(user_id, message)
-            elif choice in ("4", "fresh", "skip"):
-                return self._complete_onboarding(user_id, message)
-            else:
-                response = "Please choose 1, 2, 3, or 4. What's your preference?"
-                self._store_conversation(user_id, message, response)
-                return {"operation": "onboarding_import_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            # Shouldn't reach here, but complete onboarding if somehow stuck
+            return self._complete_onboarding(user_id, message)
 
     def _get_welcome_message(self, platform: str) -> str:
         """Get platform-specific welcome message."""
