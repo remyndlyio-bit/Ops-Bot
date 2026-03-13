@@ -768,6 +768,9 @@ class IntentService:
             idx = int(hashlib.md5(message.encode()).hexdigest(), 16) % len(options)
             return options[idx]
 
+        msg = message.strip().lower()
+        user_name = self._get_user_name(user_id)
+        
         bye_words = {"bye", "goodbye", "good bye", "see you", "see ya", "cya", "ttyl"}
         thanks_words = {"thanks", "thank you", "thx", "ty", "cheers"}
         how_words = {"how are you", "how r u", "how are u", "how are you doing",
@@ -776,17 +779,27 @@ class IntentService:
                       "morning", "afternoon", "evening"}
         affirmation_words = {"ok", "okay", "cool", "got it", "great", "nice", "awesome"}
 
+        # Get base response
         if msg in bye_words:
-            return _pick(self._SMALL_TALK_RESPONSES["bye"])
-        if msg in thanks_words:
-            return _pick(self._SMALL_TALK_RESPONSES["thanks"])
-        if any(hw in msg for hw in how_words):
-            return _pick(self._SMALL_TALK_RESPONSES["how_are_you"])
-        if msg in time_words:
-            return _pick(self._SMALL_TALK_RESPONSES["time_of_day"])
-        if msg in affirmation_words:
-            return _pick(self._SMALL_TALK_RESPONSES["affirmation"])
-        return _pick(self._SMALL_TALK_RESPONSES["greeting"])
+            response = _pick(self._SMALL_TALK_RESPONSES["bye"])
+        elif msg in thanks_words:
+            response = _pick(self._SMALL_TALK_RESPONSES["thanks"])
+        elif any(hw in msg for hw in how_words):
+            response = _pick(self._SMALL_TALK_RESPONSES["how_are_you"])
+        elif msg in time_words:
+            response = _pick(self._SMALL_TALK_RESPONSES["time_of_day"])
+        elif msg in affirmation_words:
+            response = _pick(self._SMALL_TALK_RESPONSES["affirmation"])
+        else:
+            response = _pick(self._SMALL_TALK_RESPONSES["greeting"])
+        
+        # Personalize if we know the user's name
+        if user_name and "Hi there" not in response:  # Avoid double personalization
+            response = response.replace("Hey!", f"Hey {user_name}!")
+            response = response.replace("Hi there!", f"Hi {user_name}!")
+            response = response.replace("Hello!", f"Hello {user_name}!")
+        
+        return response
 
     def process_request(self, user_id: str, message: str) -> Dict:
         """
@@ -1159,7 +1172,11 @@ class IntentService:
 
         except Exception as e:
             logger.error(f"Execution failure: {e}")
-            response = format_response(ERROR_MODE, error_detail=error_calm_phrase())
+            user_name = self._get_user_name(user_id)
+            if user_name:
+                response = format_response(ERROR_MODE, error_detail=f"Sorry {user_name}, {error_calm_phrase().lower()}")
+            else:
+                response = format_response(ERROR_MODE, error_detail=error_calm_phrase())
 
         self._store_conversation(user_id, message, response)
         return {
@@ -1168,6 +1185,13 @@ class IntentService:
             "trigger_invoice": trigger_invoice,
             "invoice_data": invoice_data
         }
+
+    def _get_user_name(self, user_id: str) -> str:
+        """Get user's name from profile, return None if not found."""
+        profile = self.supabase.get_user_profile(user_id)
+        if profile.get("ok") and profile.get("data"):
+            return profile["data"].get("name")
+        return None
 
     def _start_onboarding(self, user_id: str, message: str) -> Dict:
         """Start onboarding for a new user."""
@@ -1188,9 +1212,34 @@ class IntentService:
         # Check what step we're on
         if not profile.get("name"):
             # Step 1: Get name
-            name = message.strip()
-            if name.lower() in ("skip", "no", "n/a"):
-                name = f"User {user_id}"
+            raw_name = message.strip()
+            if raw_name.lower() in ("skip", "no", "n/a"):
+                name = "there"  # Generic greeting instead of user_id
+            else:
+                # Extract just the name part from common patterns
+                name_patterns = [
+                    "my name is ",
+                    "i'm ",
+                    "i am ",
+                    "call me ",
+                    "this is ",
+                    "it's ",
+                    "its ",
+                ]
+                name = raw_name
+                for pattern in name_patterns:
+                    if pattern.lower() in raw_name.lower():
+                        # Extract text after the pattern
+                        idx = raw_name.lower().find(pattern.lower())
+                        name = raw_name[idx + len(pattern):].strip()
+                        break
+                # If name is too long, it might still include extra words
+                if len(name.split()) > 3:
+                    # Take first 2-3 words as name
+                    name = " ".join(name.split()[:2])
+                # Capitalize properly
+                if name:
+                    name = name.title()
             
             self.supabase.upsert_user_profile(user_id, platform, {"name": name})
             
@@ -1206,7 +1255,7 @@ class IntentService:
             # Step 2: Get company name
             company = message.strip()
             if company.lower() in ("skip", "no", "n/a"):
-                company = profile.get("name", f"User {user_id}")
+                company = profile.get("name", "Your Business")
             
             self.supabase.upsert_user_profile(user_id, platform, {"company_name": company})
             

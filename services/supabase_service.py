@@ -652,6 +652,13 @@ class SupabaseService:
             from datetime import datetime
             profile["onboarded_at"] = datetime.now().isoformat()
 
+        # Convert JSONB field to string for PostgreSQL
+        if "preferences" in profile:
+            if isinstance(profile["preferences"], dict):
+                import json
+                profile["preferences"] = json.dumps(profile["preferences"])
+            # If it's already a string (from DB), keep it as is
+
         # Build dynamic upsert query
         cols = list(profile.keys())
         values = [profile[c] for c in cols]
