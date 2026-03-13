@@ -1114,6 +1114,32 @@ class IntentService:
             if any(t in msg_lower for t in self._VIEW_BANK_TRIGGERS):
                 return self._show_bank_details(user_id, message)
 
+            # 0b5. Negative intent — user declining a follow-up question
+            _NEGATIVE_RESPONSES = {
+                "no", "nope", "nah", "not required", "not needed", "no thanks",
+                "no thank you", "skip", "don't need", "dont need", "i'm good",
+                "im good", "pass", "no need", "that's fine", "thats fine",
+                "all good", "not now", "maybe later", "no its fine",
+                "no it's fine", "not right now", "i'm fine", "im fine",
+            }
+            _FOLLOWUP_MARKERS = [
+                "would you like", "do you want", "shall i", "want me to",
+                "should i", "need a breakdown", "like a breakdown",
+                "want a breakdown", "like to see", "want to see",
+                "interested in", "like more detail", "want more detail",
+            ]
+            if msg_lower in _NEGATIVE_RESPONSES:
+                # Check if last assistant message was a follow-up question
+                if conversation_history:
+                    last_msgs = [m for m in conversation_history if m.get("role") == "assistant"]
+                    if last_msgs:
+                        last_assistant = last_msgs[-1].get("content", "").lower()
+                        is_followup = any(marker in last_assistant for marker in _FOLLOWUP_MARKERS) or last_assistant.rstrip().endswith("?")
+                        if is_followup:
+                            response = "👍 Got it. Let me know if you need anything else."
+                            self._store_conversation(user_id, message, response)
+                            return {"operation": "decline_followup", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             # 0c. Payment reminder queries
             reminder_keywords = [
                 "remind clients",
