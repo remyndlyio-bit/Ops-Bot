@@ -591,3 +591,99 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Supabase upsert_user_config error: {e}")
             return {"ok": False, "error": "Failed to save bank details."}
+
+    # --- User Profiles (onboarding) ---
+
+    def get_user_profile(self, user_id: str) -> Dict[str, Any]:
+        """
+        Fetch user profile for a given user_id.
+        Returns {"ok": True, "data": {...}} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        if not user_id:
+            return {"ok": False, "error": "user_id is required."}
+
+        sql = "SELECT * FROM public.user_profiles WHERE user_id = %s LIMIT 1"
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, (str(user_id),))
+                row = cur.fetchone()
+            conn.close()
+            if not row:
+                logger.info(f"[PROFILE] No profile found for user_id={user_id}")
+                return {"ok": True, "data": None}
+            out = dict(row)
+            for k, v in list(out.items()):
+                if hasattr(v, "isoformat") and v is not None:
+                    out[k] = v.isoformat()
+            logger.info(f"[PROFILE] Retrieved profile for user_id={user_id}")
+            return {"ok": True, "data": out}
+        except Exception as e:
+            logger.error(f"Supabase get_user_profile error: {e}")
+            return {"ok": False, "error": "Failed to retrieve user profile."}
+
+    def upsert_user_profile(self, user_id: str, platform: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Insert or update user profile for a given user_id.
+        Returns {"ok": True, "data": {...}} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        if not user_id or not platform:
+            return {"ok": False, "error": "user_id and platform are required."}
+
+        # Merge with existing profile if updating
+        existing = self.get_user_profile(user_id)
+        if existing.get("ok") and existing.get("data"):
+            # Keep existing fields that aren't being updated
+            current = existing["data"]
+            for k, v in profile.items():
+                current[k] = v
+            profile = current
+
+        # Add/update platform and timestamps
+        profile["platform"] = platform
+        if not profile.get("onboarded_at") and profile.get("name"):
+            from datetime import datetime
+            profile["onboarded_at"] = datetime.now().isoformat()
+
+        # Build dynamic upsert query
+        cols = list(profile.keys())
+        values = [profile[c] for c in cols]
+        
+        col_list = ", ".join([f'"{c}"' for c in cols])
+        placeholders = ", ".join(["%s"] * len(cols))
+        update_set = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in cols])
+        
+        sql = (
+            f'INSERT INTO public.user_profiles (user_id, {col_list}) '
+            f"VALUES (%s, {placeholders}) "
+            f"ON CONFLICT (user_id) DO UPDATE SET {update_set}, "
+            f"updated_at = now() "
+            f"RETURNING *"
+        )
+        params = [str(user_id)] + values
+
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+            conn.close()
+            out = dict(row) if row else {}
+            for k, v in list(out.items()):
+                if hasattr(v, "isoformat") and v is not None:
+                    out[k] = v.isoformat()
+            logger.info(f"[PROFILE] Upserted profile for user_id={user_id}")
+            return {"ok": True, "data": out}
+        except Exception as e:
+            logger.error(f"Supabase upsert_user_profile error: {e}")
+            return {"ok": False, "error": "Failed to save user profile."}

@@ -793,6 +793,17 @@ class IntentService:
         Main handler: keyword-based branches for reminder/invoice/overdue;
         then LLM query plan → validate → resolve time → execute → format.
         """
+        # Check if user is new and needs onboarding
+        profile = self.supabase.get_user_profile(user_id)
+        if not profile.get("ok"):
+            logger.error(f"Failed to check user profile for {user_id}: {profile.get('error')}")
+        elif not profile.get("data"):
+            # New user - start onboarding
+            return self._start_onboarding(user_id, message)
+        elif not profile.get("data", {}).get("onboarded_at"):
+            # User exists but not onboarded - continue onboarding
+            return self._continue_onboarding(user_id, message, profile["data"])
+
         from services.business_logic_service import BusinessLogicService
         logic = BusinessLogicService()
         conversation_history = self.memory.get_conversation_history(user_id)
@@ -824,23 +835,8 @@ class IntentService:
             if any(t in msg_lower for t in self._VIEW_BANK_TRIGGERS):
                 return self._show_bank_details(user_id, message)
 
-            # 0c. Small talk — respond directly, skip all data paths
-            small_talk_response = self._detect_small_talk(message)
-            if small_talk_response:
-                self._store_conversation(user_id, message, small_talk_response)
-                return {
-                    "operation": "small_talk",
-                    "response": small_talk_response,
-                    "trigger_invoice": False,
-                    "invoice_data": {},
-                }
-
-            # 1. Payment reminder (keyword-based)
+            # 0c. Payment reminder queries
             reminder_keywords = [
-                "payment reminder",
-                "payment reminders",
-                "send reminder",
-                "send reminders",
                 "remind clients",
                 "approaching due",
                 "upcoming due",
@@ -1172,6 +1168,148 @@ class IntentService:
             "trigger_invoice": trigger_invoice,
             "invoice_data": invoice_data
         }
+
+    def _start_onboarding(self, user_id: str, message: str) -> Dict:
+        """Start onboarding for a new user."""
+        # Determine platform from user_id format
+        platform = "telegram" if user_id.isdigit() else "whatsapp"
+        
+        # Create initial profile
+        self.supabase.upsert_user_profile(user_id, platform, {"platform": platform})
+        
+        response = self._get_welcome_message(platform)
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _continue_onboarding(self, user_id: str, message: str, profile: Dict) -> Dict:
+        """Continue onboarding based on what info we already have."""
+        platform = profile.get("platform", "telegram")
+        
+        # Check what step we're on
+        if not profile.get("name"):
+            # Step 1: Get name
+            name = message.strip()
+            if name.lower() in ("skip", "no", "n/a"):
+                name = f"User {user_id}"
+            
+            self.supabase.upsert_user_profile(user_id, platform, {"name": name})
+            
+            response = (
+                f"Nice to meet you, {name}! 🎉\n\n"
+                "What's your company or business name?\n"
+                "(Type 'skip' to use your name)"
+            )
+            self._store_conversation(user_id, message, response)
+            return {"operation": "onboarding_name", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        
+        elif not profile.get("company_name"):
+            # Step 2: Get company name
+            company = message.strip()
+            if company.lower() in ("skip", "no", "n/a"):
+                company = profile.get("name", f"User {user_id}")
+            
+            self.supabase.upsert_user_profile(user_id, platform, {"company_name": company})
+            
+            response = (
+                f"Great! Now let's talk about your existing data.\n\n"
+                "How would you like to add your jobs?\n\n"
+                "1️⃣ Upload Excel file (.xlsx)\n"
+                "2️⃣ Paste CSV data\n"
+                "3️⃣ Manual entry (I'll guide you)\n"
+                "4️⃣ Start fresh (no existing data)\n\n"
+                "Just reply with 1, 2, 3, or 4"
+            )
+            self._store_conversation(user_id, message, response)
+            return {"operation": "onboarding_company", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        
+        else:
+            # Step 3: Handle data import choice
+            choice = message.strip().lower()
+            if choice in ("1", "upload", "excel"):
+                return self._handle_excel_import(user_id, message)
+            elif choice in ("2", "csv", "paste"):
+                return self._handle_csv_import(user_id, message)
+            elif choice in ("3", "manual"):
+                return self._handle_manual_entry(user_id, message)
+            elif choice in ("4", "fresh", "skip"):
+                return self._complete_onboarding(user_id, message)
+            else:
+                response = "Please choose 1, 2, 3, or 4. What's your preference?"
+                self._store_conversation(user_id, message, response)
+                return {"operation": "onboarding_import_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _get_welcome_message(self, platform: str) -> str:
+        """Get platform-specific welcome message."""
+        if platform == "telegram":
+            return (
+                "👋 Welcome! I'm your personal invoice assistant.\n\n"
+                "I help you:\n"
+                "• Track jobs and payments\n"
+                "• Generate professional invoices\n"
+                "• Send payment reminders\n\n"
+                "Let's get started! What's your name?"
+            )
+        else:  # WhatsApp
+            return (
+                "Welcome to Ops Bot! 🤖\n\n"
+                "I help manage your invoices and payments.\n"
+                "What's your business name to get started?"
+            )
+
+    def _handle_excel_import(self, user_id: str, message: str) -> Dict:
+        """Handle Excel file import choice."""
+        response = (
+            "📎 To import from Excel:\n\n"
+            "1. Download the template from: [Your template URL]\n"
+            "2. Fill it with your job data\n"
+            "3. Send the file here\n\n"
+            "Or reply 'back' to choose another option."
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_excel", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_csv_import(self, user_id: str, message: str) -> Dict:
+        """Handle CSV import choice."""
+        response = (
+            "📋 Paste your CSV data in this format:\n\n"
+            "Client Name,Job Description,Date,Fees,Email\n"
+            "Garnier,Short animation,2026-02-20,2000,email@example.com\n\n"
+            "Send your data or reply 'back' to choose another option."
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_csv", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_manual_entry(self, user_id: str, message: str) -> Dict:
+        """Handle manual entry choice."""
+        response = (
+            "✏️ I'll help you add jobs manually!\n\n"
+            "Let's add your first job. What's the client name?\n\n"
+            "(Type 'cancel' anytime to stop)"
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_manual", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _complete_onboarding(self, user_id: str, message: str) -> Dict:
+        """Complete the onboarding process."""
+        # Mark as onboarded
+        self.supabase.upsert_user_profile(user_id, "", {"onboarded_at": "now()"})  # Will be handled in upsert method
+        
+        response = (
+            "✅ You're all set! Here's how to use me:\n\n"
+            "📊 View data:\n"
+            "• 'How many jobs for Client X?'\n"
+            "• 'Total fees this month'\n"
+            "• 'Last payment date'\n\n"
+            "📄 Generate invoices:\n"
+            "• 'Send invoice to Client for March'\n"
+            "• 'Generate invoice for last job'\n\n"
+            "💳 Manage bank details:\n"
+            "• 'Update bank details'\n"
+            "• 'My bank details'\n\n"
+            "Try: 'Show my jobs from last week'"
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     @staticmethod
     def get_help_text() -> str:

@@ -70,6 +70,23 @@ create table if not exists public.user_config (
 comment on table public.user_config is 'Per-user configuration: bank details for invoice generation';
 alter table public.user_config disable row level security;
 
+-- ============================================================
+-- User profiles table (onboarding and preferences)
+-- ============================================================
+create table if not exists public.user_profiles (
+  user_id text primary key,
+  platform text not null,  -- 'telegram' or 'whatsapp'
+  name text,
+  company_name text,
+  onboarded_at timestamptz,
+  preferences jsonb default '{}',
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+comment on table public.user_profiles is 'User profiles and onboarding status';
+alter table public.user_profiles disable row level security;
+
 -- If SELECT returns 0 rows even though data exists, RLS is likely blocking the direct DB connection.
 -- Run ONE of the following in Supabase SQL Editor:
 
