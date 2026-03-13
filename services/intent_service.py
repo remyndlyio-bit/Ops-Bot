@@ -38,22 +38,18 @@ class IntentService:
         "fees",
     ]
 
-    # Ordered fields for the "update bank details" conversational form.
-    _FORM_BANK_FIELDS: List[str] = [
-        "bank_account_name",
-        "bank_name",
-        "bank_account_number",
-        "bank_ifsc",
-        "upi_id",
+    # Trigger phrases for bank detail commands
+    _UPDATE_BANK_TRIGGERS = [
+        "update bank details", "update bank detail", "change bank details",
+        "set bank details", "edit bank details", "add bank details",
+        "update my bank", "change my bank", "set my bank",
+        "save bank details", "new bank details",
     ]
-
-    _BANK_FIELD_PROMPTS: Dict[str, str] = {
-        "bank_account_name": "Account Holder Name",
-        "bank_name": "Bank Name (e.g. HDFC, SBI, ICICI)",
-        "bank_account_number": "Account Number",
-        "bank_ifsc": "IFSC Code",
-        "upi_id": "UPI ID (or type 'skip' to skip)",
-    }
+    _VIEW_BANK_TRIGGERS = [
+        "my bank details", "show bank details", "view bank details",
+        "what are my bank details", "bank details", "show my bank",
+        "get bank details", "see bank details", "check bank details",
+    ]
 
     # Small-talk trigger words / phrases (case-insensitive, matched as whole tokens)
     _SMALL_TALK_TRIGGERS = {
@@ -557,45 +553,8 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "form_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Detect form type: bank detail form vs job form
-        is_bank_form = all(f in self._FORM_BANK_FIELDS for f in fields)
-        current_field = fields[step]
-
-        # For bank forms: accept raw input (skip AI validation)
-        if is_bank_form:
-            value = message.strip()
-            # Allow 'skip' for optional upi_id field
-            if current_field == "upi_id" and value.lower() in ("skip", "none", "na", "n/a", "-"):
-                value = ""
-            self.memory.set_form_value(user_id, current_field, value)
-            self.memory.advance_form_step(user_id)
-
-            next_step = step + 1
-            if next_step < len(fields):
-                next_field = fields[next_step]
-                prompt = self._BANK_FIELD_PROMPTS.get(next_field, next_field)
-                response = f"Got it! Now, what's the {prompt}?"
-                self._store_conversation(user_id, message, response)
-                return {"operation": "form_in_progress", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-            # All bank fields collected — upsert to user_config
-            values = self.memory.complete_form(user_id)
-            if values:
-                # Remove empty/skipped values
-                values = {k: v for k, v in values.items() if v}
-                result = self.supabase.upsert_user_config(user_id, values)
-                if result.get("ok"):
-                    response = "Your bank details have been saved successfully! Use @mybankdetails to view them."
-                else:
-                    response = f"I collected the details but couldn't save them: {result.get('error', 'Unknown error')}. Please try again."
-            else:
-                response = "Something went wrong completing the form."
-            self._store_conversation(user_id, message, response)
-            return {"operation": "bank_config_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-        # --- Job entry form path (existing logic) ---
-
         # Validate and store the current answer using AI + COLUMN_SCHEMA (if available)
+        current_field = fields[step]
         schema_entry = self.column_schema.get(current_field) if isinstance(self.column_schema, dict) else None
         try:
             validation = self.gemini.validate_field_value(
@@ -663,18 +622,94 @@ class IntentService:
         self._store_conversation(user_id, message, response)
         return {"operation": "form_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-    def _start_bank_details_form(self, user_id: str, message: str) -> Dict:
-        """Start the 'update bank details' form by asking for the first field."""
-        fields = list(self._FORM_BANK_FIELDS)
-        self.memory.start_form(user_id, fields)
-        first_prompt = self._BANK_FIELD_PROMPTS.get(fields[0], fields[0])
+    def _prompt_bank_details_format(self, user_id: str, message: str) -> Dict:
+        """Ask the user to send all bank details in a single structured message."""
+        self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
         response = (
-            "Let's update your bank details! I'll ask you one field at a time.\n\n"
-            f"First, what's the {first_prompt}?\n\n"
-            "(Type 'cancel' anytime to stop.)"
+            "Sure! Please send your bank details in this format:\n\n"
+            "Account Name: Darshit Mody\n"
+            "Bank Name: HDFC Bank\n"
+            "Account Number: 1234567890\n"
+            "IFSC: HDFC0001234\n"
+            "UPI: darshit@upi\n\n"
+            "UPI is optional — skip it if you don't have one.\n"
+            "Type 'cancel' to skip."
         )
         self._store_conversation(user_id, message, response)
-        return {"operation": "bank_form_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        return {"operation": "bank_details_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_bank_details_response(self, user_id: str, message: str) -> Dict:
+        """Parse a single structured message containing bank details and upsert."""
+        # Clear the awaiting flag first
+        self.memory.update_user_memory(user_id, {"awaiting_bank_details": False})
+
+        if message.strip().lower() in ("cancel", "stop", "nevermind", "skip"):
+            response = "No problem, bank details update cancelled."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "bank_details_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        parsed = self._parse_bank_details_message(message)
+        if not parsed:
+            response = (
+                "I couldn't find the bank details in your message. "
+                "Please send them in this format:\n\n"
+                "Account Name: Your Name\n"
+                "Bank Name: HDFC Bank\n"
+                "Account Number: 1234567890\n"
+                "IFSC: HDFC0001234\n"
+                "UPI: you@upi\n\n"
+                "Or type 'cancel' to skip."
+            )
+            # Re-enable the awaiting flag so user can try again
+            self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
+            self._store_conversation(user_id, message, response)
+            return {"operation": "bank_details_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        result = self.supabase.upsert_user_config(user_id, parsed)
+        if result.get("ok"):
+            response = "Your bank details have been saved successfully! Say 'my bank details' to view them."
+        else:
+            response = f"I couldn't save your bank details: {result.get('error', 'Unknown error')}. Please try again."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "bank_config_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    @staticmethod
+    def _parse_bank_details_message(message: str) -> Optional[Dict[str, str]]:
+        """
+        Parse a structured message like:
+          Account Name: Darshit Mody
+          Bank Name: HDFC Bank
+          Account Number: 1234567890
+          IFSC: HDFC0001234
+          UPI: darshit@upi
+        Returns dict of bank fields or None if nothing was parseable.
+        """
+        import re
+        text = message.strip()
+        result = {}
+
+        # Map of possible labels → db field name
+        label_map = {
+            "bank_account_name": [r"account\s*(?:holder\s*)?name", r"holder\s*name", r"name\s*on\s*account"],
+            "bank_name": [r"bank\s*name", r"bank"],
+            "bank_account_number": [r"account\s*(?:no|number|num|#)", r"a/?c\s*(?:no|number|num|#)?"],
+            "bank_ifsc": [r"ifsc\s*(?:code)?"],
+            "upi_id": [r"upi\s*(?:id)?"],
+        }
+
+        for field, patterns in label_map.items():
+            for pat in patterns:
+                match = re.search(rf"(?:^|\n)\s*{pat}\s*[:=\-]\s*(.+)", text, re.IGNORECASE)
+                if match:
+                    val = match.group(1).strip().rstrip(",;")
+                    if val.lower() not in ("", "none", "na", "n/a", "-", "skip"):
+                        result[field] = val
+                    break
+
+        # Need at least account name + account number to be useful
+        if not result.get("bank_account_name") and not result.get("bank_account_number"):
+            return None
+        return result if result else None
 
     def _show_bank_details(self, user_id: str, message: str) -> Dict:
         """Show stored bank details for the user with masked account number."""
@@ -682,7 +717,7 @@ class IntentService:
         if not result.get("ok"):
             response = f"I couldn't retrieve your bank details: {result.get('error', 'Unknown error')}."
         elif not result.get("data"):
-            response = "You haven't set up bank details yet. Use @updatebankdetails to add them."
+            response = "You haven't set up bank details yet. Say 'update bank details' to add them."
         else:
             bd = result["data"]
             acct = bd.get("bank_account_number") or ""
@@ -694,7 +729,7 @@ class IntentService:
                 f"Account Number: {masked_acct}",
                 f"IFSC Code: {bd.get('bank_ifsc') or 'Not set'}",
                 f"UPI ID: {bd.get('upi_id') or 'Not set'}",
-                "\nUse @updatebankdetails to change these.",
+                "\nSay 'update bank details' to change these.",
             ]
             response = "\n".join(lines)
         self._store_conversation(user_id, message, response)
@@ -713,6 +748,7 @@ class IntentService:
             "remind", "overdue", "due", "total", "billing", "record",
             "add", "show", "get", "send", "fetch", "how much", "how many",
             "query", "list", "find", "search", "last", "latest",
+            "bank", "update",
         }
 
         is_exact = msg in self._SMALL_TALK_TRIGGERS
@@ -774,13 +810,18 @@ class IntentService:
             if any(t in message.lower() for t in add_job_triggers):
                 return self._start_add_job_form(user_id, message)
 
-            # 0b2. @updatebankdetails — start bank details form
-            msg_lower = message.strip().lower()
-            if msg_lower in ("@updatebankdetails", "update bank details", "set bank details", "change bank details"):
-                return self._start_bank_details_form(user_id, message)
+            # 0b2. Check if user is responding with bank details (awaiting state)
+            user_mem = self.memory.get_user_memory(user_id)
+            if user_mem.get("awaiting_bank_details"):
+                return self._handle_bank_details_response(user_id, message)
 
-            # 0b3. @mybankdetails — show stored bank details (masked)
-            if msg_lower in ("@mybankdetails", "my bank details", "show bank details", "view bank details"):
+            # 0b3. "update bank details" — ask user for details in a specific format
+            msg_lower = message.strip().lower()
+            if any(t in msg_lower for t in self._UPDATE_BANK_TRIGGERS):
+                return self._prompt_bank_details_format(user_id, message)
+
+            # 0b4. "my bank details" / "show bank details" — show stored (masked)
+            if any(t in msg_lower for t in self._VIEW_BANK_TRIGGERS):
                 return self._show_bank_details(user_id, message)
 
             # 0c. Small talk — respond directly, skip all data paths
@@ -1095,7 +1136,7 @@ class IntentService:
             "I'm your conversational assistant! You can naturally ask me to:\n"
             "- 'Add a lead for John Doe'\n"
             "- 'Get me Garnier invoice for April'\n"
-            "- @updatebankdetails — set or update your bank details\n"
-            "- @mybankdetails — view your saved bank details\n"
+            "- 'Update bank details' — set or update your bank details\n"
+            "- 'My bank details' — view your saved bank details\n"
             "How can I help you today?"
         )
