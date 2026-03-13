@@ -4,6 +4,7 @@ from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS, _COL
 from utils.date_utils import month_name_to_number, number_to_month_name
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
+from services.query_planner import execute_query_plan
 from services.response_formatter import (
     format_response,
     ASSISTANT_MODE,
@@ -1457,14 +1458,34 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # Generate SQL from natural language
-            sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history, user_id=user_id)
-            if sql_result.get("_error"):
-                response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
+            # Generate SQL via query planner pipeline (Classify → Plan → Resolve → Validate → SQL)
+            conv_ctx = user_mem.get("uscf_context") or {}
+            conv_ctx["last_saved_job"] = user_mem.get("last_saved_job")
+            plan_result = execute_query_plan(
+                message, self.gemini, self.supabase,
+                conversation_history, user_id=user_id,
+                conversation_context=conv_ctx,
+            )
+
+            # Handle clarification from planner
+            if plan_result.get("clarification"):
+                response = plan_result["clarification"]
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            sql = sql_result.get("sql")
+            sql = plan_result.get("sql")
+            planner_failed = plan_result.get("_error") or not sql
+
+            # Fallback to direct SQL generation if planner fails
+            if planner_failed:
+                logger.info(f"[PIPELINE] Planner failed ({plan_result.get('_error')}), falling back to direct SQL generation")
+                sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history, user_id=user_id)
+                if sql_result.get("_error"):
+                    response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                sql = sql_result.get("sql")
+
             valid, sanitized_sql, err = validate_sql(sql)
             if not valid:
                 response = query_invalid_phrase()
