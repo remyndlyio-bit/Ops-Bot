@@ -100,25 +100,36 @@ def send_invoice_email(
 
     if not poc_email:
         logger.warning("Invoice generated but client email (poc_email) is missing.")
+        # Store state so user can provide POC email
+        try:
+            user_id_str = str(chat_id) if chat_id else None
+            if user_id_str and hasattr(intent_service, 'memory'):
+                intent_service.memory.update_user_memory(user_id_str, {
+                    "awaiting_poc_email": True,
+                    "poc_email_client": client_name,
+                    "poc_email_pdf_path": file_path,
+                    "poc_email_month": month,
+                    "poc_email_year": year,
+                })
+        except Exception as mem_err:
+            logger.warning(f"Failed to store POC email state: {mem_err}")
+
+        prompt_msg = (
+            f"Invoice generated but I don't have a contact email for {client_name}.\n\n"
+            f"Please provide the client's email so I can send it:\n"
+            f"Example: client@agency.com"
+        )
         if platform == "telegram" and chat_id:
-            # Best-effort notification; ignore failures here.
             try:
                 import asyncio as _asyncio
-
                 loop = _asyncio.get_event_loop()
                 if loop.is_running():
                     loop.create_task(
-                        telegram_service.send_text_message(
-                            chat_id,
-                            "Invoice generated but client email is missing.",
-                        )
+                        telegram_service.send_text_message(chat_id, prompt_msg)
                     )
                 else:
                     loop.run_until_complete(
-                        telegram_service.send_text_message(
-                            chat_id,
-                            "Invoice generated but client email is missing.",
-                        )
+                        telegram_service.send_text_message(chat_id, prompt_msg)
                     )
             except Exception as notify_err:
                 logger.warning(f"Failed to notify Telegram about missing email: {notify_err}")

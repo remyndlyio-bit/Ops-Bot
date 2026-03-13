@@ -179,9 +179,9 @@ class SupabaseService:
 
     def execute_sql(self, sql: str) -> Dict[str, Any]:
         """
-        Execute validated SQL (SELECT or INSERT) via direct Postgres connection.
+        Execute validated SQL (SELECT, INSERT, or UPDATE) via direct Postgres connection.
         SELECT: returns {"ok": True, "rows": [...], "operation": "select"}.
-        INSERT: returns {"ok": True, "rows": [...]} if RETURNING used, else {"ok": True, "rowcount": 1, "operation": "insert"}.
+        INSERT/UPDATE: returns {"ok": True, "rows": [...]} if RETURNING used, else {"ok": True, "rowcount": N, "operation": "insert"|"update"}.
         On error: {"ok": False, "error": "..."}.
         """
         if not self.db_url:
@@ -196,8 +196,8 @@ class SupabaseService:
 
         sql = sql.strip().rstrip(";")
         upper = sql.upper()
-        if not upper.startswith("SELECT") and not upper.startswith("INSERT"):
-            return {"ok": False, "error": "Only SELECT and INSERT are allowed."}
+        if not upper.startswith("SELECT") and not upper.startswith("INSERT") and not upper.startswith("UPDATE"):
+            return {"ok": False, "error": "Only SELECT, INSERT, and UPDATE are allowed."}
 
         try:
             conn = psycopg2.connect(self.db_url)
@@ -229,7 +229,8 @@ class SupabaseService:
                             out.append(d)
                         rows = out
                     conn.close()
-                    return {"ok": True, "rows": rows, "rowcount": rowcount, "operation": "insert"}
+                    op = "update" if upper.startswith("UPDATE") else "insert"
+                    return {"ok": True, "rows": rows, "rowcount": rowcount, "operation": op}
         except Exception as e:
             logger.error(f"Supabase SQL execution error: {e}")
             err_msg = str(e)
@@ -403,6 +404,31 @@ class SupabaseService:
             return {"ok": True}
         except Exception as e:
             logger.error(f"Supabase update_job_entry_field error: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def update_poc_email_for_client(self, user_id: str, client_name: str, poc_email: str) -> Dict[str, Any]:
+        """
+        Update poc_email for all job_entries matching a client_name (ILIKE) for a user.
+        Returns {"ok": True, "updated": N} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    'UPDATE public.job_entries SET poc_email = %s '
+                    'WHERE user_id = %s AND client_name ILIKE %s AND (poc_email IS NULL OR TRIM(poc_email) = %s)',
+                    (poc_email, str(user_id), f'%{client_name}%', '')
+                )
+                updated = cur.rowcount
+            conn.close()
+            logger.info(f"[POC] Updated poc_email for {updated} rows (client={client_name}, user={user_id})")
+            return {"ok": True, "updated": updated}
+        except Exception as e:
+            logger.error(f"Supabase update_poc_email_for_client error: {e}")
             return {"ok": False, "error": str(e)}
 
     def fetch_reminder_targets(

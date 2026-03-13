@@ -32,7 +32,7 @@ def build_sql_prompt(
             lines.append(f"{role}: {msg.get('content', '')}")
         context_block = "Recent conversation:\n" + "\n".join(lines) + "\n\n"
 
-    return f"""You are a SQL generator for a single Postgres table. Output ONLY a single SELECT or INSERT statement. No explanation, no markdown.
+    return f"""You are a SQL generator for a single Postgres table. Output ONLY a single SELECT, INSERT, or UPDATE statement. No explanation, no markdown.
 
 TODAY'S DATE: {today}
 
@@ -47,6 +47,7 @@ MULTI-TENANT RULE (MANDATORY):
 - The current user_id is '{user_id or 'UNKNOWN'}'.
 - Every SELECT MUST include WHERE user_id = '{user_id or 'UNKNOWN'}' (combine with AND if other conditions exist).
 - Every INSERT MUST include user_id = '{user_id or 'UNKNOWN'}' as a column/value.
+- Every UPDATE MUST include WHERE user_id = '{user_id or 'UNKNOWN'}' (combine with AND if other conditions exist).
 - NEVER omit user_id from any query.
 
 RULES FOR SELECT:
@@ -64,7 +65,14 @@ RULES FOR INSERT:
 9. Quote text values with single quotes; escape single quotes by doubling. Dates as 'YYYY-MM-DD'. Numbers without quotes.
 10. Prefer RETURNING * at the end of INSERT so the new row is returned.
 
-11. Output ONLY the SQL, one statement, no semicolon at the end.
+RULES FOR UPDATE:
+11. Use when the user wants to UPDATE, SET, CHANGE, ADD TO, or MODIFY an existing field (e.g. "add email X as the contact", "update fees to 30k", "set poc_email to abc@xyz.com", "mark as paid").
+12. UPDATE public.job_entries SET col = value WHERE user_id = '{user_id or 'UNKNOWN'}' AND <conditions>. Use conversation context to identify WHICH row(s) to update (e.g. the client/brand discussed recently).
+13. "contact", "email", "client email" → poc_email column. "contact name" → poc_name column.
+14. Always include RETURNING * so the updated row is returned.
+15. Be precise with WHERE conditions — use client_name, job_date, or id from conversation context to target the correct row(s). Never update all rows.
+
+16. Output ONLY the SQL, one statement, no semicolon at the end.
 
 {context_block}User: {message}
 
@@ -104,8 +112,8 @@ def generate_sql(
                     lines = lines[:-1]
             sql = "\n".join(lines)
         sql = sql.rstrip(";").strip()
-        if not sql.upper().startswith("SELECT") and not sql.upper().startswith("INSERT"):
-            return {"sql": None, "_error": "AI did not return a SELECT or INSERT statement."}
+        if not sql.upper().startswith("SELECT") and not sql.upper().startswith("INSERT") and not sql.upper().startswith("UPDATE"):
+            return {"sql": None, "_error": "AI did not return a valid SQL statement."}
         logger.info(f"Generated SQL: {sql[:200]}...")
         return {"sql": sql, "_error": None}
     except Exception as e:

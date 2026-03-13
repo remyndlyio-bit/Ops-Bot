@@ -790,6 +790,73 @@ class IntentService:
         # All required fields present - show confirmation
         return self._show_smart_capture_confirmation(user_id, extracted)
 
+    def _handle_poc_email_response(self, user_id: str, message: str) -> Dict:
+        """Handle user providing a client POC email after invoice generation."""
+        import re
+        user_mem = self.memory.get_user_memory(user_id)
+
+        # Clear awaiting state
+        self.memory.update_user_memory(user_id, {"awaiting_poc_email": False})
+
+        # Allow cancel
+        if message.strip().lower() in ("cancel", "skip", "no", "nevermind"):
+            response = "No problem, skipped. You can add the client email later."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "poc_email_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Validate email format
+        email = message.strip()
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+            # Not a valid email - re-prompt
+            self.memory.update_user_memory(user_id, {"awaiting_poc_email": True})
+            response = "That doesn't look like a valid email. Please send the client's email address (e.g. client@agency.com) or type 'skip'."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "poc_email_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Save POC email to job entries for this client
+        client_name = user_mem.get("poc_email_client", "")
+        result = self.supabase.update_poc_email_for_client(user_id, client_name, email)
+
+        if result.get("ok"):
+            updated = result.get("updated", 0)
+            pdf_path = user_mem.get("poc_email_pdf_path")
+            month = user_mem.get("poc_email_month", "")
+            year = user_mem.get("poc_email_year")
+
+            # Try to send the invoice email now
+            email_sent = False
+            if pdf_path:
+                try:
+                    from services.resend_email_service import ResendEmailService
+                    email_svc = ResendEmailService()
+                    ok = email_svc.send_invoice_email(
+                        to_email=email,
+                        client_name=client_name,
+                        month=month,
+                        year=year or 2026,
+                        pdf_path=pdf_path,
+                    )
+                    email_sent = ok
+                except Exception as e:
+                    logger.error(f"[POC] Failed to send invoice email after saving POC: {e}")
+
+            if email_sent:
+                response = f"Saved! Email {email} has been added for {client_name} and the invoice has been sent. ✅"
+            else:
+                response = f"Saved! Email {email} has been added for {client_name} ({updated} job{'s' if updated != 1 else ''} updated)."
+        else:
+            response = f"I couldn't save the email: {result.get('error', 'Unknown error')}. Please try again."
+
+        # Clean up memory
+        self.memory.update_user_memory(user_id, {
+            "poc_email_client": None,
+            "poc_email_pdf_path": None,
+            "poc_email_month": None,
+            "poc_email_year": None,
+        })
+        self._store_conversation(user_id, message, response)
+        return {"operation": "poc_email_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
     def _prompt_bank_details_format(self, user_id: str, message: str) -> Dict:
         """Ask the user to send all bank details in a single structured message."""
         self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
@@ -1029,6 +1096,10 @@ class IntentService:
             is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
             if is_add_job or is_plus:
                 return self._start_smart_capture(user_id, message)
+
+            # 0b1.5. Check if user is providing a client POC email
+            if user_mem.get("awaiting_poc_email"):
+                return self._handle_poc_email_response(user_id, message)
 
             # 0b2. Check if user is responding with bank details (awaiting state)
             if user_mem.get("awaiting_bank_details"):
@@ -1386,7 +1457,17 @@ class IntentService:
             rows = exec_result.get("rows", [])
             op = exec_result.get("operation", "select")
 
-            if op == "insert":
+            if op == "update":
+                rowcount = exec_result.get("rowcount", 0)
+                if rows:
+                    self._update_sql_context(user_id, rows)
+                    payload = build_clean_payload(rows, "select")
+                    response = self.gemini.synthesize_response(payload, message)
+                    if not response or not response.strip():
+                        response = f"Done! Updated {rowcount} record{'s' if rowcount != 1 else ''}."
+                else:
+                    response = f"Done! Updated {rowcount} record{'s' if rowcount != 1 else ''}."
+            elif op == "insert":
                 if rows:
                     self._update_sql_context(user_id, rows)
                     response = format_response(ASSISTANT_MODE, insert_confirmation=True)
