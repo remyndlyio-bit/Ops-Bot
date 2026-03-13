@@ -1082,6 +1082,7 @@ class IntentService:
                             client_name = last_row.get("client_name", "Client")
                             job_date = last_row.get("job_date")
                             month = None
+                            year = None
                             if job_date:
                                 try:
                                     from datetime import datetime
@@ -1090,6 +1091,7 @@ class IntentService:
                                     else:
                                         job_dt = job_date
                                     month = job_dt.strftime("%B")
+                                    year = job_dt.year
                                 except:
                                     pass
                             
@@ -1097,7 +1099,7 @@ class IntentService:
                                 "client_name": client_name,
                                 "month": month or "Period",
                                 "bill_number": None,
-                                "year": job_date.year if job_date else None
+                                "year": year
                             }
                             response = f"Generating invoice for {client_name}..."
                             self._store_conversation(user_id, message, response)
