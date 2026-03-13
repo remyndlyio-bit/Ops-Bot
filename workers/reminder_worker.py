@@ -145,7 +145,7 @@ def _is_telegram_user(user_id: str) -> bool:
 
 def _build_reminder_text(reminders: list) -> str:
     """Build the numbered reminder list text (shared by both platforms)."""
-    lines = ["⚠️ *Payment Reminders Due Today*\n"]
+    lines = ["⚠️ Payment Reminders Due Today\n"]
     for idx, row in enumerate(reminders, start=1):
         level = row["_reminder_level"]
         label = REMINDER_LABELS.get(level, level.title())
@@ -153,8 +153,8 @@ def _build_reminder_text(reminders: list) -> str:
         bill = row.get("bill_no") or "N/A"
         amount = _format_amount(row.get("fees"))
         lines.append(
-            f"{idx}. *Client:* {client}\n"
-            f"   Invoice: #{bill}\n"
+            f"{idx}. Client: {client}\n"
+            f"   Invoice: {bill}\n"
             f"   Amount: {amount}\n"
             f"   Reminder: {label}\n"
         )

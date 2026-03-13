@@ -273,7 +273,16 @@ async def process_and_send_invoice(
             # 6. Then send confirmation
             whatsapp_service.send_text_message(to_number, confirmation_text)
 
-        elif platform == "telegram" and chat_id:
+        # Update invoice_date for all affected rows
+        row_ids = [r["id"] for r in data if r.get("id")]
+        if row_ids:
+            ids_str = ",".join(f"'{rid}'" for rid in row_ids)
+            supabase_service.execute_sql(
+                f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE WHERE id IN ({ids_str})"
+            )
+            logger.info(f"[INVOICE] Updated invoice_date for {len(row_ids)} row(s)")
+
+        if platform == "telegram" and chat_id:
             # 5. Send PDF first
             await telegram_service.send_document(
                 chat_id=chat_id,

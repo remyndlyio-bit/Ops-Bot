@@ -845,6 +845,16 @@ class IntentService:
 
             if email_sent:
                 response = f"Saved! Email {email} has been added for {client_name} and the invoice has been sent. ✅"
+                # Update invoice_date for matching rows
+                try:
+                    self.supabase.execute_sql(
+                        f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE "
+                        f"WHERE user_id = '{user_id}' AND client_name ILIKE '%{client_name}%' "
+                        f"AND invoice_date IS NULL"
+                    )
+                    logger.info(f"[INVOICE] Updated invoice_date for {client_name} after POC email save")
+                except Exception as e:
+                    logger.warning(f"[INVOICE] Failed to update invoice_date after POC save: {e}")
             else:
                 response = f"Saved! Email {email} has been added for {client_name} ({updated} job{'s' if updated != 1 else ''} updated)."
         else:
@@ -1455,6 +1465,14 @@ class IntentService:
                         )
                         if ok:
                             response = f"The invoice has been sent to {poc_email}."
+                            # Update invoice_date for all affected rows
+                            row_ids = [r["id"] for r in rows if r.get("id")]
+                            if row_ids:
+                                ids_str = ",".join(f"'{rid}'" for rid in row_ids)
+                                self.supabase.execute_sql(
+                                    f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE WHERE id IN ({ids_str})"
+                                )
+                                logger.info(f"[INVOICE] Updated invoice_date for {len(row_ids)} row(s)")
                         else:
                             response = "I couldn't send the invoice email. Please check the email configuration and try again."
                         self._store_conversation(user_id, message, response)

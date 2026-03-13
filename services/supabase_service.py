@@ -123,6 +123,7 @@ else:
         "added_3rd_party_cut",
         "bill_no",
         "bill_sent",
+        "invoice_date",
         "paid",
         "payment_date",
         "poc_email",
@@ -145,7 +146,7 @@ Table: public.job_entries
 - client_billing_details (text): billing instructions or special terms for this client.
 - fees (integer): amount in rupees.
 - advance (numeric), added_3rd_party_cut (numeric).
-- bill_no (text), bill_sent (text), paid (text): billing status.
+- bill_no (text), bill_sent (text), invoice_date (date): when the invoice was sent to the client, paid (text): billing status.
 - payment_date (date): when payment was received.
 - poc_email (text), poc_name (text): contact.
 - first_reminder_sent, second_reminder_sent, third_reminder_sent (timestamptz).

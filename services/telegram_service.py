@@ -67,8 +67,7 @@ class TelegramService:
         payload = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": "Markdown",
-            "reply_markup": json.dumps({"inline_keyboard": buttons}),
+            "reply_markup": {"inline_keyboard": buttons},
         }
         async with httpx.AsyncClient() as client:
             try:
@@ -116,8 +115,7 @@ class TelegramService:
         payload = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": "Markdown",
-            "reply_markup": json.dumps({"inline_keyboard": buttons}),
+            "reply_markup": {"inline_keyboard": buttons},
         }
         try:
             with httpx.Client(timeout=15.0) as client:
