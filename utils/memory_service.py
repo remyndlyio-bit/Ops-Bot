@@ -76,16 +76,21 @@ class MemoryService:
 
     # --- Form state for multi-step data entry (e.g. "add new job") ---
 
-    def start_form(self, user_id: str, fields: List[str]) -> None:
-        """Start a new form flow for the user. fields = list of column names to collect."""
+    def start_form(self, user_id: str, fields: List[str], form_override: Dict = None) -> None:
+        """Start a new form flow for the user. fields = list of column names to collect.
+        If form_override is provided, use it directly (for smart capture states)."""
         if user_id not in self.memory:
             self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads"}
-        self.memory[user_id]["form"] = {
-            "active": True,
-            "fields": fields,
-            "step": 0,
-            "values": {},
-        }
+        if form_override:
+            form_override["active"] = True
+            self.memory[user_id]["form"] = form_override
+        else:
+            self.memory[user_id]["form"] = {
+                "active": True,
+                "fields": fields,
+                "step": 0,
+                "values": {},
+            }
         self._save_memory()
 
     def get_form_state(self, user_id: str) -> Optional[Dict]:

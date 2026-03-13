@@ -23,20 +23,8 @@ class IntentService:
     # Cache AI-generated schema by column names so we don't call the AI on every message
     _schema_cache: Dict[tuple, str] = {}
 
-    # Ordered fields for the "add new job" conversational form.
-    _FORM_JOB_FIELDS: List[str] = [
-        "job_date",
-        "client_name",
-        "brand_name",
-        "job_description_details",
-        "job_notes",
-        "language",
-        "production_house",
-        "studio",
-        "qt",
-        "length",
-        "fees",
-    ]
+    # Required fields for smart capture job creation
+    _SMART_CAPTURE_REQUIRED = ["brand_name", "job_date", "job_description_details"]
 
     # Trigger phrases for bank detail commands
     _UPDATE_BANK_TRIGGERS = [
@@ -539,88 +527,240 @@ class IntentService:
         self.memory.update_user_memory(user_id, {"uscf_context": ctx})
 
     def _handle_form_step(self, user_id: str, message: str) -> Dict:
-        """Handle an active form: store value, advance, ask next or complete."""
+        """Handle smart capture confirmation, missing fields, or edit flow."""
         form = self.memory.get_form_state(user_id)
         if not form:
             return None
-        fields = form.get("fields", [])
-        step = form.get("step", 0)
 
-        # Cancel form if user says cancel/stop/nevermind
+        # Cancel if user says cancel/stop
         if message.strip().lower() in ("cancel", "stop", "nevermind", "abort", "exit"):
             self.memory.cancel_form(user_id)
-            response = "No problem, I've cancelled the form. Let me know if you need anything else."
+            response = "No problem, cancelled. Let me know if you need anything else."
             self._store_conversation(user_id, message, response)
             return {"operation": "form_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Validate and store the current answer using AI + COLUMN_SCHEMA (if available)
-        current_field = fields[step]
-        schema_entry = self.column_schema.get(current_field) if isinstance(self.column_schema, dict) else None
-        try:
-            validation = self.gemini.validate_field_value(
-                column_name=current_field,
-                user_input=message,
-                column_schema_entry=schema_entry,
+        form_type = form.get("form_type", "smart_capture")
+
+        # --- Smart Capture: awaiting confirmation ---
+        if form_type == "smart_capture_confirm":
+            return self._handle_smart_capture_confirm(user_id, message, form)
+
+        # --- Smart Capture: awaiting missing fields ---
+        if form_type == "smart_capture_missing":
+            return self._handle_smart_capture_missing(user_id, message, form)
+
+        # Fallback: cancel unknown form
+        self.memory.cancel_form(user_id)
+        return None
+
+    def _handle_smart_capture_confirm(self, user_id: str, message: str, form: Dict) -> Dict:
+        """Handle Yes/Edit response to smart capture confirmation."""
+        msg = message.strip().lower()
+        extracted = form.get("values", {})
+
+        if msg in ("yes", "y", "save", "confirm", "done", "ok", "okay", "sure"):
+            # Save to database
+            return self._save_smart_capture_job(user_id, extracted)
+
+        elif msg in ("edit", "change", "modify", "fix", "no"):
+            response = (
+                "No problem! Send the corrected job info in one message.\n\n"
+                "Example:\n"
+                "Bridgestone\n"
+                "10 Feb\n"
+                "Master film 30 sec\n"
+                "Client: The Good Take\n"
+                "Fees: 25k"
             )
-        except Exception as e:
-            logger.warning(f"Field validation fallback for {current_field}: {e}")
-            validation = {
-                "is_valid": True,
-                "normalized_value": message.strip(),
-                "error_message": None,
-                "clarification_question": None,
-            }
-
-        if not validation.get("is_valid", True):
-            # Stay on the same step; ask user to correct the value.
-            error_msg = validation.get("error_message") or "That doesn't look right for this field."
-            clarification = validation.get("clarification_question")
-            details = error_msg
-            if clarification:
-                details = f"{error_msg} {clarification}"
-            response = f"{details}\n\nWhat's the {current_field}?"
+            self.memory.cancel_form(user_id)
+            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
             self._store_conversation(user_id, message, response)
-            return {"operation": "form_in_progress", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            return {"operation": "smart_capture_edit", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        normalized_value = validation.get("normalized_value", message.strip())
-        self.memory.set_form_value(user_id, current_field, normalized_value)
-        self.memory.advance_form_step(user_id)
-
-        # Check if there's a next field
-        next_step = step + 1
-        if next_step < len(fields):
-            next_field = fields[next_step]
-            response = f"Got it! Now, what's the {next_field}?"
-            self._store_conversation(user_id, message, response)
-            return {"operation": "form_in_progress", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-        # All fields collected - save to Supabase job_entries
-        values = self.memory.complete_form(user_id)
-        if values:
-            values["user_id"] = user_id
-            insert_result = self.supabase.insert_job_entry(values)
-            if insert_result.get("ok"):
-                summary = ", ".join(f"{k}: {v}" for k, v in values.items())
-                response = f"Done! I've added the new job: {summary}"
-            else:
-                response = "I collected all the info but couldn't save it. Please try again later."
         else:
-            response = "Something went wrong completing the form."
-        self._store_conversation(user_id, message, response)
+            response = "Please reply 'Yes' to save or 'Edit' to make changes."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "smart_capture_confirm_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_smart_capture_missing(self, user_id: str, message: str, form: Dict) -> Dict:
+        """Handle response with missing required fields."""
+        extracted = form.get("values", {})
+        missing = form.get("missing_fields", [])
+
+        # Try to extract fields from the user's response
+        new_data = self.gemini.extract_job_fields(message)
+        if new_data:
+            for k, v in new_data.items():
+                if v is not None:
+                    extracted[k] = v
+
+        # Check if still missing required fields
+        still_missing = [f for f in missing if not extracted.get(f)]
+        if still_missing:
+            field_labels = {"brand_name": "Brand", "job_date": "Date", "job_description_details": "Job details"}
+            missing_str = ", ".join(field_labels.get(f, f) for f in still_missing)
+            response = f"I still need: {missing_str}. Please provide them."
+            # Update form with new values
+            form["values"] = extracted
+            form["missing_fields"] = still_missing
+            self.memory.start_form(user_id, [], form_override=form)
+            self._store_conversation(user_id, message, response)
+            return {"operation": "smart_capture_missing_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # All required fields present - show confirmation
+        return self._show_smart_capture_confirmation(user_id, extracted)
+
+    def _save_smart_capture_job(self, user_id: str, extracted: Dict) -> Dict:
+        """Save the extracted job to database."""
+        self.memory.cancel_form(user_id)
+
+        # Map extracted fields to job_entries columns
+        record = {"user_id": user_id}
+        field_map = {
+            "job_date": "job_date",
+            "brand_name": "client_name",  # brand_name maps to client_name column
+            "client_name": "production_house",  # client/agency maps to production_house
+            "job_description_details": "job_description_details",
+            "fees": "fees",
+            "notes": "notes",
+        }
+        for src, dst in field_map.items():
+            val = extracted.get(src)
+            if val is not None:
+                record[dst] = val
+
+        insert_result = self.supabase.insert_job_entry(record)
+        if insert_result.get("ok"):
+            brand = extracted.get("brand_name", "")
+            response = f"Job saved! ✅ {brand} has been added to your records."
+        else:
+            logger.error(f"[SMART_CAPTURE] Insert failed: {insert_result.get('error')}")
+            response = "I couldn't save the job. Please try again."
+        self._store_conversation(user_id, "", response)
         return {"operation": "form_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-    def _start_add_job_form(self, user_id: str, message: str) -> Dict:
-        """Start the 'add new job' form by asking for the first field."""
-        fields = list(self._FORM_JOB_FIELDS) if self._FORM_JOB_FIELDS else []
-        if not fields:
-            response = "I couldn't determine which columns to use for a new job."
+    def _show_smart_capture_confirmation(self, user_id: str, extracted: Dict) -> Dict:
+        """Show confirmation message and wait for Yes/Edit."""
+        lines = ["Got it 👍\n"]
+        field_labels = [
+            ("brand_name", "Brand"),
+            ("client_name", "Client"),
+            ("job_date", "Date"),
+            ("job_description_details", "Details"),
+            ("fees", "Fees"),
+            ("notes", "Notes"),
+        ]
+        for key, label in field_labels:
+            val = extracted.get(key)
+            if val is not None:
+                if key == "fees":
+                    val = f"₹{val:,}" if isinstance(val, (int, float)) else val
+                lines.append(f"{label}: {val}")
+
+        lines.append("\nSave this job? (Yes / Edit)")
+        response = "\n".join(lines)
+
+        # Store in form state for confirmation
+        form_data = {
+            "form_type": "smart_capture_confirm",
+            "values": extracted,
+            "fields": [],
+            "step": 0,
+        }
+        self.memory.start_form(user_id, [], form_override=form_data)
+        self._store_conversation(user_id, "", response)
+        return {"operation": "smart_capture_confirm", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _start_smart_capture(self, user_id: str, message: str) -> Dict:
+        """
+        AI Smart Capture: extract job fields from natural language.
+        If message only contains trigger words, prompt for details.
+        If message contains job data, extract and confirm.
+        """
+        # Strip trigger words to get the job content
+        content = message.strip()
+        trigger_prefixes = ["add job", "add a job", "add new job", "new job",
+                           "log a job", "log job", "record job", "record a job", "+"]
+        content_lower = content.lower()
+        for prefix in trigger_prefixes:
+            if content_lower.startswith(prefix):
+                content = content[len(prefix):].strip()
+                break
+
+        # If no content after trigger, prompt for details
+        if not content or len(content) < 3:
+            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
+            response = (
+                "Describe the job in one message.\n\n"
+                "Example:\n"
+                "Bridgestone\n"
+                "10 Feb\n"
+                "Master film 30 sec + 4 cutdowns\n"
+                "Client: The Good Take\n"
+                "Fees: 25k"
+            )
             self._store_conversation(user_id, message, response)
-            return {"operation": "form_error", "response": response, "trigger_invoice": False, "invoice_data": {}}
-        self.memory.start_form(user_id, fields)
-        first_field = fields[0]
-        response = f"Let's add a new job! I'll ask you for a few details.\n\nFirst, what's the {first_field}?\n\n(Type 'cancel' anytime to stop.)"
-        self._store_conversation(user_id, message, response)
-        return {"operation": "form_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Content available - extract fields
+        return self._extract_and_confirm(user_id, content)
+
+    def _extract_and_confirm(self, user_id: str, content: str) -> Dict:
+        """Extract fields from content and show confirmation or ask for missing."""
+        self.memory.update_user_memory(user_id, {"awaiting_job_input": False})
+        extracted = self.gemini.extract_job_fields(content)
+
+        if not extracted:
+            response = (
+                "I couldn't understand the job details. Please try again.\n\n"
+                "Example:\n"
+                "Bridgestone\n"
+                "10 Feb\n"
+                "Master film 30 sec\n"
+                "Fees: 25k"
+            )
+            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
+            self._store_conversation(user_id, content, response)
+            return {"operation": "smart_capture_failed", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Check required fields
+        required = ["brand_name", "job_date", "job_description_details"]
+        missing = [f for f in required if not extracted.get(f)]
+
+        if missing:
+            field_labels = {"brand_name": "Brand", "job_date": "Date", "job_description_details": "Job details"}
+            missing_str = ", ".join(field_labels.get(f, f) for f in missing)
+
+            # Show what we got so far + ask for missing
+            lines = ["I got some of the details:\n"]
+            field_display = [
+                ("brand_name", "Brand"), ("client_name", "Client"), ("job_date", "Date"),
+                ("job_description_details", "Details"), ("fees", "Fees"), ("notes", "Notes"),
+            ]
+            for key, label in field_display:
+                val = extracted.get(key)
+                if val is not None:
+                    if key == "fees":
+                        val = f"₹{val:,}" if isinstance(val, (int, float)) else val
+                    lines.append(f"{label}: {val}")
+
+            lines.append(f"\nI still need: {missing_str}")
+            lines.append("Please send the missing info.")
+            response = "\n".join(lines)
+
+            form_data = {
+                "form_type": "smart_capture_missing",
+                "values": extracted,
+                "missing_fields": missing,
+                "fields": [],
+                "step": 0,
+            }
+            self.memory.start_form(user_id, [], form_override=form_data)
+            self._store_conversation(user_id, content, response)
+            return {"operation": "smart_capture_missing", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # All required fields present - show confirmation
+        return self._show_smart_capture_confirmation(user_id, extracted)
 
     def _prompt_bank_details_format(self, user_id: str, message: str) -> Dict:
         """Ask the user to send all bank details in a single structured message."""
@@ -843,18 +983,26 @@ class IntentService:
         invoice_data = {}
 
         try:
-            # 0. Check for active form (multi-step data entry)
+            # 0. Check for active form (smart capture confirmation / missing fields)
             form_state = self.memory.get_form_state(user_id)
             if form_state:
                 return self._handle_form_step(user_id, message)
 
-            # 0b. Check for "add job" / "add new job" trigger to start form
-            add_job_triggers = ["add job", "add a job", "add new job", "new job", "log a job", "log job", "record job", "record a job"]
-            if any(t in message.lower() for t in add_job_triggers):
-                return self._start_add_job_form(user_id, message)
+            # 0a. Check if user is responding with job data (awaiting smart capture input)
+            user_mem = self.memory.get_user_memory(user_id)
+            if user_mem.get("awaiting_job_input"):
+                return self._extract_and_confirm(user_id, message)
+
+            # 0b. Check for "add job" / "+" trigger → AI Smart Capture
+            msg_stripped = message.strip()
+            add_job_triggers = ["add job", "add a job", "add new job", "new job",
+                               "log a job", "log job", "record job", "record a job"]
+            is_add_job = any(t in msg_stripped.lower() for t in add_job_triggers)
+            is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
+            if is_add_job or is_plus:
+                return self._start_smart_capture(user_id, message)
 
             # 0b2. Check if user is responding with bank details (awaiting state)
-            user_mem = self.memory.get_user_memory(user_id)
             if user_mem.get("awaiting_bank_details"):
                 return self._handle_bank_details_response(user_id, message)
 
@@ -1407,10 +1555,17 @@ class IntentService:
     @staticmethod
     def get_help_text() -> str:
         return (
-            "I'm your conversational assistant! You can naturally ask me to:\n"
-            "- 'Add a lead for John Doe'\n"
-            "- 'Get me Garnier invoice for April'\n"
-            "- 'Update bank details' — set or update your bank details\n"
-            "- 'My bank details' — view your saved bank details\n"
+            "I'm your conversational assistant! Here's what I can do:\n\n"
+            "✏️ Add a job (one message!):\n"
+            "Add job\n"
+            "Bridgestone\n"
+            "10 Feb\n"
+            "Master film 30 sec + 4 cutdowns\n"
+            "Client: The Good Take\n"
+            "Fees: 25k\n\n"
+            "Or ultra-fast: + Bridgestone 10 Feb 25k master film\n\n"
+            "📄 Invoices: 'Send invoice to Garnier for April'\n"
+            "📊 Queries: 'Total fees this month' / 'Jobs for Client X'\n"
+            "💳 Bank: 'Update bank details' / 'My bank details'\n\n"
             "How can I help you today?"
         )
