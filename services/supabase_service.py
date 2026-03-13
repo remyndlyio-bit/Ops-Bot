@@ -660,21 +660,33 @@ class SupabaseService:
             # If it's already a string (from DB), keep it as is
 
         # Build dynamic upsert query
-        cols = list(profile.keys())
-        values = [profile[c] for c in cols]
+        # Remove user_id from profile dict if present to avoid duplication
+        profile_for_update = {k: v for k, v in profile.items() if k != 'user_id'}
+        cols = list(profile_for_update.keys())
+        values = [profile_for_update[c] for c in cols]
         
-        col_list = ", ".join([f'"{c}"' for c in cols])
-        placeholders = ", ".join(["%s"] * len(cols))
-        update_set = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in cols])
-        
-        sql = (
-            f'INSERT INTO public.user_profiles (user_id, {col_list}) '
-            f"VALUES (%s, {placeholders}) "
-            f"ON CONFLICT (user_id) DO UPDATE SET {update_set}, "
-            f"updated_at = now() "
-            f"RETURNING *"
-        )
-        params = [str(user_id)] + values
+        if cols:  # Only if there are columns to update
+            col_list = ", ".join([f'"{c}"' for c in cols])
+            placeholders = ", ".join(["%s"] * len(cols))
+            update_set = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in cols])
+            
+            sql = (
+                f'INSERT INTO public.user_profiles (user_id, {col_list}) '
+                f"VALUES (%s, {placeholders}) "
+                f"ON CONFLICT (user_id) DO UPDATE SET {update_set}, "
+                f"updated_at = now() "
+                f"RETURNING *"
+            )
+            params = [str(user_id)] + values
+        else:  # Just insert with user_id only
+            sql = (
+                'INSERT INTO public.user_profiles (user_id) '
+                "VALUES (%s) "
+                "ON CONFLICT (user_id) DO UPDATE SET "
+                "updated_at = now() "
+                "RETURNING *"
+            )
+            params = [str(user_id)]
 
         try:
             import psycopg2
