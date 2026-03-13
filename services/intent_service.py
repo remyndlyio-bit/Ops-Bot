@@ -1041,6 +1041,28 @@ class IntentService:
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+                    # Check if bank details exist before generating invoice
+                    bank_result = self.supabase.get_user_bank_details(user_id)
+                    bank_details = bank_result.get("data") if bank_result.get("ok") else None
+                    if not bank_details or not bank_details.get("account_number"):
+                        # No bank details - prompt user to add them
+                        self.memory.update_user_memory(user_id, {
+                            "pending_invoice": invoice_data
+                        })
+                        response = (
+                            f"I found the records for {display_client}, but you haven't added your bank details yet.\n\n"
+                            "Please send your bank details in this format:\n\n"
+                            "Account Name: Your Name\n"
+                            "Bank Name: HDFC Bank\n"
+                            "Account Number: 1234567890\n"
+                            "IFSC: HDFC0001234\n"
+                            "UPI: you@upi (optional)\n\n"
+                            "Once saved, I'll generate the invoice automatically."
+                        )
+                        self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
                     # Default path: generate PDF and send via WhatsApp/Telegram (existing behavior)
                     trigger_invoice = True
                     response = f"Confirmed. I've found the record for {display_client}. Generating the invoice now."
