@@ -90,7 +90,7 @@ def generate_sql(
     try:
         raw = gemini_service._call_api(prompt, generation_config={
             "temperature": 0,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": 800,
         })
         if not raw or not raw.strip():
             return {"sql": None, "_error": "Empty response from AI."}

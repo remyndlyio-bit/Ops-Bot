@@ -114,7 +114,7 @@ def get_query_plan(
             conversation_history=conversation_history,
             date_column=date_column,
         )
-        config = {"responseMimeType": "application/json", "temperature": 0, "maxOutputTokens": 1024}
+        config = {"responseMimeType": "application/json", "temperature": 0, "maxOutputTokens": 800}
         raw = gemini_service._call_api(prompt, generation_config=config)
         if not raw:
             return {"_error": "Empty response from LLM."}
