@@ -677,18 +677,26 @@ class IntentService:
         If message only contains trigger words, prompt for details.
         If message contains job data, extract and confirm.
         """
-        # Strip trigger words to get the job content
+        import re
+        # Strip all job-intent phrases to isolate actual job content
         content = message.strip()
-        trigger_prefixes = ["add job", "add a job", "add new job", "new job",
-                           "log a job", "log job", "record job", "record a job", "+"]
-        content_lower = content.lower()
-        for prefix in trigger_prefixes:
-            if content_lower.startswith(prefix):
-                content = content[len(prefix):].strip()
-                break
+        # Remove leading "+" 
+        if content.startswith("+"):
+            content = content[1:].strip()
+        # Remove common intent phrases (anywhere in the message)
+        intent_phrases = [
+            r"i\s+want\s+to\s+", r"i\'?d\s+like\s+to\s+", r"can\s+you\s+",
+            r"please\s+", r"let\s*'?s\s+",
+            r"add\s+(?:a\s+)?(?:new\s+)?job\s*", r"new\s+job\s*",
+            r"log\s+(?:a\s+)?job\s*", r"record\s+(?:a\s+)?job\s*",
+            r"create\s+(?:a\s+)?(?:new\s+)?(?:job|entry)\s*",
+        ]
+        content_clean = content
+        for pat in intent_phrases:
+            content_clean = re.sub(pat, "", content_clean, flags=re.IGNORECASE).strip()
 
-        # If no content after trigger, prompt for details
-        if not content or len(content) < 3:
+        # If no meaningful content remains, prompt for details
+        if not content_clean or len(content_clean) < 3:
             self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
             response = (
                 "Describe the job in one message.\n\n"
@@ -703,12 +711,16 @@ class IntentService:
             return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         # Content available - extract fields
-        return self._extract_and_confirm(user_id, content)
+        return self._extract_and_confirm(user_id, content_clean)
 
     def _extract_and_confirm(self, user_id: str, content: str) -> Dict:
         """Extract fields from content and show confirmation or ask for missing."""
         self.memory.update_user_memory(user_id, {"awaiting_job_input": False})
         extracted = self.gemini.extract_job_fields(content)
+
+        # Treat all-null extraction as failure
+        if extracted and all(v is None for v in extracted.values()):
+            extracted = None
 
         if not extracted:
             response = (
