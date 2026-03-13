@@ -92,7 +92,7 @@ For DELETE:
 
 RULES:
 1. Use ONLY columns from the list above.
-2. For dates: compute from TODAY'S DATE. "last month" = first to last day of previous month. "last year" = {int(today[:4])-1}-01-01 to {int(today[:4])-1}-12-31.
+2. For dates: compute from TODAY'S DATE ({today}). "last month" = first to last day of previous month. "last year" = {int(today[:4])-1}-01-01 to {int(today[:4])-1}-12-31. EXAMPLE: if today is 2026-03-13, then "last year" = 2025-01-01 to 2025-12-31.
 3. Smart number parsing: "2k"=2000, "₹5000"=5000, "fifty"=50.
 4. Context resolution: If user says "update it", "change that", "make it 2000", use conversation/session context to infer the entity and filters.
 5. Implicit field detection: "mark as paid" → update status/paid column. "make it urgent" → update status.

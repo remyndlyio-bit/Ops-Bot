@@ -4,7 +4,7 @@
 create table if not exists public.job_entries (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz default now(),
-  user_id uuid not null references auth.users(id) on delete cascade,
+  user_id text not null,
 
   job_date date,
   client_name text,
@@ -38,24 +38,18 @@ create index if not exists idx_job_entries_user_id on public.job_entries(user_id
 comment on table public.job_entries is 'Job/invoice entries loaded from Excel template';
 
 -- ============================================================
--- MIGRATION: Run the following on an EXISTING database that
--- already has the job_entries table WITHOUT user_id.
+-- MIGRATION: If job_entries already exists with user_id as uuid,
+-- run this to convert it to text (supports Telegram/WhatsApp IDs):
 -- ============================================================
--- ALTER TABLE public.job_entries
---   ADD COLUMN user_id uuid;
---
--- ALTER TABLE public.job_entries
---   ADD CONSTRAINT fk_job_entries_user
---   FOREIGN KEY (user_id)
---   REFERENCES auth.users(id)
---   ON DELETE CASCADE;
---
--- CREATE INDEX idx_job_entries_user_id
---   ON public.job_entries(user_id);
---
--- -- Back-fill existing rows with a default user, then enforce NOT NULL:
--- -- UPDATE public.job_entries SET user_id = 'YOUR_DEFAULT_USER_UUID' WHERE user_id IS NULL;
--- -- ALTER TABLE public.job_entries ALTER COLUMN user_id SET NOT NULL;
+-- ALTER TABLE public.job_entries DROP CONSTRAINT IF EXISTS fk_job_entries_user;
+-- ALTER TABLE public.job_entries ALTER COLUMN user_id TYPE text USING user_id::text;
+-- ============================================================
+-- If job_entries exists WITHOUT user_id at all:
+-- ============================================================
+-- ALTER TABLE public.job_entries ADD COLUMN user_id text;
+-- CREATE INDEX IF NOT EXISTS idx_job_entries_user_id ON public.job_entries(user_id);
+-- UPDATE public.job_entries SET user_id = 'YOUR_DEFAULT_USER_ID' WHERE user_id IS NULL;
+-- ALTER TABLE public.job_entries ALTER COLUMN user_id SET NOT NULL;
 -- ============================================================
 
 -- ============================================================
@@ -63,7 +57,7 @@ comment on table public.job_entries is 'Job/invoice entries loaded from Excel te
 -- ============================================================
 create table if not exists public.user_config (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid unique not null references public.users(id) on delete cascade,
+  user_id text unique not null,
   bank_account_name text,
   bank_account_number text,
   bank_ifsc text,
