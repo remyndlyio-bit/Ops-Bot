@@ -1076,7 +1076,7 @@ class IntentService:
                     last_assistant = conv[-1].get("content", "").lower() if conv[-1].get("role") == "assistant" else ""
                     if "generate an invoice" in last_assistant or "would you like" in last_assistant:
                         # Generate invoice for the last job we found
-                        ctx = self._get_uscf_context(user_id)
+                        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
                         last_row = ctx.get("last_row_data") if ctx else None
                         if last_row:
                             client_name = last_row.get("client_name", "Client")
