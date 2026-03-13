@@ -44,37 +44,36 @@ SELECT
     poc_name,
     fees,
     bill_no,
-    bill_sent,
+    invoice_date,
     first_reminder_sent,
     second_reminder_sent,
     third_reminder_sent
 FROM public.job_entries
 WHERE
     (paid IS NULL OR TRIM(paid) = '' OR LOWER(paid) IN ('false', 'no', 'unpaid'))
-    AND bill_sent IS NOT NULL AND TRIM(bill_sent) <> ''
-    AND bill_sent ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}'
+    AND invoice_date IS NOT NULL
     AND (
         -- First reminder: 15+ days, not yet sent
         (
             first_reminder_sent IS NULL
-            AND bill_sent::date <= CURRENT_DATE - INTERVAL '{first_days} days'
+            AND invoice_date <= CURRENT_DATE - INTERVAL '{first_days} days'
         )
         OR
         -- Second reminder: 30+ days, first sent, second not
         (
             first_reminder_sent IS NOT NULL
             AND second_reminder_sent IS NULL
-            AND bill_sent::date <= CURRENT_DATE - INTERVAL '{second_days} days'
+            AND invoice_date <= CURRENT_DATE - INTERVAL '{second_days} days'
         )
         OR
         -- Third reminder: 45+ days, second sent, third not
         (
             second_reminder_sent IS NOT NULL
             AND third_reminder_sent IS NULL
-            AND bill_sent::date <= CURRENT_DATE - INTERVAL '{third_days} days'
+            AND invoice_date <= CURRENT_DATE - INTERVAL '{third_days} days'
         )
     )
-ORDER BY user_id, bill_sent ASC
+ORDER BY user_id, invoice_date ASC
 """.format(
     first_days=FIRST_REMINDER_DAYS,
     second_days=SECOND_REMINDER_DAYS,
