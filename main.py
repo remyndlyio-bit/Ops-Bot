@@ -314,8 +314,11 @@ async def whatsapp_webhook(
     """Twilio WhatsApp Webhook"""
     logger.info(f"Received message from {From}: {Body}")
 
-    # Use the new Three-Stage architecture
-    result = intent_service.process_request(user_id=From, message=Body)
+    # Run blocking process_request in executor (same pattern as Telegram webhook)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: intent_service.process_request(user_id=From, message=Body)
+    )
     
     # Only send immediate response if it's not a suppressed retrieval response
     if result.get("response"):

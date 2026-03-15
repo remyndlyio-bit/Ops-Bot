@@ -1283,6 +1283,12 @@ class IntentService:
             if reminder_result:
                 return reminder_result
 
+            # 0a-. Small talk detection (greetings, thanks, etc.) — avoid expensive SQL path
+            small_talk_resp = self._detect_small_talk(message)
+            if small_talk_resp:
+                self._store_conversation(user_id, message, small_talk_resp)
+                return {"operation": "small_talk", "response": small_talk_resp, "trigger_invoice": False, "invoice_data": {}}
+
             # 0a. Check if user is responding with job data (awaiting smart capture input)
             user_mem = self.memory.get_user_memory(user_id)
             if user_mem.get("awaiting_job_input"):
@@ -1688,6 +1694,7 @@ class IntentService:
                 logger.info(f"[PIPELINE] Planner failed ({plan_result.get('_error')}), falling back to direct SQL generation")
                 sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history, user_id=user_id)
                 if sql_result.get("_error"):
+                    logger.warning(f"[PIPELINE] Fallback also failed for user {user_id}: {sql_result.get('_error')}")
                     response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
