@@ -1087,6 +1087,10 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+        # "all" / "send all" → send every pending reminder
+        if msg in ("all", "send all", "send all reminders"):
+            return self._send_all_pending_reminders(user_id, message, pending)
+
         # Check for a number reply like "1", "2", "send 1", "#1"
         num_match = re.search(r"(\d+)", msg)
         if not num_match:
@@ -1168,6 +1172,81 @@ class IntentService:
         if remaining:
             response += f"\n\n{len(remaining)} reminder(s) still pending. Reply with a number or 'skip'."
 
+        self._store_conversation(user_id, message, response)
+        return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _send_all_pending_reminders(self, user_id: str, message: str, pending: list) -> Dict:
+        """Send reminder emails for every item in the pending list (WhatsApp 'send all')."""
+        profile = self.supabase.get_user_profile(user_id)
+        sender_name = "Team"
+        if profile.get("ok") and profile.get("data"):
+            sender_name = profile["data"].get("name") or sender_name
+
+        flag_map = {
+            "first": "first_reminder_sent",
+            "second": "second_reminder_sent",
+            "third": "third_reminder_sent",
+        }
+        label_map = {"first": "First", "second": "Second", "third": "Final"}
+
+        sent = []
+        failed = []
+
+        for reminder in pending:
+            job_id = reminder.get("id")
+            level = reminder.get("_reminder_level", "first")
+            poc_email = reminder.get("poc_email")
+            bill_no = reminder.get("bill_no") or "N/A"
+            client_name = reminder.get("client_name") or "Client"
+            poc_name = reminder.get("poc_name") or client_name
+            fees = reminder.get("fees")
+
+            if not poc_email:
+                failed.append(f"{client_name} (no email)")
+                continue
+
+            try:
+                amount_str = f"₹{int(float(fees)):,}"
+            except (ValueError, TypeError):
+                amount_str = str(fees) if fees else "N/A"
+
+            subject_map = {
+                "first": f"First Payment Reminder – Invoice #{bill_no}",
+                "second": f"Second Payment Reminder – Invoice #{bill_no}",
+                "third": f"Final Payment Reminder – Invoice #{bill_no}",
+            }
+            subject = subject_map.get(level, f"Payment Reminder – Invoice #{bill_no}")
+
+            body = (
+                f"Hi {poc_name},\n\n"
+                f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
+                f"Amount Due: {amount_str}\n\n"
+                f"Please let us know if payment has already been processed.\n\n"
+                f"Best regards,\n{sender_name}\n"
+            )
+
+            ok = self.email.send_email(to_email=poc_email, subject=subject, body=body)
+            if ok:
+                sent.append(f"{client_name} → {poc_email}")
+                flag_col = flag_map.get(level)
+                if flag_col and job_id:
+                    self.supabase.execute_sql(
+                        f"UPDATE public.job_entries SET {flag_col} = NOW() WHERE id = '{job_id}'"
+                    )
+            else:
+                failed.append(f"{client_name} ({poc_email})")
+
+        # Clear all pending
+        clear_pending(user_id)
+
+        lines = [f"✅ Sent {len(sent)} reminder(s)."]
+        for s in sent:
+            lines.append(f"  • {s}")
+        if failed:
+            lines.append(f"\n❌ Failed for {len(failed)}:")
+            for f_item in failed:
+                lines.append(f"  • {f_item}")
+        response = "\n".join(lines)
         self._store_conversation(user_id, message, response)
         return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
 

@@ -174,6 +174,7 @@ def notify_user_telegram(user_id: str, reminders: list, telegram: TelegramServic
             "text": f"📧 Send Reminder #{idx}",
             "callback_data": f"remind:{job_id}:{level}",
         }])
+    buttons.append([{"text": "📧 Send All Reminders", "callback_data": "remind:send:all"}])
     buttons.append([{"text": "⏭ Skip All", "callback_data": "remind:skip:all"}])
 
     logger.info(f"[REMINDER_WORKER] Notifying Telegram user {user_id} ({len(reminders)} reminder(s))")
@@ -184,8 +185,8 @@ def notify_user_whatsapp(user_id: str, reminders: list, whatsapp: WhatsAppServic
     """Send WhatsApp text with numbered list and store pending state for reply handling."""
     message_text = _build_reminder_text(reminders)
     message_text += (
-        "\nReply with a number (e.g. *1*) to send that reminder, "
-        "or *skip* to skip all."
+        "\nReply with a number (e.g. 1) to send that reminder, "
+        "all to send all, or skip to skip all."
     )
 
     # Store pending reminders so the app can handle the reply

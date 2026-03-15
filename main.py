@@ -344,6 +344,102 @@ async def _keep_typing(chat_id: int, stop_event: asyncio.Event):
         except asyncio.TimeoutError:
             pass
 
+async def _handle_send_all_reminders(callback_query: dict):
+    """Handle 'Send All' button — send reminder emails for every job in the inline keyboard."""
+    chat_id = callback_query["message"]["chat"]["id"]
+    message_id = callback_query["message"]["message_id"]
+    user_id = str(chat_id)
+
+    # Extract job_id:level pairs from the other inline buttons' callback_data
+    reply_markup = callback_query["message"].get("reply_markup", {})
+    job_pairs = []
+    for row in reply_markup.get("inline_keyboard", []):
+        for btn in row:
+            cb = btn.get("callback_data", "")
+            parts = cb.split(":")
+            if len(parts) == 3 and parts[0] == "remind" and parts[1] not in ("skip", "send"):
+                job_pairs.append((parts[1], parts[2]))  # (job_id, level)
+
+    if not job_pairs:
+        await telegram_service.edit_message_text(chat_id, message_id, "No reminders found to send.")
+        return
+
+    # Get sender name once
+    profile = supabase_service.get_user_profile(user_id)
+    sender_name = "Team"
+    if profile.get("ok") and profile.get("data"):
+        sender_name = profile["data"].get("name") or sender_name
+
+    sent = []
+    failed = []
+    flag_map = {
+        "first": "first_reminder_sent",
+        "second": "second_reminder_sent",
+        "third": "third_reminder_sent",
+    }
+    subject_map_tpl = {
+        "first": "First Payment Reminder – Invoice #{bill_no}",
+        "second": "Second Payment Reminder – Invoice #{bill_no}",
+        "third": "Final Payment Reminder – Invoice #{bill_no}",
+    }
+
+    await telegram_service.edit_message_text(
+        chat_id, message_id, f"⏳ Sending {len(job_pairs)} reminder(s)..."
+    )
+
+    for job_id, level in job_pairs:
+        fetch_sql = f"SELECT * FROM public.job_entries WHERE id = '{job_id}'"
+        result = supabase_service.execute_sql(fetch_sql)
+        if not result.get("ok") or not result.get("rows"):
+            failed.append(job_id)
+            continue
+
+        row = result["rows"][0]
+        poc_email = row.get("poc_email")
+        if not poc_email:
+            failed.append(row.get("client_name") or job_id)
+            continue
+
+        bill_no = row.get("bill_no") or "N/A"
+        client_name = row.get("client_name") or "Client"
+        poc_name = row.get("poc_name") or client_name
+        fees = row.get("fees")
+        try:
+            amount_str = f"₹{int(float(fees)):,}"
+        except (ValueError, TypeError):
+            amount_str = str(fees) if fees else "N/A"
+
+        subject = subject_map_tpl.get(level, "Payment Reminder – Invoice #{bill_no}").replace("{bill_no}", str(bill_no))
+        body = (
+            f"Hi {poc_name},\n\n"
+            f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
+            f"Amount Due: {amount_str}\n\n"
+            f"Please let us know if payment has already been processed.\n\n"
+            f"Best regards,\n{sender_name}\n"
+        )
+
+        ok = email_service.send_email(to_email=poc_email, subject=subject, body=body)
+        if ok:
+            sent.append(f"{client_name} → {poc_email}")
+            flag_col = flag_map.get(level)
+            if flag_col:
+                supabase_service.execute_sql(
+                    f"UPDATE public.job_entries SET {flag_col} = NOW() WHERE id = '{job_id}'"
+                )
+        else:
+            failed.append(f"{client_name} ({poc_email})")
+
+    # Build summary
+    lines = [f"✅ Sent {len(sent)} reminder(s)."]
+    for s in sent:
+        lines.append(f"  • {s}")
+    if failed:
+        lines.append(f"\n❌ Failed for {len(failed)}:")
+        for f_item in failed:
+            lines.append(f"  • {f_item}")
+    await telegram_service.edit_message_text(chat_id, message_id, "\n".join(lines))
+
+
 async def _handle_reminder_callback(callback_query: dict):
     """Handle inline button presses from the reminder worker notifications."""
     cb_id = callback_query.get("id")
@@ -358,6 +454,10 @@ async def _handle_reminder_callback(callback_query: dict):
         await telegram_service.edit_message_text(
             chat_id, message_id, "⏭ Reminders skipped. You can always send them manually later."
         )
+        return
+
+    if cb_data == "remind:send:all":
+        await _handle_send_all_reminders(callback_query)
         return
 
     # Parse callback_data: remind:<job_id>:<level>
