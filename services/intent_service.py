@@ -1318,6 +1318,18 @@ class IntentService:
             if any(t in msg_lower for t in self._UPDATE_BANK_TRIGGERS):
                 return self._prompt_bank_details_format(user_id, message)
 
+            # 0b3.5. "change my name" / "update my name" — update user profile name
+            _NAME_CHANGE_TRIGGERS = [
+                "change my name", "update my name", "set my name",
+                "rename me", "my name is wrong", "fix my name",
+            ]
+            if any(t in msg_lower for t in _NAME_CHANGE_TRIGGERS):
+                return self._handle_name_change(user_id, message)
+
+            # Check if user is awaiting name change (providing new name)
+            if user_mem.get("awaiting_name_change"):
+                return self._process_name_change(user_id, message)
+
             # 0b4. "my bank details" / "show bank details" — show stored (masked)
             if any(t in msg_lower for t in self._VIEW_BANK_TRIGGERS):
                 return self._show_bank_details(user_id, message)
@@ -1823,6 +1835,44 @@ class IntentService:
 
         return None
 
+    def _handle_name_change(self, user_id: str, message: str) -> Dict:
+        """Handle 'change my name' request — check if name is inline or prompt."""
+        msg_lower = message.strip().lower()
+        # Try to extract name inline: "change my name to Akshaj"
+        import re as _re
+        m = _re.search(r'(?:name\s+to|name\s+as|rename\s+me\s+to?)\s+(.+)', msg_lower)
+        if m:
+            new_name = m.group(1).strip().title()
+            return self._apply_name_change(user_id, message, new_name)
+
+        # No inline name — prompt for it
+        self.memory.update_user_memory(user_id, {"awaiting_name_change": True})
+        current_name = self._get_user_name(user_id) or "unknown"
+        response = f"Your current name is '{current_name}'. What would you like to change it to?"
+        self._store_conversation(user_id, message, response)
+        return {"operation": "name_change_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _process_name_change(self, user_id: str, message: str) -> Dict:
+        """Process the new name after the user was prompted."""
+        self.memory.update_user_memory(user_id, {"awaiting_name_change": False})
+        new_name = message.strip()
+        if new_name.lower() in ("cancel", "nevermind", "never mind", "no"):
+            response = "No worries, name unchanged."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "name_change_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        return self._apply_name_change(user_id, message, new_name.title())
+
+    def _apply_name_change(self, user_id: str, message: str, new_name: str) -> Dict:
+        """Apply the name change to user_profiles."""
+        platform = "telegram" if user_id.isdigit() else "whatsapp"
+        result = self.supabase.upsert_user_profile(user_id, platform, {"name": new_name})
+        if result.get("ok"):
+            response = f"Done! Your name has been updated to '{new_name}'. ✅"
+        else:
+            response = "Sorry, I couldn't update your name right now. Please try again."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "name_changed", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
     def _get_user_name(self, user_id: str) -> str:
         """Get user's name from profile, return None if not found."""
         profile = self.supabase.get_user_profile(user_id)
@@ -1850,6 +1900,21 @@ class IntentService:
         if not profile.get("name"):
             # Step 1: Get name
             raw_name = message.strip()
+
+            # Detect greetings / small-talk so we don't save "Hi" as the name
+            _GREETING_WORDS = {
+                "hi", "hello", "hey", "hii", "hiii", "yo", "sup",
+                "hola", "howdy", "morning", "evening", "afternoon",
+                "good morning", "good evening", "good afternoon",
+                "whats up", "what's up", "wassup", "namaste",
+            }
+            if raw_name.lower().rstrip("!?.,:; ") in _GREETING_WORDS:
+                response = (
+                    "Hey there! 👋 Before we begin, what's your name?"
+                )
+                self._store_conversation(user_id, message, response)
+                return {"operation": "onboarding_name_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             if raw_name.lower() in ("skip", "no", "n/a"):
                 name = "there"  # Generic greeting instead of user_id
             else:
