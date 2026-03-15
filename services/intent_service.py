@@ -1259,6 +1259,8 @@ class IntentService:
         profile = self.supabase.get_user_profile(user_id)
         if not profile.get("ok"):
             logger.error(f"Failed to check user profile for {user_id}: {profile.get('error')}")
+            # Treat DB errors as new user → start onboarding (creates profile on success)
+            return self._start_onboarding(user_id, message)
         elif not profile.get("data"):
             # New user - start onboarding
             return self._start_onboarding(user_id, message)
@@ -1736,7 +1738,25 @@ class IntentService:
                     response = format_response(ASSISTANT_MODE, insert_confirmation=True)
             else:
                 if not rows:
-                    response = format_response(ERROR_MODE)
+                    # Check if user has ANY data at all
+                    count_result = self.supabase.execute_sql(
+                        f"SELECT COUNT(*) AS cnt FROM public.job_entries WHERE user_id = '{user_id.replace(chr(39), chr(39)+chr(39))}'"
+                    )
+                    has_data = False
+                    if count_result.get("ok") and count_result.get("rows"):
+                        has_data = int(count_result["rows"][0].get("cnt", 0)) > 0
+                    if not has_data:
+                        user_name = self._get_user_name(user_id)
+                        greeting = f"{user_name}, you" if user_name else "You"
+                        response = (
+                            f"{greeting} don't have any jobs logged yet.\n\n"
+                            "To get started, say something like:\n"
+                            "• 'Add a job for [Client Name]'\n"
+                            "• '+ClientName, job details, 5000'\n\n"
+                            "Once you have jobs, I can answer queries, send reminders, and generate invoices!"
+                        )
+                    else:
+                        response = format_response(ERROR_MODE)
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                 self._update_sql_context(user_id, rows)
