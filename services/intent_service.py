@@ -1002,7 +1002,7 @@ class IntentService:
         self._store_conversation(user_id, message, response)
         return {"operation": "bank_details_view", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-    def _detect_small_talk(self, message: str) -> Optional[str]:
+    def _detect_small_talk(self, message: str, user_id: str = None) -> Optional[str]:
         """
         Returns a canned response if the message is pure small talk, else None.
         Short messages with no data keywords are matched against _SMALL_TALK_TRIGGERS.
@@ -1284,7 +1284,7 @@ class IntentService:
                 return reminder_result
 
             # 0a-. Small talk detection (greetings, thanks, etc.) — avoid expensive SQL path
-            small_talk_resp = self._detect_small_talk(message)
+            small_talk_resp = self._detect_small_talk(message, user_id=user_id)
             if small_talk_resp:
                 self._store_conversation(user_id, message, small_talk_resp)
                 return {"operation": "small_talk", "response": small_talk_resp, "trigger_invoice": False, "invoice_data": {}}

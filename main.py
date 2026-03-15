@@ -312,28 +312,35 @@ async def whatsapp_webhook(
     From: str = Form(...)
 ):
     """Twilio WhatsApp Webhook"""
-    logger.info(f"Received message from {From}: {Body}")
+    try:
+        logger.info(f"Received WhatsApp message from {From}: {Body}")
 
-    # Run blocking process_request in executor (same pattern as Telegram webhook)
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None, lambda: intent_service.process_request(user_id=From, message=Body)
-    )
-    
-    # Only send immediate response if it's not a suppressed retrieval response
-    if result.get("response"):
-        whatsapp_service.send_text_message(From, result["response"])
-
-    if result.get("trigger_invoice"):
-        data = result["invoice_data"]
-        background_tasks.add_task(
-            process_and_send_invoice, 
-            From, data["client_name"], data["month"], 
-            platform="whatsapp",
-            bill_number=data.get("bill_number"),
-            year=data.get("year"),
-            user_id=From,
+        # Run blocking process_request in executor (same pattern as Telegram webhook)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: intent_service.process_request(user_id=From, message=Body)
         )
+
+        logger.info(f"[WHATSAPP] Result operation={result.get('operation')} for {From}")
+
+        # Only send immediate response if it's not a suppressed retrieval response
+        if result.get("response"):
+            logger.info(f"[WHATSAPP] Sending text -> To={From}, Text={result['response'][:120]}")
+            whatsapp_service.send_text_message(From, result["response"])
+
+        if result.get("trigger_invoice"):
+            data = result["invoice_data"]
+            background_tasks.add_task(
+                process_and_send_invoice, 
+                From, data["client_name"], data["month"], 
+                platform="whatsapp",
+                bill_number=data.get("bill_number"),
+                year=data.get("year"),
+                user_id=From,
+            )
+
+    except Exception as e:
+        logger.error(f"WhatsApp webhook error: {e}")
 
     # Return an empty 204 so Twilio does not send an extra 'OK' message.
     return Response(status_code=204)
