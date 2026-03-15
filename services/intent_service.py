@@ -1274,6 +1274,11 @@ class IntentService:
         trigger_invoice = False
         invoice_data = {}
 
+        # Resolve effective user_id for data queries (account linking)
+        data_user_id = self._resolve_data_user_id(user_id, profile.get("data", {}))
+        if data_user_id != user_id:
+            logger.info(f"[LINK] Using linked data_user_id={data_user_id} for user {user_id}")
+
         try:
             # 0. Check for active form (smart capture confirmation / missing fields)
             form_state = self.memory.get_form_state(user_id)
@@ -1330,6 +1335,27 @@ class IntentService:
             if user_mem.get("awaiting_name_change"):
                 return self._process_name_change(user_id, message)
 
+            # 0b3.6. "what is my user id" / "my user id" — show user_id for account linking
+            _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
+            if any(t in msg_lower for t in _USER_ID_TRIGGERS):
+                platform = "Telegram" if user_id.isdigit() else "WhatsApp"
+                response = f"Your {platform} user ID is:\n`{user_id}`\n\nShare this with your other platform to link accounts."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "show_user_id", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # 0b3.7. "link account" / "link telegram" — cross-platform account linking
+            _LINK_TRIGGERS = [
+                "link account", "link my account", "link telegram",
+                "link my telegram", "link whatsapp", "link my whatsapp",
+                "connect account", "connect telegram", "connect whatsapp",
+            ]
+            if any(t in msg_lower for t in _LINK_TRIGGERS):
+                return self._handle_link_account(user_id, message)
+
+            # Check if user is providing a link ID
+            if user_mem.get("awaiting_link_id"):
+                return self._process_link_id(user_id, message)
+
             # 0b4. "my bank details" / "show bank details" — show stored (masked)
             if any(t in msg_lower for t in self._VIEW_BANK_TRIGGERS):
                 return self._show_bank_details(user_id, message)
@@ -1375,7 +1401,7 @@ class IntentService:
                 targets = self.supabase.fetch_reminder_targets(
                     approaching_days=approaching_days,
                     payment_terms_days=payment_terms_days,
-                    user_id=user_id,
+                    user_id=data_user_id,
                 )
                 logger.info(f"[REMINDER] Loaded {len(targets)} reminder targets from Supabase")
 
@@ -1691,7 +1717,7 @@ class IntentService:
             logger.info(f"[PIPELINE] Starting query plan for user {user_id}: {message[:100]}")
             plan_result = execute_query_plan(
                 message, self.gemini, self.supabase,
-                conversation_history, user_id=user_id,
+                conversation_history, user_id=data_user_id,
                 conversation_context=conv_ctx,
             )
             logger.info(f"[PIPELINE] Plan result: sql={'yes' if plan_result.get('sql') else 'no'}, error={plan_result.get('_error')}, clarification={plan_result.get('clarification')}")
@@ -1708,11 +1734,11 @@ class IntentService:
             # Fallback to direct SQL generation if planner fails
             if planner_failed:
                 logger.info(f"[PIPELINE] Planner failed ({plan_result.get('_error')}), falling back to direct SQL generation")
-                sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history, user_id=user_id)
+                sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history, user_id=data_user_id)
                 if sql_result.get("_error"):
                     logger.warning(f"[PIPELINE] Fallback also failed for user {user_id}: {sql_result.get('_error')}")
                     # Third fallback: deterministic keyword-based SQL (no LLM needed)
-                    sql = self._keyword_sql_fallback(message, user_id)
+                    sql = self._keyword_sql_fallback(message, data_user_id)
                     if not sql:
                         response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
                         self._store_conversation(user_id, message, response)
@@ -1759,7 +1785,7 @@ class IntentService:
                 if not rows:
                     # Check if user has ANY data at all
                     count_result = self.supabase.execute_sql(
-                        f"SELECT COUNT(*) AS cnt FROM public.job_entries WHERE user_id = '{user_id.replace(chr(39), chr(39)+chr(39))}'"
+                        f"SELECT COUNT(*) AS cnt FROM public.job_entries WHERE user_id = '{data_user_id.replace(chr(39), chr(39)+chr(39))}'"
                     )
                     has_data = False
                     if count_result.get("ok") and count_result.get("rows"):
@@ -1834,6 +1860,88 @@ class IntentService:
             return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 5"
 
         return None
+
+    def _resolve_data_user_id(self, user_id: str, profile_data: Dict) -> str:
+        """
+        Resolve the effective user_id for data queries.
+        If a linked account exists in preferences, use that for job_entries queries.
+        """
+        prefs = profile_data.get("preferences") or {}
+        if isinstance(prefs, str):
+            try:
+                prefs = json.loads(prefs)
+            except (json.JSONDecodeError, TypeError):
+                prefs = {}
+        linked_id = prefs.get("linked_user_id")
+        if linked_id:
+            return linked_id
+        return user_id
+
+    def _handle_link_account(self, user_id: str, message: str) -> Dict:
+        """Handle 'link account' request — extract ID inline or prompt."""
+        msg_lower = message.strip().lower()
+        # Try to extract ID inline: "link telegram 751256859"
+        parts = message.strip().split()
+        # Look for a numeric ID or whatsapp:+ ID in the message
+        candidate = None
+        for part in parts:
+            clean = part.strip()
+            if clean.isdigit() and len(clean) >= 5:
+                candidate = clean
+                break
+            if clean.startswith("whatsapp:+"):
+                candidate = clean
+                break
+
+        if candidate:
+            return self._apply_link(user_id, message, candidate)
+
+        # No inline ID — prompt for it
+        self.memory.update_user_memory(user_id, {"awaiting_link_id": True})
+        platform = "telegram" if user_id.isdigit() else "whatsapp"
+        other = "WhatsApp" if platform == "telegram" else "Telegram"
+        response = (
+            f"To link your {other} account, I need the user ID from that platform.\n\n"
+            f"You can find it by messaging the bot on {other} and asking 'what is my user id'.\n\n"
+            "Please paste the ID here:"
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "link_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _process_link_id(self, user_id: str, message: str) -> Dict:
+        """Process the linked account ID after the user was prompted."""
+        self.memory.update_user_memory(user_id, {"awaiting_link_id": False})
+        candidate = message.strip()
+        if candidate.lower() in ("cancel", "nevermind", "never mind", "no"):
+            response = "No worries, account not linked."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "link_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        return self._apply_link(user_id, message, candidate)
+
+    def _apply_link(self, user_id: str, message: str, linked_id: str) -> Dict:
+        """Store the linked account ID in user preferences."""
+        platform = "telegram" if user_id.isdigit() else "whatsapp"
+        # Get current preferences
+        profile = self.supabase.get_user_profile(user_id)
+        prefs = {}
+        if profile.get("ok") and profile.get("data"):
+            prefs = profile["data"].get("preferences") or {}
+            if isinstance(prefs, str):
+                try:
+                    prefs = json.loads(prefs)
+                except (json.JSONDecodeError, TypeError):
+                    prefs = {}
+
+        prefs["linked_user_id"] = linked_id
+        result = self.supabase.upsert_user_profile(user_id, platform, {"preferences": json.dumps(prefs)})
+        if result.get("ok"):
+            response = f"Account linked! ✅ Your data from user ID '{linked_id}' is now accessible here."
+            logger.info(f"[LINK] Linked {user_id} → {linked_id}")
+        else:
+            response = "Sorry, I couldn't link the account right now. Please try again."
+            logger.error(f"[LINK] Failed to link {user_id} → {linked_id}: {result.get('error')}")
+        self._store_conversation(user_id, message, response)
+        return {"operation": "account_linked", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _handle_name_change(self, user_id: str, message: str) -> Dict:
         """Handle 'change my name' request — check if name is inline or prompt."""
