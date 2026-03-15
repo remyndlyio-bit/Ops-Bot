@@ -1939,7 +1939,7 @@ class IntentService:
             )
         else:  # WhatsApp
             return (
-                "Welcome to Ops Bot! 🤖\n\n"
+                "Welcome to Remyndly! 🤖\n\n"
                 "I help manage your invoices and payments.\n"
                 "What's your business name to get started?"
             )
