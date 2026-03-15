@@ -55,6 +55,13 @@ async def startup_event():
             resp = await client.post(f"https://api.telegram.org/bot{token}/setWebhook", data={"url": webhook_url})
             logger.info(f"Telegram webhook set to {webhook_url}: {resp.json()}")
 
+    # Log the expected WhatsApp webhook URL (must be configured manually in Twilio console)
+    if base_url:
+        wa_webhook = f"{base_url.rstrip('/')}/webhooks/whatsapp"
+        logger.info(f"WhatsApp webhook URL (set this in Twilio console): {wa_webhook}")
+    else:
+        logger.warning("BASE_URL not set — WhatsApp webhook URL unknown. Set BASE_URL env var.")
+
     # Send "I've been updated" message to all known Telegram chats (user_id = chat_id for Telegram)
     if token:
         try:
@@ -74,6 +81,11 @@ async def startup_event():
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "version": "1.0.0"}
+
+@app.get("/webhooks/whatsapp")
+def whatsapp_health():
+    """GET handler so you can verify the WhatsApp webhook URL is reachable."""
+    return {"status": "ok", "endpoint": "whatsapp_webhook"}
 
 
 def send_invoice_email(

@@ -1676,11 +1676,13 @@ class IntentService:
             # Generate SQL via query planner pipeline (Classify → Plan → Resolve → Validate → SQL)
             conv_ctx = user_mem.get("uscf_context") or {}
             conv_ctx["last_saved_job"] = user_mem.get("last_saved_job")
+            logger.info(f"[PIPELINE] Starting query plan for user {user_id}: {message[:100]}")
             plan_result = execute_query_plan(
                 message, self.gemini, self.supabase,
                 conversation_history, user_id=user_id,
                 conversation_context=conv_ctx,
             )
+            logger.info(f"[PIPELINE] Plan result: sql={'yes' if plan_result.get('sql') else 'no'}, error={plan_result.get('_error')}, clarification={plan_result.get('clarification')}")
 
             # Handle clarification from planner
             if plan_result.get("clarification"):
@@ -1697,10 +1699,15 @@ class IntentService:
                 sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history, user_id=user_id)
                 if sql_result.get("_error"):
                     logger.warning(f"[PIPELINE] Fallback also failed for user {user_id}: {sql_result.get('_error')}")
-                    response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
-                    self._store_conversation(user_id, message, response)
-                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                sql = sql_result.get("sql")
+                    # Third fallback: deterministic keyword-based SQL (no LLM needed)
+                    sql = self._keyword_sql_fallback(message, user_id)
+                    if not sql:
+                        response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                    logger.info(f"[PIPELINE] Keyword fallback generated SQL: {sql[:200]}")
+                else:
+                    sql = sql_result.get("sql")
 
             valid, sanitized_sql, err = validate_sql(sql)
             if not valid:
@@ -1780,6 +1787,41 @@ class IntentService:
             "trigger_invoice": trigger_invoice,
             "invoice_data": invoice_data
         }
+
+    def _keyword_sql_fallback(self, message: str, user_id: str) -> Optional[str]:
+        """
+        Deterministic SQL fallback based on keyword matching — no LLM needed.
+        Returns a SQL string for common query patterns, or None if no pattern matches.
+        """
+        msg = message.strip().lower()
+        uid = user_id.replace("'", "''")
+        base = f"SELECT * FROM public.job_entries WHERE user_id = '{uid}'"
+
+        # "last job" / "latest job" / "most recent job" / "recent job"
+        if re.search(r'\b(last|latest|most\s+recent|recent)\b.*\b(job|entry|work|project|gig)\b', msg):
+            return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 1"
+
+        # "how many jobs" / "count" / "total jobs"
+        if re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of)\b.*\b(job|entr|record|work)\b', msg):
+            return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}'"
+
+        # "total fees" / "total earnings" / "sum of fees"
+        if re.search(r'\b(total|sum|overall)\b.*\b(fees|earning|income|revenue|billing)\b', msg):
+            return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}'"
+
+        # "show all jobs" / "list jobs" / "my jobs"
+        if re.search(r'\b(show|list|all|my)\b.*\b(job|entr|record|work)\b', msg):
+            return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 25"
+
+        # "unpaid" / "pending payments"
+        if re.search(r'\b(unpaid|pending|not\s+paid|outstanding)\b', msg):
+            return f"{base} AND (paid IS NULL OR paid = '' OR paid = 'false' OR LOWER(paid) != 'true') ORDER BY job_date DESC NULLS LAST LIMIT 25"
+
+        # Generic fallback for any question with "job" — show recent jobs
+        if re.search(r'\bjob\b', msg):
+            return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 5"
+
+        return None
 
     def _get_user_name(self, user_id: str) -> str:
         """Get user's name from profile, return None if not found."""
