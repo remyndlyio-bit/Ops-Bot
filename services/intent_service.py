@@ -1472,7 +1472,7 @@ class IntentService:
 
             # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
             msg_lower = message.lower()
-            is_retrieval = any(w in msg_lower for w in ["get", "download", "send", "give", "show", "retrieve", "fetch"]) and "invoice" in msg_lower
+            is_retrieval = any(w in msg_lower for w in ["get", "download", "send", "give", "show", "retrieve", "fetch", "generate", "create", "make", "prepare"]) and "invoice" in msg_lower
             if is_retrieval:
                 schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
                 intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
@@ -1527,9 +1527,9 @@ class IntentService:
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                     if bill_number:
-                        result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=user_id)
+                        result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=data_user_id)
                     else:
-                        result = self.supabase.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year_val, user_id=user_id)
+                        result = self.supabase.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year_val, user_id=data_user_id)
                     if not result.get("ok"):
                         response = result.get("error", "I couldn't fetch invoice data. Please try again.")
                         self._store_conversation(user_id, message, response)
@@ -1574,7 +1574,7 @@ class IntentService:
                         pdf_path = pdf_candidate if os.path.exists(pdf_candidate) else None
                         if not pdf_path:
                             summary = InvoiceService.process_invoice_data(rows, display_client, month_display)
-                            bank_result = self.supabase.get_user_bank_details(user_id)
+                            bank_result = self.supabase.get_user_bank_details(data_user_id)
                             bank_details = bank_result.get("data") if bank_result.get("ok") else None
                             pdf_path = InvoiceGenerationService().generate_pdf(summary, rows, bank_details=bank_details)
 
@@ -1607,7 +1607,7 @@ class IntentService:
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                     # Check if bank details exist before generating invoice
-                    bank_result = self.supabase.get_user_bank_details(user_id)
+                    bank_result = self.supabase.get_user_bank_details(data_user_id)
                     bank_details = bank_result.get("data") if bank_result.get("ok") else None
                     if not bank_details or not bank_details.get("bank_account_number"):
                         # No bank details - prompt user to add them
