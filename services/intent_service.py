@@ -714,6 +714,7 @@ class IntentService:
         for pat in intent_phrases:
             content_clean = re.sub(pat, "", content_clean, flags=re.IGNORECASE).strip()
 
+        logger.info(f"[SMART_CAPTURE] Original='{message}' -> Cleaned='{content_clean}'")
         # If no meaningful content remains, prompt for details
         if not content_clean or len(content_clean) < 3:
             self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
@@ -735,7 +736,9 @@ class IntentService:
     def _extract_and_confirm(self, user_id: str, content: str) -> Dict:
         """Extract fields from content and show confirmation or ask for missing."""
         self.memory.update_user_memory(user_id, {"awaiting_job_input": False})
+        logger.info(f"[SMART_CAPTURE] Extracting fields from: '{content[:200]}'")
         extracted = self.gemini.extract_job_fields(content)
+        logger.info(f"[SMART_CAPTURE] Result: {extracted}")
 
         # Treat all-null extraction as failure
         if extracted and all(v is None for v in extracted.values()):
