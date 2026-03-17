@@ -1472,7 +1472,13 @@ class IntentService:
 
             # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
             msg_lower = message.lower()
-            is_retrieval = any(w in msg_lower for w in ["get", "download", "send", "give", "show", "retrieve", "fetch", "generate", "create", "make", "prepare"]) and "invoice" in msg_lower
+            _INVOICE_VERBS = ["get", "download", "send", "give", "show", "retrieve", "fetch",
+                              "generate", "create", "make", "prepare", "need", "want", "share"]
+            has_verb = any(w in msg_lower for w in _INVOICE_VERBS)
+            has_invoice_word = "invoice" in msg_lower or "bill" in msg_lower
+            # Also match standalone "invoice for <client>" (no verb needed)
+            is_retrieval = (has_verb and has_invoice_word) or (has_invoice_word and "for " in msg_lower)
+            logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
             if is_retrieval:
                 schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
                 intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
