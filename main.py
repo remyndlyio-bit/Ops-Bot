@@ -290,6 +290,7 @@ async def _handle_bot_message(
     Ensures IDENTICAL processing flow regardless of platform.
     """
     tag = platform.upper()
+    result = {"operation": "error", "response": None, "trigger_invoice": False, "invoice_data": {}}
 
     # 1. Typing indicator (Telegram only — WhatsApp/Twilio has no native equivalent)
     stop_typing = None
@@ -306,6 +307,9 @@ async def _handle_bot_message(
             None, lambda: intent_service.process_request(user_id=user_id, message=message)
         )
         logger.info(f"[{tag}] Result operation={result.get('operation')} for {user_id}")
+    except Exception as proc_err:
+        logger.error(f"[{tag}] process_request failed for {user_id}: {proc_err}")
+        result["response"] = "Something went wrong processing your message. Please try again."
     finally:
         # 3. Stop typing indicator
         if stop_typing:
@@ -319,6 +323,7 @@ async def _handle_bot_message(
 
     # 4. Send response — platform-specific transport only
     if result.get("response"):
+        logger.info(f"[{tag}] Sending text -> To={user_id}, Body={result['response'][:120]}")
         if platform == "telegram" and chat_id:
             await telegram_service.send_text_message(chat_id, result["response"])
         elif platform == "whatsapp":
