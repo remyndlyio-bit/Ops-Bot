@@ -1863,12 +1863,15 @@ class IntentService:
 
             valid, sanitized_sql, err = validate_sql(sql)
             if not valid:
+                logger.warning(f"[QUERY_FAIL] SQL validation failed for user {user_id}: {err} | SQL: {sql[:200]}")
                 response = query_invalid_phrase()
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            logger.info(f"[QUERY] Executing SQL for user {user_id}: {sanitized_sql[:200]}")
             exec_result = self.supabase.execute_sql(sanitized_sql)
             if not exec_result.get("ok"):
+                logger.error(f"[QUERY_FAIL] SQL execution failed for user {user_id}: {exec_result.get('error')} | SQL: {sanitized_sql[:200]}")
                 response = format_response(
                     ERROR_MODE,
                     error_detail=exec_result.get("error") or error_calm_phrase(),
@@ -1878,6 +1881,7 @@ class IntentService:
 
             rows = exec_result.get("rows", [])
             op = exec_result.get("operation", "select")
+            logger.info(f"[QUERY] op={op}, rows={len(rows)}, user={user_id}, msg='{message[:60]}'")
 
             if op == "update":
                 rowcount = exec_result.get("rowcount", 0)
@@ -1905,6 +1909,7 @@ class IntentService:
                     if count_result.get("ok") and count_result.get("rows"):
                         has_data = int(count_result["rows"][0].get("cnt", 0)) > 0
                     if not has_data:
+                        logger.info(f"[QUERY_FAIL] User {user_id} has NO data at all (0 rows in job_entries)")
                         user_name = self._get_user_name(user_id)
                         greeting = f"{user_name}, you" if user_name else "You"
                         response = (
@@ -1915,6 +1920,7 @@ class IntentService:
                             "Once you have jobs, I can answer queries, send reminders, and generate invoices!"
                         )
                     else:
+                        logger.warning(f"[QUERY_FAIL] 0 rows but user HAS data. SQL returned nothing for: {sanitized_sql[:200]}")
                         response = format_response(ERROR_MODE)
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -1922,10 +1928,13 @@ class IntentService:
                 payload = build_clean_payload(rows, "select")
                 response = self.gemini.synthesize_response(payload, message)
                 if not response or not response.strip():
+                    logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
                     response = "I found matching records but couldn't format the reply. Try asking again?"
+                else:
+                    logger.info(f"[QUERY] Success: {len(rows)} rows, response length={len(response)}")
 
         except Exception as e:
-            logger.error(f"Execution failure: {e}")
+            logger.error(f"[QUERY_FAIL] Exception for user {user_id}, msg='{message[:60]}': {e}", exc_info=True)
             user_name = self._get_user_name(user_id)
             if user_name:
                 response = format_response(ERROR_MODE, error_detail=f"Sorry {user_name}, {error_calm_phrase().lower()}")
