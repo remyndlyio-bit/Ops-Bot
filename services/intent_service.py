@@ -20,6 +20,7 @@ from utils.pending_reminders import get_pending, clear_pending, remove_single
 from utils.logger import logger
 from typing import Dict, List, Optional
 import json
+import os
 import re
 
 class IntentService:
@@ -1862,6 +1863,41 @@ class IntentService:
                         response = "I need a client name or bill number to find an invoice. For example: 'Send invoice for Garnier for March'."
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                    # Validate client exists in DB before proceeding
+                    if client_name and not bill_number:
+                        safe_uid = data_user_id.replace("'", "''")
+                        safe_cn = client_name.replace("'", "''")
+                        check_sql = (
+                            f"SELECT DISTINCT client_name FROM public.job_entries "
+                            f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_cn}%' "
+                            f"AND (\"isDeleted\" IS NOT TRUE)"
+                        )
+                        check_result = self.supabase.execute_sql(check_sql)
+                        matching_clients = [r["client_name"] for r in (check_result.get("rows") or []) if r.get("client_name")]
+                        if not matching_clients:
+                            # No matching client — show available clients and stop
+                            all_clients_sql = (
+                                f"SELECT DISTINCT client_name FROM public.job_entries "
+                                f"WHERE user_id = '{safe_uid}' AND client_name IS NOT NULL "
+                                f"AND (\"isDeleted\" IS NOT TRUE) ORDER BY client_name"
+                            )
+                            all_result = self.supabase.execute_sql(all_clients_sql)
+                            available = [r["client_name"] for r in (all_result.get("rows") or []) if r.get("client_name")]
+                            if available:
+                                client_list = "\n".join(f"• {c}" for c in available)
+                                response = (
+                                    f"I couldn't find a client named \"{client_name}\". "
+                                    f"Please check for typos.\n\n"
+                                    f"Your clients on record:\n{client_list}\n\n"
+                                    f"Try again with the correct name."
+                                )
+                            else:
+                                response = f"I couldn't find a client named \"{client_name}\" and you don't have any job entries yet."
+                            logger.info(f"[INVOICE] Client '{client_name}' not found for user {user_id}")
+                            self._store_conversation(user_id, message, response)
+                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
                     if client_name and not month_num and not bill_number:
                         # Check if user explicitly asked to send via email
                         send_email = "email" in msg_lower or "e-mail" in msg_lower
