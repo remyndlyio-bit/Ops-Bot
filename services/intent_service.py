@@ -1301,6 +1301,11 @@ class IntentService:
 
             # 0a. Check if user is responding with job data (awaiting smart capture input)
             user_mem = self.memory.get_user_memory(user_id)
+
+            # Handle pending disambiguation reply (user selecting a specific row by number)
+            if user_mem.get("pending_disambiguation"):
+                return self._handle_disambiguation_reply(user_id, message, user_mem["pending_disambiguation"])
+
             if user_mem.get("awaiting_job_input"):
                 return self._extract_and_confirm(user_id, message)
 
@@ -1528,7 +1533,12 @@ class IntentService:
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
                     if client_name and not month_num and not bill_number:
-                        response = f"I see you want an invoice for {client_name}. Which month? For example: 'Send invoice for {client_name} for March'."
+                        months_result = self.supabase.get_available_months_for_client(client_name, user_id=data_user_id)
+                        if months_result.get("ok") and months_result.get("months"):
+                            month_options = "\n".join(f"• {m['label']}" for m in months_result["months"])
+                            response = f"I see you want an invoice for {client_name}. Which month?\n\n{month_options}\n\nReply with the month, e.g. 'Send invoice for {client_name} for March 2025'."
+                        else:
+                            response = f"I see you want an invoice for {client_name}. Which month? For example: 'Send invoice for {client_name} for March'."
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -1762,6 +1772,42 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # Disambiguation: if an UPDATE matches multiple rows, show real options before executing.
+            # This covers soft-deletes (SET is_deleted = TRUE) and any other UPDATE.
+            if sanitized_sql.upper().lstrip().startswith("UPDATE"):
+                _where_m = re.search(r'WHERE\s+(.+?)(?=\s+RETURNING\b|$)', sanitized_sql, re.IGNORECASE | re.DOTALL)
+                if _where_m:
+                    _pre_sql = (
+                        "SELECT id, client_name, job_date, job_description_details, fees "
+                        f"FROM public.job_entries WHERE {_where_m.group(1).strip()}"
+                    )
+                    _pre = self.supabase.execute_sql(_pre_sql)
+                    if _pre.get("ok") and len(_pre.get("rows", [])) > 1:
+                        _cands = _pre["rows"]
+                        self.memory.update_user_memory(user_id, {
+                            "pending_disambiguation": {
+                                "sql": sanitized_sql,
+                                "rows": _cands,
+                                "data_user_id": data_user_id,
+                            }
+                        })
+                        _opts = [f"I found {len(_cands)} matching records. Which one did you mean?\n"]
+                        for _i, _r in enumerate(_cands[:10], 1):
+                            _parts = [f"{_i}."]
+                            _c = (_r.get("client_name") or "").strip()
+                            _d = str(_r.get("job_date") or "")[:10]
+                            _desc = str(_r.get("job_description_details") or "")[:40].strip()
+                            _f = _r.get("fees")
+                            if _c: _parts.append(_c)
+                            if _d: _parts.append(_d)
+                            if _desc: _parts.append(_desc)
+                            if isinstance(_f, (int, float)): _parts.append(f"₹{int(_f):,}")
+                            _opts.append(" | ".join(_parts))
+                        _opts.append("\nReply with a number to pick, or 'cancel' to abort.")
+                        response = "\n".join(_opts)
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             exec_result = self.supabase.execute_sql(sanitized_sql)
             if not exec_result.get("ok"):
                 response = format_response(
@@ -1794,7 +1840,7 @@ class IntentService:
                 if not rows:
                     # Check if user has ANY data at all
                     count_result = self.supabase.execute_sql(
-                        f"SELECT COUNT(*) AS cnt FROM public.job_entries WHERE user_id = '{data_user_id.replace(chr(39), chr(39)+chr(39))}'"
+                        f"SELECT COUNT(*) AS cnt FROM public.job_entries WHERE user_id = '{data_user_id.replace(chr(39), chr(39)+chr(39))}' AND (is_deleted IS NULL OR is_deleted = FALSE)"
                     )
                     has_data = False
                     if count_result.get("ok") and count_result.get("rows"):
@@ -1842,7 +1888,8 @@ class IntentService:
         """
         msg = message.strip().lower()
         uid = user_id.replace("'", "''")
-        base = f"SELECT * FROM public.job_entries WHERE user_id = '{uid}'"
+        _not_deleted = "(is_deleted IS NULL OR is_deleted = FALSE)"
+        base = f"SELECT * FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}"
 
         # "last job" / "latest job" / "most recent job" / "recent job"
         if re.search(r'\b(last|latest|most\s+recent|recent)\b.*\b(job|entry|work|project|gig)\b', msg):
@@ -1850,11 +1897,11 @@ class IntentService:
 
         # "how many jobs" / "count" / "total jobs"
         if re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of)\b.*\b(job|entr|record|work)\b', msg):
-            return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}'"
+            return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}"
 
         # "total fees" / "total earnings" / "sum of fees"
         if re.search(r'\b(total|sum|overall)\b.*\b(fees|earning|income|revenue|billing)\b', msg):
-            return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}'"
+            return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}"
 
         # "show all jobs" / "list jobs" / "my jobs"
         if re.search(r'\b(show|list|all|my)\b.*\b(job|entr|record|work)\b', msg):
@@ -1869,6 +1916,60 @@ class IntentService:
             return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 5"
 
         return None
+
+    def _handle_disambiguation_reply(self, user_id: str, message: str, pending: Dict) -> Dict:
+        """User is replying with a number to pick one row from a disambiguation list."""
+        msg = message.strip().lower()
+        if msg in ("cancel", "stop", "nevermind", "abort", "no"):
+            self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
+            response = "Cancelled. Let me know if you need anything else."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        num_match = re.search(r'\b(\d+)\b', message)
+        if not num_match:
+            response = "Please reply with a number to select the record, or 'cancel' to abort."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        idx = int(num_match.group(1)) - 1
+        rows = pending.get("rows", [])
+        if idx < 0 or idx >= len(rows):
+            response = f"Please choose a number between 1 and {len(rows)}, or 'cancel' to abort."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        chosen_id = rows[idx].get("id", "")
+        data_uid = pending.get("data_user_id", user_id).replace("'", "''")
+        original_sql = pending.get("sql", "")
+
+        # Replace the WHERE clause with a precise id + user_id lookup
+        targeted_sql = re.sub(
+            r'WHERE\s+.+?(?=\s+RETURNING\b|$)',
+            f"WHERE id = '{chosen_id}' AND user_id = '{data_uid}'",
+            original_sql,
+            flags=re.IGNORECASE | re.DOTALL,
+        ).strip()
+
+        self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
+        exec_result = self.supabase.execute_sql(targeted_sql)
+        if not exec_result.get("ok"):
+            response = "Something went wrong. Please try again."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        result_rows = exec_result.get("rows", [])
+        if result_rows:
+            self._update_sql_context(user_id, result_rows)
+            payload = build_clean_payload(result_rows, "select")
+            response = self.gemini.synthesize_response(payload, message)
+            if not response or not response.strip():
+                response = "Done! The selected record has been updated."
+        else:
+            response = "Done! The selected record has been updated."
+
+        self._store_conversation(user_id, message, response)
+        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _resolve_data_user_id(self, user_id: str, profile_data: Dict) -> str:
         """
