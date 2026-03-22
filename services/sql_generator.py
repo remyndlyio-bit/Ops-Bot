@@ -17,6 +17,7 @@ def build_sql_prompt(
     schema_description: str,
     columns: List[str],
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    user_id: Optional[str] = None,
 ) -> str:
     today = date.today().isoformat()
     columns_str = ", ".join(columns[:40])
@@ -26,12 +27,12 @@ def build_sql_prompt(
     context_block = ""
     if conversation_history:
         lines = []
-        for msg in conversation_history[-6:]:
+        for msg in conversation_history[-10:]:
             role = "User" if msg.get("role") == "user" else "Assistant"
             lines.append(f"{role}: {msg.get('content', '')}")
         context_block = "Recent conversation:\n" + "\n".join(lines) + "\n\n"
 
-    return f"""You are a SQL generator for a single Postgres table. Output ONLY a single SELECT or INSERT statement. No explanation, no markdown.
+    return f"""You are a SQL generator for a single Postgres table. Output ONLY a single SELECT, INSERT, or UPDATE statement. No explanation, no markdown.
 
 TODAY'S DATE: {today}
 
@@ -42,9 +43,17 @@ ALLOWED COLUMNS (use exactly): {columns_str}
 
 TABLE: public.job_entries (columns id and created_at are auto-generated; do not include them in INSERT).
 
+MULTI-TENANT RULE (MANDATORY):
+- The current user_id is '{user_id or 'UNKNOWN'}'.
+- Every SELECT MUST include WHERE user_id = '{user_id or 'UNKNOWN'}' (combine with AND if other conditions exist).
+- Every INSERT MUST include user_id = '{user_id or 'UNKNOWN'}' as a column/value.
+- Every UPDATE MUST include WHERE user_id = '{user_id or 'UNKNOWN'}' (combine with AND if other conditions exist).
+- NEVER omit user_id from any query.
+
 RULES FOR SELECT:
 1. Use only columns from the list above. Use snake_case for column names.
 2. Relative dates: "last month" = date between first and last day of previous month. "this year" = year = {today[:4]}. "last 7 days" = job_date >= CURRENT_DATE - 7.
+   For month ranges, use date_trunc with explicit cast: job_date >= date_trunc('month', '2026-02-01'::date) AND job_date < (date_trunc('month', '2026-02-01'::date) + interval '1 month').
 3. "how many", "count" → SELECT COUNT(*) ... For "total fees", "sum" → SELECT SUM(fees) ...
 4. "latest", "last job", "most recent" → ORDER BY job_date DESC LIMIT 1.
 5. Client/brand: WHERE client_name ILIKE '%name%' or = 'Name'.
@@ -52,11 +61,18 @@ RULES FOR SELECT:
 
 RULES FOR INSERT:
 7. Use when the user wants to ADD a job, LOG a job, RECORD an entry, or CREATE a new row (e.g. "add a job for Garnier", "log: Xiaomi, 2000, 15sec", "new entry: client X, fees 5000").
-8. INSERT INTO public.job_entries (col1, col2, ...) VALUES (val1, val2, ...). Use only columns that the user provided; omit id and created_at. Use NULL for missing optional fields or omit the column.
+8. INSERT INTO public.job_entries (user_id, col1, col2, ...) VALUES ('{user_id or 'UNKNOWN'}', val1, val2, ...). Use only columns that the user provided; omit id and created_at. Use NULL for missing optional fields or omit the column.
 9. Quote text values with single quotes; escape single quotes by doubling. Dates as 'YYYY-MM-DD'. Numbers without quotes.
 10. Prefer RETURNING * at the end of INSERT so the new row is returned.
 
-11. Output ONLY the SQL, one statement, no semicolon at the end.
+RULES FOR UPDATE:
+11. Use when the user wants to UPDATE, SET, CHANGE, ADD TO, or MODIFY an existing field (e.g. "add email X as the contact", "update fees to 30k", "set poc_email to abc@xyz.com", "mark as paid").
+12. UPDATE public.job_entries SET col = value WHERE user_id = '{user_id or 'UNKNOWN'}' AND <conditions>. Use conversation context to identify WHICH row(s) to update (e.g. the client/brand discussed recently).
+13. "contact", "email", "client email" → poc_email column. "contact name" → poc_name column.
+14. Always include RETURNING * so the updated row is returned.
+15. Be precise with WHERE conditions — use client_name, job_date, or id from conversation context to target the correct row(s). Never update all rows.
+
+16. Output ONLY the SQL, one statement, no semicolon at the end.
 
 {context_block}User: {message}
 
@@ -68,6 +84,7 @@ def generate_sql(
     gemini_service: GeminiService,
     supabase_service: SupabaseService,
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate a single SELECT SQL from user message.
@@ -77,11 +94,11 @@ def generate_sql(
     schema_description = schema["description"]
     columns = schema["columns"]
 
-    prompt = build_sql_prompt(message, schema_description, columns, conversation_history)
+    prompt = build_sql_prompt(message, schema_description, columns, conversation_history, user_id=user_id)
     try:
         raw = gemini_service._call_api(prompt, generation_config={
             "temperature": 0,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": 800,
         })
         if not raw or not raw.strip():
             return {"sql": None, "_error": "Empty response from AI."}
@@ -95,8 +112,8 @@ def generate_sql(
                     lines = lines[:-1]
             sql = "\n".join(lines)
         sql = sql.rstrip(";").strip()
-        if not sql.upper().startswith("SELECT") and not sql.upper().startswith("INSERT"):
-            return {"sql": None, "_error": "AI did not return a SELECT or INSERT statement."}
+        if not sql.upper().startswith("SELECT") and not sql.upper().startswith("INSERT") and not sql.upper().startswith("UPDATE"):
+            return {"sql": None, "_error": "AI did not return a valid SQL statement."}
         logger.info(f"Generated SQL: {sql[:200]}...")
         return {"sql": sql, "_error": None}
     except Exception as e:

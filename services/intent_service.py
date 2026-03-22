@@ -4,6 +4,7 @@ from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS, _COL
 from utils.date_utils import month_name_to_number, number_to_month_name
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
+from services.query_planner import execute_query_plan
 from services.response_formatter import (
     format_response,
     ASSISTANT_MODE,
@@ -15,27 +16,30 @@ from services.response_formatter import (
 )
 from services.response_synthesis import build_clean_payload, build_field_answer_payload
 from utils.memory_service import MemoryService
+from utils.pending_reminders import get_pending, clear_pending, remove_single
 from utils.logger import logger
 from typing import Dict, List, Optional
 import json
+import re
 
 class IntentService:
     # Cache AI-generated schema by column names so we don't call the AI on every message
     _schema_cache: Dict[tuple, str] = {}
 
-    # Ordered fields for the "add new job" conversational form.
-    _FORM_JOB_FIELDS: List[str] = [
-        "job_date",
-        "client_name",
-        "brand_name",
-        "job_description_details",
-        "job_notes",
-        "language",
-        "production_house",
-        "studio",
-        "qt",
-        "length",
-        "fees",
+    # Required fields for smart capture job creation
+    _SMART_CAPTURE_REQUIRED = ["brand_name", "job_date", "job_description_details"]
+
+    # Trigger phrases for bank detail commands
+    _UPDATE_BANK_TRIGGERS = [
+        "update bank details", "update bank detail", "change bank details",
+        "set bank details", "edit bank details", "add bank details",
+        "update my bank", "change my bank", "set my bank",
+        "save bank details", "new bank details",
+    ]
+    _VIEW_BANK_TRIGGERS = [
+        "my bank details", "show bank details", "view bank details",
+        "what are my bank details", "bank details", "show my bank",
+        "get bank details", "see bank details", "check bank details",
     ]
 
     # Small-talk trigger words / phrases (case-insensitive, matched as whole tokens)
@@ -526,90 +530,482 @@ class IntentService:
         self.memory.update_user_memory(user_id, {"uscf_context": ctx})
 
     def _handle_form_step(self, user_id: str, message: str) -> Dict:
-        """Handle an active form: store value, advance, ask next or complete."""
+        """Handle smart capture confirmation, missing fields, or edit flow."""
         form = self.memory.get_form_state(user_id)
         if not form:
             return None
-        fields = form.get("fields", [])
-        step = form.get("step", 0)
 
-        # Cancel form if user says cancel/stop/nevermind
+        # Cancel if user says cancel/stop
         if message.strip().lower() in ("cancel", "stop", "nevermind", "abort", "exit"):
             self.memory.cancel_form(user_id)
-            response = "No problem, I've cancelled the form. Let me know if you need anything else."
+            response = "No problem, cancelled. Let me know if you need anything else."
             self._store_conversation(user_id, message, response)
             return {"operation": "form_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Validate and store the current answer using AI + COLUMN_SCHEMA (if available)
-        current_field = fields[step]
-        schema_entry = self.column_schema.get(current_field) if isinstance(self.column_schema, dict) else None
-        try:
-            validation = self.gemini.validate_field_value(
-                column_name=current_field,
-                user_input=message,
-                column_schema_entry=schema_entry,
+        form_type = form.get("form_type", "smart_capture")
+
+        # --- Smart Capture: awaiting confirmation ---
+        if form_type == "smart_capture_confirm":
+            return self._handle_smart_capture_confirm(user_id, message, form)
+
+        # --- Smart Capture: awaiting missing fields ---
+        if form_type == "smart_capture_missing":
+            return self._handle_smart_capture_missing(user_id, message, form)
+
+        # Fallback: cancel unknown form
+        self.memory.cancel_form(user_id)
+        return None
+
+    def _handle_smart_capture_confirm(self, user_id: str, message: str, form: Dict) -> Dict:
+        """Handle Yes/Edit response to smart capture confirmation."""
+        msg = message.strip().lower()
+        extracted = form.get("values", {})
+
+        if msg in ("yes", "y", "save", "confirm", "done", "ok", "okay", "sure"):
+            # Save to database
+            return self._save_smart_capture_job(user_id, extracted)
+
+        elif msg in ("edit", "change", "modify", "fix", "no"):
+            response = (
+                "No problem! Send the corrected job info in one message.\n\n"
+                "Example:\n"
+                "Bridgestone\n"
+                "10 Feb\n"
+                "Master film 30 sec\n"
+                "Client: The Good Take\n"
+                "Fees: 25k"
             )
-        except Exception as e:
-            logger.warning(f"Field validation fallback for {current_field}: {e}")
-            validation = {
-                "is_valid": True,
-                "normalized_value": message.strip(),
-                "error_message": None,
-                "clarification_question": None,
-            }
-
-        if not validation.get("is_valid", True):
-            # Stay on the same step; ask user to correct the value.
-            error_msg = validation.get("error_message") or "That doesn't look right for this field."
-            clarification = validation.get("clarification_question")
-            details = error_msg
-            if clarification:
-                details = f"{error_msg} {clarification}"
-            response = f"{details}\n\nWhat's the {current_field}?"
+            self.memory.cancel_form(user_id)
+            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
             self._store_conversation(user_id, message, response)
-            return {"operation": "form_in_progress", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            return {"operation": "smart_capture_edit", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        normalized_value = validation.get("normalized_value", message.strip())
-        self.memory.set_form_value(user_id, current_field, normalized_value)
-        self.memory.advance_form_step(user_id)
-
-        # Check if there's a next field
-        next_step = step + 1
-        if next_step < len(fields):
-            next_field = fields[next_step]
-            response = f"Got it! Now, what's the {next_field}?"
-            self._store_conversation(user_id, message, response)
-            return {"operation": "form_in_progress", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-        # All fields collected - save to Supabase job_entries
-        values = self.memory.complete_form(user_id)
-        if values:
-            insert_result = self.supabase.insert_job_entry(values)
-            if insert_result.get("ok"):
-                summary = ", ".join(f"{k}: {v}" for k, v in values.items())
-                response = f"Done! I've added the new job: {summary}"
-            else:
-                response = "I collected all the info but couldn't save it. Please try again later."
         else:
-            response = "Something went wrong completing the form."
-        self._store_conversation(user_id, message, response)
+            response = "Please reply 'Yes' to save or 'Edit' to make changes."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "smart_capture_confirm_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_smart_capture_missing(self, user_id: str, message: str, form: Dict) -> Dict:
+        """Handle response with missing required fields."""
+        extracted = form.get("values", {})
+        missing = form.get("missing_fields", [])
+
+        # Try to extract fields from the user's response
+        new_data = self.gemini.extract_job_fields(message)
+        if new_data:
+            for k, v in new_data.items():
+                if v is not None:
+                    extracted[k] = v
+
+        # Check if still missing required fields
+        still_missing = [f for f in missing if not extracted.get(f)]
+        if still_missing:
+            field_labels = {"brand_name": "Brand", "job_date": "Date", "job_description_details": "Job details"}
+            missing_str = ", ".join(field_labels.get(f, f) for f in still_missing)
+            response = f"I still need: {missing_str}. Please provide them."
+            # Update form with new values
+            form["values"] = extracted
+            form["missing_fields"] = still_missing
+            self.memory.start_form(user_id, [], form_override=form)
+            self._store_conversation(user_id, message, response)
+            return {"operation": "smart_capture_missing_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # All required fields present - show confirmation
+        return self._show_smart_capture_confirmation(user_id, extracted)
+
+    def _save_smart_capture_job(self, user_id: str, extracted: Dict) -> Dict:
+        """Save the extracted job to database."""
+        self.memory.cancel_form(user_id)
+
+        # Map extracted fields to job_entries columns
+        record = {"user_id": user_id}
+        field_map = {
+            "job_date": "job_date",
+            "brand_name": "client_name",  # brand_name maps to client_name column
+            "client_name": "production_house",  # client/agency maps to production_house
+            "job_description_details": "job_description_details",
+            "fees": "fees",
+            "notes": "notes",
+        }
+        for src, dst in field_map.items():
+            val = extracted.get(src)
+            if val is not None:
+                record[dst] = val
+
+        insert_result = self.supabase.insert_job_entry(record)
+        if insert_result.get("ok"):
+            brand = extracted.get("brand_name", "")
+            client = extracted.get("client_name", "")
+            response = f"Job saved! ✅ {brand} has been added to your records."
+            # Store last job context so user can reference "this job" in follow-up
+            self.memory.update_user_memory(user_id, {
+                "last_saved_job": {
+                    "brand_name": brand,
+                    "client_name": client,
+                    "job_date": extracted.get("job_date"),
+                    "job_description_details": extracted.get("job_description_details"),
+                    "fees": extracted.get("fees"),
+                    "db_client_name": record.get("client_name"),  # what's actually in client_name col
+                }
+            })
+        else:
+            logger.error(f"[SMART_CAPTURE] Insert failed: {insert_result.get('error')}")
+            response = "I couldn't save the job. Please try again."
+        # Build a summary of what was saved for conversation context
+        summary = ", ".join(f"{k}: {v}" for k, v in extracted.items() if v is not None)
+        self._store_conversation(user_id, f"Save job: {summary}", response)
         return {"operation": "form_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-    def _start_add_job_form(self, user_id: str, message: str) -> Dict:
-        """Start the 'add new job' form by asking for the first field."""
-        fields = list(self._FORM_JOB_FIELDS) if self._FORM_JOB_FIELDS else []
-        if not fields:
-            response = "I couldn't determine which columns to use for a new job."
+    def _show_smart_capture_confirmation(self, user_id: str, extracted: Dict) -> Dict:
+        """Show confirmation message and wait for Yes/Edit."""
+        lines = ["Got it 👍\n"]
+        field_labels = [
+            ("brand_name", "Brand"),
+            ("client_name", "Client"),
+            ("job_date", "Date"),
+            ("job_description_details", "Details"),
+            ("fees", "Fees"),
+            ("notes", "Notes"),
+        ]
+        for key, label in field_labels:
+            val = extracted.get(key)
+            if val is not None:
+                if key == "fees":
+                    val = f"₹{val:,}" if isinstance(val, (int, float)) else val
+                lines.append(f"{label}: {val}")
+
+        lines.append("\nSave this job? (Yes / Edit)")
+        response = "\n".join(lines)
+
+        # Store in form state for confirmation
+        form_data = {
+            "form_type": "smart_capture_confirm",
+            "values": extracted,
+            "fields": [],
+            "step": 0,
+        }
+        self.memory.start_form(user_id, [], form_override=form_data)
+        # Store the extracted details as user message for context
+        summary = ", ".join(f"{k}: {v}" for k, v in extracted.items() if v is not None)
+        self._store_conversation(user_id, f"Job details: {summary}", response)
+        return {"operation": "smart_capture_confirm", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _start_smart_capture(self, user_id: str, message: str) -> Dict:
+        """
+        AI Smart Capture: extract job fields from natural language.
+        If message only contains trigger words, prompt for details.
+        If message contains job data, extract and confirm.
+        """
+        import re
+        # Strip all job-intent phrases to isolate actual job content
+        content = message.strip()
+        # Remove leading "+" 
+        if content.startswith("+"):
+            content = content[1:].strip()
+        # Remove common intent phrases (anywhere in the message)
+        intent_phrases = [
+            r"i\s+want\s+to\s+", r"i\'?d\s+like\s+to\s+", r"can\s+you\s+",
+            r"please\s+", r"let\s*'?s\s+",
+            r"add\s+(?:a\s+)?(?:new\s+)?job\s*", r"new\s+job\s*",
+            r"log\s+(?:a\s+)?job\s*", r"record\s+(?:a\s+)?job\s*",
+            r"create\s+(?:a\s+)?(?:new\s+)?(?:job|entry)\s*",
+        ]
+        content_clean = content
+        for pat in intent_phrases:
+            content_clean = re.sub(pat, "", content_clean, flags=re.IGNORECASE).strip()
+
+        logger.info(f"[SMART_CAPTURE] Original='{message}' -> Cleaned='{content_clean}'")
+        # If no meaningful content remains, prompt for details
+        if not content_clean or len(content_clean) < 3:
+            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
+            response = (
+                "Describe the job in one message.\n\n"
+                "Example:\n"
+                "Bridgestone\n"
+                "10 Feb\n"
+                "Master film 30 sec + 4 cutdowns\n"
+                "Client: The Good Take\n"
+                "Fees: 25k"
+            )
             self._store_conversation(user_id, message, response)
-            return {"operation": "form_error", "response": response, "trigger_invoice": False, "invoice_data": {}}
-        self.memory.start_form(user_id, fields)
-        first_field = fields[0]
-        response = f"Let's add a new job! I'll ask you for a few details.\n\nFirst, what's the {first_field}?\n\n(Type 'cancel' anytime to stop.)"
+            return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Content available - extract fields
+        return self._extract_and_confirm(user_id, content_clean)
+
+    def _extract_and_confirm(self, user_id: str, content: str) -> Dict:
+        """Extract fields from content and show confirmation or ask for missing."""
+        self.memory.update_user_memory(user_id, {"awaiting_job_input": False})
+        logger.info(f"[SMART_CAPTURE] Extracting fields from: '{content[:200]}'")
+        extracted = self.gemini.extract_job_fields(content)
+        logger.info(f"[SMART_CAPTURE] Result: {extracted}")
+
+        # Treat all-null extraction as failure
+        if extracted and all(v is None for v in extracted.values()):
+            extracted = None
+
+        if not extracted:
+            response = (
+                "I couldn't understand the job details. Please try again.\n\n"
+                "Example:\n"
+                "Bridgestone\n"
+                "10 Feb\n"
+                "Master film 30 sec\n"
+                "Fees: 25k"
+            )
+            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
+            self._store_conversation(user_id, content, response)
+            return {"operation": "smart_capture_failed", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Check required fields
+        required = ["brand_name", "job_date", "job_description_details"]
+        missing = [f for f in required if not extracted.get(f)]
+
+        if missing:
+            field_labels = {"brand_name": "Brand", "job_date": "Date", "job_description_details": "Job details"}
+            missing_str = ", ".join(field_labels.get(f, f) for f in missing)
+
+            # Show what we got so far + ask for missing
+            lines = ["I got some of the details:\n"]
+            field_display = [
+                ("brand_name", "Brand"), ("client_name", "Client"), ("job_date", "Date"),
+                ("job_description_details", "Details"), ("fees", "Fees"), ("notes", "Notes"),
+            ]
+            for key, label in field_display:
+                val = extracted.get(key)
+                if val is not None:
+                    if key == "fees":
+                        val = f"₹{val:,}" if isinstance(val, (int, float)) else val
+                    lines.append(f"{label}: {val}")
+
+            lines.append(f"\nI still need: {missing_str}")
+            lines.append("Please send the missing info.")
+            response = "\n".join(lines)
+
+            form_data = {
+                "form_type": "smart_capture_missing",
+                "values": extracted,
+                "missing_fields": missing,
+                "fields": [],
+                "step": 0,
+            }
+            self.memory.start_form(user_id, [], form_override=form_data)
+            self._store_conversation(user_id, content, response)
+            return {"operation": "smart_capture_missing", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # All required fields present - show confirmation
+        return self._show_smart_capture_confirmation(user_id, extracted)
+
+    def _handle_poc_email_response(self, user_id: str, message: str) -> Dict:
+        """Handle user providing a client POC email after invoice generation."""
+        import re
+        user_mem = self.memory.get_user_memory(user_id)
+
+        # Clear awaiting state
+        self.memory.update_user_memory(user_id, {"awaiting_poc_email": False})
+
+        # Allow cancel
+        if message.strip().lower() in ("cancel", "skip", "no", "nevermind"):
+            response = "No problem, skipped. You can add the client email later."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "poc_email_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Validate email format
+        email = message.strip()
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+            # Not a valid email - re-prompt
+            self.memory.update_user_memory(user_id, {"awaiting_poc_email": True})
+            response = "That doesn't look like a valid email. Please send the client's email address (e.g. client@agency.com) or type 'skip'."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "poc_email_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Save POC email to job entries for this client
+        client_name = user_mem.get("poc_email_client", "")
+        result = self.supabase.update_poc_email_for_client(user_id, client_name, email)
+
+        if result.get("ok"):
+            updated = result.get("updated", 0)
+            pdf_path = user_mem.get("poc_email_pdf_path")
+            month = user_mem.get("poc_email_month", "")
+            year = user_mem.get("poc_email_year")
+
+            # Try to send the invoice email now
+            email_sent = False
+            if pdf_path:
+                try:
+                    from services.resend_email_service import ResendEmailService
+                    email_svc = ResendEmailService()
+                    ok = email_svc.send_invoice_email(
+                        to_email=email,
+                        client_name=client_name,
+                        month=month,
+                        year=year or 2026,
+                        pdf_path=pdf_path,
+                    )
+                    email_sent = ok
+                except Exception as e:
+                    logger.error(f"[POC] Failed to send invoice email after saving POC: {e}")
+
+            if email_sent:
+                response = f"Saved! Email {email} has been added for {client_name} and the invoice has been sent. ✅"
+                # Update invoice_date for matching rows
+                try:
+                    self.supabase.execute_sql(
+                        f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE "
+                        f"WHERE user_id = '{user_id}' AND client_name ILIKE '%{client_name}%' "
+                        f"AND invoice_date IS NULL"
+                    )
+                    logger.info(f"[INVOICE] Updated invoice_date for {client_name} after POC email save")
+                except Exception as e:
+                    logger.warning(f"[INVOICE] Failed to update invoice_date after POC save: {e}")
+            else:
+                response = f"Saved! Email {email} has been added for {client_name} ({updated} job{'s' if updated != 1 else ''} updated)."
+        else:
+            response = f"I couldn't save the email: {result.get('error', 'Unknown error')}. Please try again."
+
+        # Clean up memory
+        self.memory.update_user_memory(user_id, {
+            "poc_email_client": None,
+            "poc_email_pdf_path": None,
+            "poc_email_month": None,
+            "poc_email_year": None,
+        })
         self._store_conversation(user_id, message, response)
-        return {"operation": "form_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        return {"operation": "poc_email_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+    def _prompt_bank_details_format(self, user_id: str, message: str) -> Dict:
+        """Ask the user to send all bank details in a single structured message."""
+        self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
+        response = (
+            "Sure! Please send your bank details in this format:\n\n"
+            "Account Name: Darshit Mody\n"
+            "Bank Name: HDFC Bank\n"
+            "Account Number: 1234567890\n"
+            "IFSC: HDFC0001234\n"
+            "UPI: darshit@upi\n\n"
+            "UPI is optional — skip it if you don't have one.\n"
+            "Type 'cancel' to skip."
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "bank_details_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-    def _detect_small_talk(self, message: str) -> Optional[str]:
+    def _handle_bank_details_response(self, user_id: str, message: str) -> Dict:
+        """Parse a single structured message containing bank details and upsert."""
+        # Clear the awaiting flag first
+        self.memory.update_user_memory(user_id, {"awaiting_bank_details": False})
+
+        if message.strip().lower() in ("cancel", "stop", "nevermind", "skip"):
+            response = "No problem, bank details update cancelled."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "bank_details_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        parsed = self._parse_bank_details_message(message)
+        if not parsed:
+            response = (
+                "I couldn't find the bank details in your message. "
+                "Please send them in this format:\n\n"
+                "Account Name: Your Name\n"
+                "Bank Name: HDFC Bank\n"
+                "Account Number: 1234567890\n"
+                "IFSC: HDFC0001234\n"
+                "UPI: you@upi\n\n"
+                "Or type 'cancel' to skip."
+            )
+            # Re-enable the awaiting flag so user can try again
+            self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
+            self._store_conversation(user_id, message, response)
+            return {"operation": "bank_details_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        result = self.supabase.upsert_user_config(user_id, parsed)
+        if result.get("ok"):
+            # Check if there's a pending invoice to generate
+            user_mem = self.memory.get_user_memory(user_id)
+            pending_invoice = user_mem.get("pending_invoice")
+            if pending_invoice:
+                # Clear pending invoice flag
+                self.memory.update_user_memory(user_id, {"pending_invoice": None})
+                client_name = pending_invoice.get("client_name", "Client")
+                response = (
+                    "Your bank details have been saved! ✅\n\n"
+                    f"Now generating the invoice for {client_name}..."
+                )
+                self._store_conversation(user_id, message, response)
+                return {
+                    "operation": "bank_config_complete",
+                    "response": response,
+                    "trigger_invoice": True,
+                    "invoice_data": pending_invoice
+                }
+            else:
+                response = "Your bank details have been saved successfully! Say 'my bank details' to view them."
+        else:
+            response = f"I couldn't save your bank details: {result.get('error', 'Unknown error')}. Please try again."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "bank_config_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    @staticmethod
+    def _parse_bank_details_message(message: str) -> Optional[Dict[str, str]]:
+        """
+        Parse a structured message like:
+          Account Name: Darshit Mody
+          Bank Name: HDFC Bank
+          Account Number: 1234567890
+          IFSC: HDFC0001234
+          UPI: darshit@upi
+        Returns dict of bank fields or None if nothing was parseable.
+        """
+        import re
+        text = message.strip()
+        result = {}
+
+        # Map of possible labels → db field name
+        label_map = {
+            "bank_account_name": [r"account\s*(?:holder\s*)?name", r"holder\s*name", r"name\s*on\s*account"],
+            "bank_name": [r"bank\s*name", r"bank"],
+            "bank_account_number": [r"account\s*(?:no|number|num|#)", r"a/?c\s*(?:no|number|num|#)?"],
+            "bank_ifsc": [r"ifsc\s*(?:code)?"],
+            "upi_id": [r"upi\s*(?:id)?"],
+        }
+
+        for field, patterns in label_map.items():
+            for pat in patterns:
+                match = re.search(rf"(?:^|\n)\s*{pat}\s*[:=\-]\s*(.+)", text, re.IGNORECASE)
+                if match:
+                    val = match.group(1).strip().rstrip(",;")
+                    if val.lower() not in ("", "none", "na", "n/a", "-", "skip"):
+                        result[field] = val
+                    break
+
+        # Need at least account name + account number to be useful
+        if not result.get("bank_account_name") and not result.get("bank_account_number"):
+            return None
+        return result if result else None
+
+    def _show_bank_details(self, user_id: str, message: str) -> Dict:
+        """Show stored bank details for the user with masked account number."""
+        result = self.supabase.get_user_bank_details(user_id)
+        if not result.get("ok"):
+            response = f"I couldn't retrieve your bank details: {result.get('error', 'Unknown error')}."
+        elif not result.get("data"):
+            response = "You haven't set up bank details yet. Say 'update bank details' to add them."
+        else:
+            bd = result["data"]
+            acct = bd.get("bank_account_number") or ""
+            masked_acct = f"****{acct[-4:]}" if len(acct) >= 4 else acct or "Not set"
+            lines = [
+                "Your stored bank details:\n",
+                f"Account Holder: {bd.get('bank_account_name') or 'Not set'}",
+                f"Bank Name: {bd.get('bank_name') or 'Not set'}",
+                f"Account Number: {masked_acct}",
+                f"IFSC Code: {bd.get('bank_ifsc') or 'Not set'}",
+                f"UPI ID: {bd.get('upi_id') or 'Not set'}",
+                "\nSay 'update bank details' to change these.",
+            ]
+            response = "\n".join(lines)
+        self._store_conversation(user_id, message, response)
+        return {"operation": "bank_details_view", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _detect_small_talk(self, message: str, user_id: str = None) -> Optional[str]:
         """
         Returns a canned response if the message is pure small talk, else None.
         Short messages with no data keywords are matched against _SMALL_TALK_TRIGGERS.
@@ -622,6 +1018,7 @@ class IntentService:
             "remind", "overdue", "due", "total", "billing", "record",
             "add", "show", "get", "send", "fetch", "how much", "how many",
             "query", "list", "find", "search", "last", "latest",
+            "bank", "update",
         }
 
         is_exact = msg in self._SMALL_TALK_TRIGGERS
@@ -641,6 +1038,9 @@ class IntentService:
             idx = int(hashlib.md5(message.encode()).hexdigest(), 16) % len(options)
             return options[idx]
 
+        msg = message.strip().lower()
+        user_name = self._get_user_name(user_id)
+        
         bye_words = {"bye", "goodbye", "good bye", "see you", "see ya", "cya", "ttyl"}
         thanks_words = {"thanks", "thank you", "thx", "ty", "cheers"}
         how_words = {"how are you", "how r u", "how are u", "how are you doing",
@@ -649,58 +1049,348 @@ class IntentService:
                       "morning", "afternoon", "evening"}
         affirmation_words = {"ok", "okay", "cool", "got it", "great", "nice", "awesome"}
 
+        # Get base response
         if msg in bye_words:
-            return _pick(self._SMALL_TALK_RESPONSES["bye"])
-        if msg in thanks_words:
-            return _pick(self._SMALL_TALK_RESPONSES["thanks"])
-        if any(hw in msg for hw in how_words):
-            return _pick(self._SMALL_TALK_RESPONSES["how_are_you"])
-        if msg in time_words:
-            return _pick(self._SMALL_TALK_RESPONSES["time_of_day"])
-        if msg in affirmation_words:
-            return _pick(self._SMALL_TALK_RESPONSES["affirmation"])
-        return _pick(self._SMALL_TALK_RESPONSES["greeting"])
+            response = _pick(self._SMALL_TALK_RESPONSES["bye"])
+        elif msg in thanks_words:
+            response = _pick(self._SMALL_TALK_RESPONSES["thanks"])
+        elif any(hw in msg for hw in how_words):
+            response = _pick(self._SMALL_TALK_RESPONSES["how_are_you"])
+        elif msg in time_words:
+            response = _pick(self._SMALL_TALK_RESPONSES["time_of_day"])
+        elif msg in affirmation_words:
+            response = _pick(self._SMALL_TALK_RESPONSES["affirmation"])
+        else:
+            response = _pick(self._SMALL_TALK_RESPONSES["greeting"])
+        
+        # Personalize if we know the user's name
+        if user_name and "Hi there" not in response:  # Avoid double personalization
+            response = response.replace("Hey!", f"Hey {user_name}!")
+            response = response.replace("Hi there!", f"Hi {user_name}!")
+            response = response.replace("Hello!", f"Hello {user_name}!")
+        
+        return response
+
+    def _handle_pending_reminder(self, user_id: str, message: str) -> Optional[Dict]:
+        """
+        Check if a WhatsApp user has pending reminders and is replying with
+        a number (e.g. '1', '2') to send, or 'skip' to dismiss.
+        Returns a response dict if handled, None otherwise.
+        """
+        pending = get_pending(user_id)
+        if not pending:
+            return None
+
+        msg = message.strip().lower()
+
+        # "skip" / "skip all" → clear pending
+        if msg in ("skip", "skip all", "no", "cancel"):
+            clear_pending(user_id)
+            response = "⏭ Reminders skipped. You can always send them manually later."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # "all" / "send all" → send every pending reminder
+        if msg in ("all", "send all", "send all reminders"):
+            return self._send_all_pending_reminders(user_id, message, pending)
+
+        # Check for a number reply like "1", "2", "send 1", "#1"
+        num_match = re.search(r"(\d+)", msg)
+        if not num_match:
+            return None  # Not a reminder reply, let normal flow handle it
+
+        idx = int(num_match.group(1))
+        if idx < 1 or idx > len(pending):
+            response = f"Please reply with a number between 1 and {len(pending)}, or 'skip' to skip all."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        reminder = pending[idx - 1]
+        job_id = reminder.get("id")
+        level = reminder.get("_reminder_level", "first")
+        poc_email = reminder.get("poc_email")
+        bill_no = reminder.get("bill_no") or "N/A"
+        client_name = reminder.get("client_name") or "Client"
+        poc_name = reminder.get("poc_name") or client_name
+        fees = reminder.get("fees")
+
+        if not poc_email:
+            response = f"❌ No email on file for {client_name}. Please add a POC email first."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        try:
+            amount_str = f"₹{int(float(fees)):,}"
+        except (ValueError, TypeError):
+            amount_str = str(fees) if fees else "N/A"
+
+        subject_map = {
+            "first": f"First Payment Reminder – Invoice #{bill_no}",
+            "second": f"Second Payment Reminder – Invoice #{bill_no}",
+            "third": f"Final Payment Reminder – Invoice #{bill_no}",
+        }
+        subject = subject_map.get(level, f"Payment Reminder – Invoice #{bill_no}")
+
+        # Get sender name
+        profile = self.supabase.get_user_profile(user_id)
+        sender_name = "Team"
+        if profile.get("ok") and profile.get("data"):
+            sender_name = profile["data"].get("name") or sender_name
+
+        body = (
+            f"Hi {poc_name},\n\n"
+            f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
+            f"Amount Due: {amount_str}\n\n"
+            f"Please let us know if payment has already been processed.\n\n"
+            f"Best regards,\n{sender_name}\n"
+        )
+
+        ok = self.email.send_email(to_email=poc_email, subject=subject, body=body)
+
+        if not ok:
+            response = f"❌ Failed to send reminder email to {poc_email}. Please try again later."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Update DB flag
+        flag_map = {
+            "first": "first_reminder_sent",
+            "second": "second_reminder_sent",
+            "third": "third_reminder_sent",
+        }
+        flag_col = flag_map.get(level)
+        if flag_col and job_id:
+            update_sql = f"UPDATE public.job_entries SET {flag_col} = NOW() WHERE id = '{job_id}'"
+            self.supabase.execute_sql(update_sql)
+
+        # Remove this reminder from pending list
+        remove_single(user_id, job_id)
+
+        label_map = {"first": "First", "second": "Second", "third": "Final"}
+        label = label_map.get(level, level.title())
+        response = f"✅ {label} reminder sent to {poc_email} for invoice #{bill_no}."
+
+        # If more pending, remind user
+        remaining = get_pending(user_id)
+        if remaining:
+            response += f"\n\n{len(remaining)} reminder(s) still pending. Reply with a number or 'skip'."
+
+        self._store_conversation(user_id, message, response)
+        return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _send_all_pending_reminders(self, user_id: str, message: str, pending: list) -> Dict:
+        """Send reminder emails for every item in the pending list (WhatsApp 'send all')."""
+        profile = self.supabase.get_user_profile(user_id)
+        sender_name = "Team"
+        if profile.get("ok") and profile.get("data"):
+            sender_name = profile["data"].get("name") or sender_name
+
+        flag_map = {
+            "first": "first_reminder_sent",
+            "second": "second_reminder_sent",
+            "third": "third_reminder_sent",
+        }
+        label_map = {"first": "First", "second": "Second", "third": "Final"}
+
+        sent = []
+        failed = []
+
+        for reminder in pending:
+            job_id = reminder.get("id")
+            level = reminder.get("_reminder_level", "first")
+            poc_email = reminder.get("poc_email")
+            bill_no = reminder.get("bill_no") or "N/A"
+            client_name = reminder.get("client_name") or "Client"
+            poc_name = reminder.get("poc_name") or client_name
+            fees = reminder.get("fees")
+
+            if not poc_email:
+                failed.append(f"{client_name} (no email)")
+                continue
+
+            try:
+                amount_str = f"₹{int(float(fees)):,}"
+            except (ValueError, TypeError):
+                amount_str = str(fees) if fees else "N/A"
+
+            subject_map = {
+                "first": f"First Payment Reminder – Invoice #{bill_no}",
+                "second": f"Second Payment Reminder – Invoice #{bill_no}",
+                "third": f"Final Payment Reminder – Invoice #{bill_no}",
+            }
+            subject = subject_map.get(level, f"Payment Reminder – Invoice #{bill_no}")
+
+            body = (
+                f"Hi {poc_name},\n\n"
+                f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
+                f"Amount Due: {amount_str}\n\n"
+                f"Please let us know if payment has already been processed.\n\n"
+                f"Best regards,\n{sender_name}\n"
+            )
+
+            ok = self.email.send_email(to_email=poc_email, subject=subject, body=body)
+            if ok:
+                sent.append(f"{client_name} → {poc_email}")
+                flag_col = flag_map.get(level)
+                if flag_col and job_id:
+                    self.supabase.execute_sql(
+                        f"UPDATE public.job_entries SET {flag_col} = NOW() WHERE id = '{job_id}'"
+                    )
+            else:
+                failed.append(f"{client_name} ({poc_email})")
+
+        # Clear all pending
+        clear_pending(user_id)
+
+        lines = [f"✅ Sent {len(sent)} reminder(s)."]
+        for s in sent:
+            lines.append(f"  • {s}")
+        if failed:
+            lines.append(f"\n❌ Failed for {len(failed)}:")
+            for f_item in failed:
+                lines.append(f"  • {f_item}")
+        response = "\n".join(lines)
+        self._store_conversation(user_id, message, response)
+        return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def process_request(self, user_id: str, message: str) -> Dict:
         """
         Main handler: keyword-based branches for reminder/invoice/overdue;
         then LLM query plan → validate → resolve time → execute → format.
         """
+        # Check if user is new and needs onboarding
+        profile = self.supabase.get_user_profile(user_id)
+        if not profile.get("ok"):
+            logger.error(f"Failed to check user profile for {user_id}: {profile.get('error')}")
+            # Treat DB errors as new user → start onboarding (creates profile on success)
+            return self._start_onboarding(user_id, message)
+        elif not profile.get("data"):
+            # New user - start onboarding
+            return self._start_onboarding(user_id, message)
+        elif not profile.get("data", {}).get("onboarded_at"):
+            # User exists but not onboarded - continue onboarding
+            return self._continue_onboarding(user_id, message, profile["data"])
+
         from services.business_logic_service import BusinessLogicService
         logic = BusinessLogicService()
         conversation_history = self.memory.get_conversation_history(user_id)
         trigger_invoice = False
         invoice_data = {}
 
+        # Resolve effective user_id for data queries (account linking)
+        data_user_id = self._resolve_data_user_id(user_id, profile.get("data", {}))
+        if data_user_id != user_id:
+            logger.info(f"[LINK] Using linked data_user_id={data_user_id} for user {user_id}")
+
         try:
-            # 0. Check for active form (multi-step data entry)
+            # 0. Check for active form (smart capture confirmation / missing fields)
             form_state = self.memory.get_form_state(user_id)
             if form_state:
                 return self._handle_form_step(user_id, message)
 
-            # 0b. Check for "add job" / "add new job" trigger to start form
-            add_job_triggers = ["add job", "add a job", "add new job", "new job", "log a job", "log job", "record job", "record a job"]
-            if any(t in message.lower() for t in add_job_triggers):
-                return self._start_add_job_form(user_id, message)
+            # 0+. Check for pending payment reminders (WhatsApp reply flow)
+            reminder_result = self._handle_pending_reminder(user_id, message)
+            if reminder_result:
+                return reminder_result
 
+            # 0a-. Small talk detection (greetings, thanks, etc.) — avoid expensive SQL path
+            small_talk_resp = self._detect_small_talk(message, user_id=user_id)
+            if small_talk_resp:
+                self._store_conversation(user_id, message, small_talk_resp)
+                return {"operation": "small_talk", "response": small_talk_resp, "trigger_invoice": False, "invoice_data": {}}
 
-            # 0c. Small talk — respond directly, skip all data paths
-            small_talk_response = self._detect_small_talk(message)
-            if small_talk_response:
-                self._store_conversation(user_id, message, small_talk_response)
-                return {
-                    "operation": "small_talk",
-                    "response": small_talk_response,
-                    "trigger_invoice": False,
-                    "invoice_data": {},
-                }
+            # 0a. Check if user is responding with job data (awaiting smart capture input)
+            user_mem = self.memory.get_user_memory(user_id)
+            if user_mem.get("awaiting_job_input"):
+                return self._extract_and_confirm(user_id, message)
 
-            # 1. Payment reminder (keyword-based)
+            # 0b. Check for "add job" / "+" trigger → AI Smart Capture
+            msg_stripped = message.strip()
+            add_job_triggers = ["add job", "add a job", "add new job", "new job",
+                               "log a job", "log job", "record job", "record a job"]
+            is_add_job = any(t in msg_stripped.lower() for t in add_job_triggers)
+            is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
+            if is_add_job or is_plus:
+                return self._start_smart_capture(user_id, message)
+
+            # 0b1.5. Check if user is providing a client POC email
+            if user_mem.get("awaiting_poc_email"):
+                return self._handle_poc_email_response(user_id, message)
+
+            # 0b2. Check if user is responding with bank details (awaiting state)
+            if user_mem.get("awaiting_bank_details"):
+                return self._handle_bank_details_response(user_id, message)
+
+            # 0b3. "update bank details" — ask user for details in a specific format
+            msg_lower = message.strip().lower()
+            if any(t in msg_lower for t in self._UPDATE_BANK_TRIGGERS):
+                return self._prompt_bank_details_format(user_id, message)
+
+            # 0b3.5. "change my name" / "update my name" — update user profile name
+            _NAME_CHANGE_TRIGGERS = [
+                "change my name", "update my name", "set my name",
+                "rename me", "my name is wrong", "fix my name",
+            ]
+            if any(t in msg_lower for t in _NAME_CHANGE_TRIGGERS):
+                return self._handle_name_change(user_id, message)
+
+            # Check if user is awaiting name change (providing new name)
+            if user_mem.get("awaiting_name_change"):
+                return self._process_name_change(user_id, message)
+
+            # 0b3.6. "what is my user id" / "my user id" — show user_id for account linking
+            _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
+            if any(t in msg_lower for t in _USER_ID_TRIGGERS):
+                platform = "Telegram" if user_id.isdigit() else "WhatsApp"
+                response = f"Your {platform} user ID is:\n`{user_id}`\n\nShare this with your other platform to link accounts."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "show_user_id", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # 0b3.7. "link account" / "link telegram" — cross-platform account linking
+            _LINK_TRIGGERS = [
+                "link account", "link my account", "link telegram",
+                "link my telegram", "link whatsapp", "link my whatsapp",
+                "connect account", "connect telegram", "connect whatsapp",
+            ]
+            if any(t in msg_lower for t in _LINK_TRIGGERS):
+                return self._handle_link_account(user_id, message)
+
+            # Check if user is providing a link ID
+            if user_mem.get("awaiting_link_id"):
+                return self._process_link_id(user_id, message)
+
+            # 0b4. "my bank details" / "show bank details" — show stored (masked)
+            if any(t in msg_lower for t in self._VIEW_BANK_TRIGGERS):
+                return self._show_bank_details(user_id, message)
+
+            # 0b5. Negative intent — user declining a follow-up question
+            _NEGATIVE_RESPONSES = {
+                "no", "nope", "nah", "not required", "not needed", "no thanks",
+                "no thank you", "skip", "don't need", "dont need", "i'm good",
+                "im good", "pass", "no need", "that's fine", "thats fine",
+                "all good", "not now", "maybe later", "no its fine",
+                "no it's fine", "not right now", "i'm fine", "im fine",
+            }
+            _FOLLOWUP_MARKERS = [
+                "would you like", "do you want", "shall i", "want me to",
+                "should i", "need a breakdown", "like a breakdown",
+                "want a breakdown", "like to see", "want to see",
+                "interested in", "like more detail", "want more detail",
+            ]
+            if msg_lower in _NEGATIVE_RESPONSES:
+                # Check if last assistant message was a follow-up question
+                if conversation_history:
+                    last_msgs = [m for m in conversation_history if m.get("role") == "assistant"]
+                    if last_msgs:
+                        last_assistant = last_msgs[-1].get("content", "").lower()
+                        is_followup = any(marker in last_assistant for marker in _FOLLOWUP_MARKERS) or last_assistant.rstrip().endswith("?")
+                        if is_followup:
+                            response = "👍 Got it. Let me know if you need anything else."
+                            self._store_conversation(user_id, message, response)
+                            return {"operation": "decline_followup", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # 0c. Payment reminder queries
             reminder_keywords = [
-                "payment reminder",
-                "payment reminders",
-                "send reminder",
-                "send reminders",
                 "remind clients",
                 "approaching due",
                 "upcoming due",
@@ -714,6 +1404,7 @@ class IntentService:
                 targets = self.supabase.fetch_reminder_targets(
                     approaching_days=approaching_days,
                     payment_terms_days=payment_terms_days,
+                    user_id=data_user_id,
                 )
                 logger.info(f"[REMINDER] Loaded {len(targets)} reminder targets from Supabase")
 
@@ -781,7 +1472,13 @@ class IntentService:
 
             # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
             msg_lower = message.lower()
-            is_retrieval = any(w in msg_lower for w in ["get", "download", "send", "give", "show", "retrieve", "fetch"]) and "invoice" in msg_lower
+            _INVOICE_VERBS = ["get", "download", "send", "give", "show", "retrieve", "fetch",
+                              "generate", "create", "make", "prepare", "need", "want", "share"]
+            has_verb = any(w in msg_lower for w in _INVOICE_VERBS)
+            has_invoice_word = "invoice" in msg_lower or "bill" in msg_lower
+            # Also match standalone "invoice for <client>" (no verb needed)
+            is_retrieval = (has_verb and has_invoice_word) or (has_invoice_word and "for " in msg_lower)
+            logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
             if is_retrieval:
                 schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
                 intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
@@ -810,6 +1507,22 @@ class IntentService:
                         from datetime import datetime
                         year_val = datetime.now().year
 
+                    # Resolve "this job" / missing client from last saved job context
+                    if not client_name and not bill_number:
+                        last_job = user_mem.get("last_saved_job")
+                        if last_job:
+                            # Use the DB column value (brand stored as client_name)
+                            client_name = last_job.get("db_client_name") or last_job.get("brand_name", "")
+                            if not month_name and last_job.get("job_date"):
+                                try:
+                                    job_month = int(last_job["job_date"][5:7])
+                                    month_name = number_to_month_name(job_month)
+                                    month_num = job_month
+                                    year_val = int(last_job["job_date"][:4])
+                                except (ValueError, IndexError):
+                                    pass
+                            logger.info(f"[INVOICE] Resolved from last_saved_job: client={client_name}, month={month_name}")
+
                     if not client_name and not bill_number:
                         response = "I need a client name or bill number to find an invoice. For example: 'Send invoice for Garnier for March'."
                         self._store_conversation(user_id, message, response)
@@ -820,9 +1533,9 @@ class IntentService:
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                     if bill_number:
-                        result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number)
+                        result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=data_user_id)
                     else:
-                        result = self.supabase.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year_val)
+                        result = self.supabase.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year_val, user_id=data_user_id)
                     if not result.get("ok"):
                         response = result.get("error", "I couldn't fetch invoice data. Please try again.")
                         self._store_conversation(user_id, message, response)
@@ -867,7 +1580,9 @@ class IntentService:
                         pdf_path = pdf_candidate if os.path.exists(pdf_candidate) else None
                         if not pdf_path:
                             summary = InvoiceService.process_invoice_data(rows, display_client, month_display)
-                            pdf_path = InvoiceGenerationService().generate_pdf(summary, rows)
+                            bank_result = self.supabase.get_user_bank_details(data_user_id)
+                            bank_details = bank_result.get("data") if bank_result.get("ok") else None
+                            pdf_path = InvoiceGenerationService().generate_pdf(summary, rows, bank_details=bank_details)
 
                         if not pdf_path:
                             response = "I tried to generate the invoice PDF but something went wrong. Please try again."
@@ -884,8 +1599,38 @@ class IntentService:
                         )
                         if ok:
                             response = f"The invoice has been sent to {poc_email}."
+                            # Update invoice_date for all affected rows
+                            row_ids = [r["id"] for r in rows if r.get("id")]
+                            if row_ids:
+                                ids_str = ",".join(f"'{rid}'" for rid in row_ids)
+                                self.supabase.execute_sql(
+                                    f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE WHERE id IN ({ids_str})"
+                                )
+                                logger.info(f"[INVOICE] Updated invoice_date for {len(row_ids)} row(s)")
                         else:
                             response = "I couldn't send the invoice email. Please check the email configuration and try again."
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                    # Check if bank details exist before generating invoice
+                    bank_result = self.supabase.get_user_bank_details(data_user_id)
+                    bank_details = bank_result.get("data") if bank_result.get("ok") else None
+                    if not bank_details or not bank_details.get("bank_account_number"):
+                        # No bank details - prompt user to add them
+                        self.memory.update_user_memory(user_id, {
+                            "pending_invoice": invoice_data
+                        })
+                        response = (
+                            f"I found the records for {display_client}, but you haven't added your bank details yet.\n\n"
+                            "Please send your bank details in this format:\n\n"
+                            "Account Name: Your Name\n"
+                            "Bank Name: HDFC Bank\n"
+                            "Account Number: 1234567890\n"
+                            "IFSC: HDFC0001234\n"
+                            "UPI: you@upi (optional)\n\n"
+                            "Once saved, I'll generate the invoice automatically."
+                        )
+                        self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -899,7 +1644,7 @@ class IntentService:
             overdue_keywords = ["overdue", "due date", "passed due", "past due", "late payment", "follow up", "followup", "payment followup", "payment status"]
             is_overdue = any(k in message.lower() for k in overdue_keywords) and ("invoice" in message.lower() or "client" in message.lower() or "payment" in message.lower())
             if is_overdue:
-                overdue_jobs = self.supabase.fetch_overdue_jobs(payment_terms_days=30)
+                overdue_jobs = self.supabase.fetch_overdue_jobs(payment_terms_days=30, user_id=user_id)
                 if not overdue_jobs:
                     response = "Great news! I don't see any invoices that have passed their due date."
                 else:
@@ -924,7 +1669,50 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # 4a. Follow-up: answer from last result row via AI synthesis (no raw field:value)
+            # 4a. Check for invoice confirmation (Yes/No after being asked)
+            msg_lower = message.strip().lower()
+            if msg_lower in ("yes", "y", "sure", "ok", "okay", "please do", "generate", "create"):
+                # Check if we recently asked about invoice generation
+                conv = self.memory.get_conversation_history(user_id)
+                if conv and len(conv) >= 2:
+                    last_assistant = conv[-1].get("content", "").lower() if conv[-1].get("role") == "assistant" else ""
+                    if "generate an invoice" in last_assistant and "would you like" in last_assistant:
+                        # Generate invoice for the last job we found
+                        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+                        last_row = ctx.get("last_row_data") if ctx else None
+                        if last_row:
+                            client_name = last_row.get("client_name", "Client")
+                            job_date = last_row.get("job_date")
+                            month = None
+                            year = None
+                            if job_date:
+                                try:
+                                    from datetime import datetime
+                                    if isinstance(job_date, str):
+                                        job_dt = datetime.fromisoformat(job_date[:10])
+                                    else:
+                                        job_dt = job_date
+                                    month = job_dt.strftime("%B")
+                                    year = job_dt.year
+                                except:
+                                    pass
+                            
+                            invoice_data = {
+                                "client_name": client_name,
+                                "month": month or "Period",
+                                "bill_number": None,
+                                "year": year
+                            }
+                            response = f"Generating invoice for {client_name}..."
+                            self._store_conversation(user_id, message, response)
+                            return {
+                                "operation": "ACTION_TRIGGER",
+                                "response": response,
+                                "trigger_invoice": True,
+                                "invoice_data": invoice_data
+                            }
+
+            # 4b. Follow-up: answer from last result row via AI synthesis (no raw field:value)
             followup_answer = self._try_answer_from_context(user_id, message, columns)
             if followup_answer:
                 logger.info(f"[FOLLOWUP] Answered from context (synthesized)")
@@ -932,14 +1720,42 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # Generate SQL from natural language
-            sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history)
-            if sql_result.get("_error"):
-                response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
+            # Generate SQL via query planner pipeline (Classify → Plan → Resolve → Validate → SQL)
+            conv_ctx = user_mem.get("uscf_context") or {}
+            conv_ctx["last_saved_job"] = user_mem.get("last_saved_job")
+            logger.info(f"[PIPELINE] Starting query plan for user {user_id}: {message[:100]}")
+            plan_result = execute_query_plan(
+                message, self.gemini, self.supabase,
+                conversation_history, user_id=data_user_id,
+                conversation_context=conv_ctx,
+            )
+            logger.info(f"[PIPELINE] Plan result: sql={'yes' if plan_result.get('sql') else 'no'}, error={plan_result.get('_error')}, clarification={plan_result.get('clarification')}")
+
+            # Handle clarification from planner
+            if plan_result.get("clarification"):
+                response = plan_result["clarification"]
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            sql = sql_result.get("sql")
+            sql = plan_result.get("sql")
+            planner_failed = plan_result.get("_error") or not sql
+
+            # Fallback to direct SQL generation if planner fails
+            if planner_failed:
+                logger.info(f"[PIPELINE] Planner failed ({plan_result.get('_error')}), falling back to direct SQL generation")
+                sql_result = generate_sql(message, self.gemini, self.supabase, conversation_history, user_id=data_user_id)
+                if sql_result.get("_error"):
+                    logger.warning(f"[PIPELINE] Fallback also failed for user {user_id}: {sql_result.get('_error')}")
+                    # Third fallback: deterministic keyword-based SQL (no LLM needed)
+                    sql = self._keyword_sql_fallback(message, data_user_id)
+                    if not sql:
+                        response = clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                    logger.info(f"[PIPELINE] Keyword fallback generated SQL: {sql[:200]}")
+                else:
+                    sql = sql_result.get("sql")
+
             valid, sanitized_sql, err = validate_sql(sql)
             if not valid:
                 response = query_invalid_phrase()
@@ -958,7 +1774,17 @@ class IntentService:
             rows = exec_result.get("rows", [])
             op = exec_result.get("operation", "select")
 
-            if op == "insert":
+            if op == "update":
+                rowcount = exec_result.get("rowcount", 0)
+                if rows:
+                    self._update_sql_context(user_id, rows)
+                    payload = build_clean_payload(rows, "select")
+                    response = self.gemini.synthesize_response(payload, message)
+                    if not response or not response.strip():
+                        response = f"Done! Updated {rowcount} record{'s' if rowcount != 1 else ''}."
+                else:
+                    response = f"Done! Updated {rowcount} record{'s' if rowcount != 1 else ''}."
+            elif op == "insert":
                 if rows:
                     self._update_sql_context(user_id, rows)
                     response = format_response(ASSISTANT_MODE, insert_confirmation=True)
@@ -966,7 +1792,25 @@ class IntentService:
                     response = format_response(ASSISTANT_MODE, insert_confirmation=True)
             else:
                 if not rows:
-                    response = format_response(ERROR_MODE)
+                    # Check if user has ANY data at all
+                    count_result = self.supabase.execute_sql(
+                        f"SELECT COUNT(*) AS cnt FROM public.job_entries WHERE user_id = '{data_user_id.replace(chr(39), chr(39)+chr(39))}'"
+                    )
+                    has_data = False
+                    if count_result.get("ok") and count_result.get("rows"):
+                        has_data = int(count_result["rows"][0].get("cnt", 0)) > 0
+                    if not has_data:
+                        user_name = self._get_user_name(user_id)
+                        greeting = f"{user_name}, you" if user_name else "You"
+                        response = (
+                            f"{greeting} don't have any jobs logged yet.\n\n"
+                            "To get started, say something like:\n"
+                            "• 'Add a job for [Client Name]'\n"
+                            "• '+ClientName, job details, 5000'\n\n"
+                            "Once you have jobs, I can answer queries, send reminders, and generate invoices!"
+                        )
+                    else:
+                        response = format_response(ERROR_MODE)
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                 self._update_sql_context(user_id, rows)
@@ -977,7 +1821,11 @@ class IntentService:
 
         except Exception as e:
             logger.error(f"Execution failure: {e}")
-            response = format_response(ERROR_MODE, error_detail=error_calm_phrase())
+            user_name = self._get_user_name(user_id)
+            if user_name:
+                response = format_response(ERROR_MODE, error_detail=f"Sorry {user_name}, {error_calm_phrase().lower()}")
+            else:
+                response = format_response(ERROR_MODE, error_detail=error_calm_phrase())
 
         self._store_conversation(user_id, message, response)
         return {
@@ -987,11 +1835,367 @@ class IntentService:
             "invoice_data": invoice_data
         }
 
+    def _keyword_sql_fallback(self, message: str, user_id: str) -> Optional[str]:
+        """
+        Deterministic SQL fallback based on keyword matching — no LLM needed.
+        Returns a SQL string for common query patterns, or None if no pattern matches.
+        """
+        msg = message.strip().lower()
+        uid = user_id.replace("'", "''")
+        base = f"SELECT * FROM public.job_entries WHERE user_id = '{uid}'"
+
+        # "last job" / "latest job" / "most recent job" / "recent job"
+        if re.search(r'\b(last|latest|most\s+recent|recent)\b.*\b(job|entry|work|project|gig)\b', msg):
+            return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 1"
+
+        # "how many jobs" / "count" / "total jobs"
+        if re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of)\b.*\b(job|entr|record|work)\b', msg):
+            return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}'"
+
+        # "total fees" / "total earnings" / "sum of fees"
+        if re.search(r'\b(total|sum|overall)\b.*\b(fees|earning|income|revenue|billing)\b', msg):
+            return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}'"
+
+        # "show all jobs" / "list jobs" / "my jobs"
+        if re.search(r'\b(show|list|all|my)\b.*\b(job|entr|record|work)\b', msg):
+            return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 25"
+
+        # "unpaid" / "pending payments"
+        if re.search(r'\b(unpaid|pending|not\s+paid|outstanding)\b', msg):
+            return f"{base} AND (paid IS NULL OR paid = '' OR paid = 'false' OR LOWER(paid) != 'true') ORDER BY job_date DESC NULLS LAST LIMIT 25"
+
+        # Generic fallback for any question with "job" — show recent jobs
+        if re.search(r'\bjob\b', msg):
+            return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 5"
+
+        return None
+
+    def _resolve_data_user_id(self, user_id: str, profile_data: Dict) -> str:
+        """
+        Resolve the effective user_id for data queries.
+        If a linked account exists in preferences, use that for job_entries queries.
+        """
+        prefs = profile_data.get("preferences") or {}
+        if isinstance(prefs, str):
+            try:
+                prefs = json.loads(prefs)
+            except (json.JSONDecodeError, TypeError):
+                prefs = {}
+        linked_id = prefs.get("linked_user_id")
+        if linked_id:
+            return linked_id
+        return user_id
+
+    def _handle_link_account(self, user_id: str, message: str) -> Dict:
+        """Handle 'link account' request — extract ID inline or prompt."""
+        msg_lower = message.strip().lower()
+        # Try to extract ID inline: "link telegram 751256859"
+        parts = message.strip().split()
+        # Look for a numeric ID or whatsapp:+ ID in the message
+        candidate = None
+        for part in parts:
+            clean = part.strip()
+            if clean.isdigit() and len(clean) >= 5:
+                candidate = clean
+                break
+            if clean.startswith("whatsapp:+"):
+                candidate = clean
+                break
+
+        if candidate:
+            return self._apply_link(user_id, message, candidate)
+
+        # No inline ID — prompt for it
+        self.memory.update_user_memory(user_id, {"awaiting_link_id": True})
+        platform = "telegram" if user_id.isdigit() else "whatsapp"
+        other = "WhatsApp" if platform == "telegram" else "Telegram"
+        response = (
+            f"To link your {other} account, I need the user ID from that platform.\n\n"
+            f"You can find it by messaging the bot on {other} and asking 'what is my user id'.\n\n"
+            "Please paste the ID here:"
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "link_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _process_link_id(self, user_id: str, message: str) -> Dict:
+        """Process the linked account ID after the user was prompted."""
+        self.memory.update_user_memory(user_id, {"awaiting_link_id": False})
+        candidate = message.strip()
+        if candidate.lower() in ("cancel", "nevermind", "never mind", "no"):
+            response = "No worries, account not linked."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "link_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        return self._apply_link(user_id, message, candidate)
+
+    def _apply_link(self, user_id: str, message: str, linked_id: str) -> Dict:
+        """Store the linked account ID in user preferences."""
+        platform = "telegram" if user_id.isdigit() else "whatsapp"
+        # Get current preferences
+        profile = self.supabase.get_user_profile(user_id)
+        prefs = {}
+        if profile.get("ok") and profile.get("data"):
+            prefs = profile["data"].get("preferences") or {}
+            if isinstance(prefs, str):
+                try:
+                    prefs = json.loads(prefs)
+                except (json.JSONDecodeError, TypeError):
+                    prefs = {}
+
+        prefs["linked_user_id"] = linked_id
+        result = self.supabase.upsert_user_profile(user_id, platform, {"preferences": json.dumps(prefs)})
+        if result.get("ok"):
+            response = f"Account linked! ✅ Your data from user ID '{linked_id}' is now accessible here."
+            logger.info(f"[LINK] Linked {user_id} → {linked_id}")
+        else:
+            response = "Sorry, I couldn't link the account right now. Please try again."
+            logger.error(f"[LINK] Failed to link {user_id} → {linked_id}: {result.get('error')}")
+        self._store_conversation(user_id, message, response)
+        return {"operation": "account_linked", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_name_change(self, user_id: str, message: str) -> Dict:
+        """Handle 'change my name' request — check if name is inline or prompt."""
+        msg_lower = message.strip().lower()
+        # Try to extract name inline: "change my name to Akshaj"
+        import re as _re
+        m = _re.search(r'(?:name\s+to|name\s+as|rename\s+me\s+to?)\s+(.+)', msg_lower)
+        if m:
+            new_name = m.group(1).strip().title()
+            return self._apply_name_change(user_id, message, new_name)
+
+        # No inline name — prompt for it
+        self.memory.update_user_memory(user_id, {"awaiting_name_change": True})
+        current_name = self._get_user_name(user_id) or "unknown"
+        response = f"Your current name is '{current_name}'. What would you like to change it to?"
+        self._store_conversation(user_id, message, response)
+        return {"operation": "name_change_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _process_name_change(self, user_id: str, message: str) -> Dict:
+        """Process the new name after the user was prompted."""
+        self.memory.update_user_memory(user_id, {"awaiting_name_change": False})
+        new_name = message.strip()
+        if new_name.lower() in ("cancel", "nevermind", "never mind", "no"):
+            response = "No worries, name unchanged."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "name_change_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        return self._apply_name_change(user_id, message, new_name.title())
+
+    def _apply_name_change(self, user_id: str, message: str, new_name: str) -> Dict:
+        """Apply the name change to user_profiles."""
+        platform = "telegram" if user_id.isdigit() else "whatsapp"
+        result = self.supabase.upsert_user_profile(user_id, platform, {"name": new_name})
+        if result.get("ok"):
+            response = f"Done! Your name has been updated to '{new_name}'. ✅"
+        else:
+            response = "Sorry, I couldn't update your name right now. Please try again."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "name_changed", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _get_user_name(self, user_id: str) -> str:
+        """Get user's name from profile, return None if not found."""
+        profile = self.supabase.get_user_profile(user_id)
+        if profile.get("ok") and profile.get("data"):
+            return profile["data"].get("name")
+        return None
+
+    def _start_onboarding(self, user_id: str, message: str) -> Dict:
+        """Start onboarding for a new user."""
+        # Determine platform from user_id format
+        platform = "telegram" if user_id.isdigit() else "whatsapp"
+        
+        # Create initial profile
+        self.supabase.upsert_user_profile(user_id, platform, {"platform": platform})
+        
+        response = self._get_welcome_message(platform)
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _continue_onboarding(self, user_id: str, message: str, profile: Dict) -> Dict:
+        """Continue onboarding based on what info we already have."""
+        platform = profile.get("platform", "telegram")
+        
+        # Check what step we're on
+        if not profile.get("name"):
+            # Step 1: Get name
+            raw_name = message.strip()
+
+            # Detect greetings / small-talk so we don't save "Hi" as the name
+            _GREETING_WORDS = {
+                "hi", "hello", "hey", "hii", "hiii", "yo", "sup",
+                "hola", "howdy", "morning", "evening", "afternoon",
+                "good morning", "good evening", "good afternoon",
+                "whats up", "what's up", "wassup", "namaste",
+            }
+            if raw_name.lower().rstrip("!?.,:; ") in _GREETING_WORDS:
+                response = (
+                    "Hey there! 👋 Before we begin, what's your name?"
+                )
+                self._store_conversation(user_id, message, response)
+                return {"operation": "onboarding_name_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            if raw_name.lower() in ("skip", "no", "n/a"):
+                name = "there"  # Generic greeting instead of user_id
+            else:
+                # Extract just the name part from common patterns
+                name_patterns = [
+                    "my name is ",
+                    "i'm ",
+                    "i am ",
+                    "call me ",
+                    "this is ",
+                    "it's ",
+                    "its ",
+                ]
+                name = raw_name
+                for pattern in name_patterns:
+                    if pattern.lower() in raw_name.lower():
+                        # Extract text after the pattern
+                        idx = raw_name.lower().find(pattern.lower())
+                        name = raw_name[idx + len(pattern):].strip()
+                        break
+                # If name is too long, it might still include extra words
+                if len(name.split()) > 3:
+                    # Take first 2-3 words as name
+                    name = " ".join(name.split()[:2])
+                # Capitalize properly
+                if name:
+                    name = name.title()
+            
+            result = self.supabase.upsert_user_profile(user_id, platform, {"name": name})
+            if not result.get("ok"):
+                logger.error(f"[ONBOARDING] Failed to save name for {user_id}: {result.get('error')}")
+                # Still respond but log the error
+            
+            response = (
+                f"Nice to meet you, {name}! 🎉\n\n"
+                "What's your company or business name?\n"
+                "(Type 'skip' to use your name)"
+            )
+            self._store_conversation(user_id, message, response)
+            return {"operation": "onboarding_name", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        
+        elif not profile.get("company_name"):
+            # Step 2: Get company name, then complete onboarding
+            company = message.strip()
+            if company.lower() in ("skip", "no", "n/a"):
+                company = profile.get("name", "Your Business")
+            
+            # Save company name AND mark as onboarded in one call
+            from datetime import datetime
+            self.supabase.upsert_user_profile(user_id, platform, {
+                "company_name": company,
+                "onboarded_at": datetime.now().isoformat()
+            })
+            
+            user_name = profile.get("name", "there")
+            response = (
+                f"Great, {user_name}! You're all set! ✅\n\n"
+                "Here's how to use me:\n\n"
+                "📊 View data:\n"
+                "• 'How many jobs this month?'\n"
+                "• 'Total fees for Client X'\n\n"
+                "📄 Generate invoices:\n"
+                "• 'Send invoice to Client for March'\n\n"
+                "✏️ Add jobs:\n"
+                "• 'Add a job for Client X'\n\n"
+                "💳 Bank details:\n"
+                "• 'Update bank details'\n\n"
+                "Try it now! Say 'Add a job' to get started."
+            )
+            self._store_conversation(user_id, message, response)
+            return {"operation": "onboarding_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        
+        else:
+            # Shouldn't reach here, but complete onboarding if somehow stuck
+            return self._complete_onboarding(user_id, message)
+
+    def _get_welcome_message(self, platform: str) -> str:
+        """Get platform-specific welcome message."""
+        if platform == "telegram":
+            return (
+                "👋 Welcome! I'm your personal invoice assistant.\n\n"
+                "I help you:\n"
+                "• Track jobs and payments\n"
+                "• Generate professional invoices\n"
+                "• Send payment reminders\n\n"
+                "Let's get started! What's your name?"
+            )
+        else:  # WhatsApp
+            return (
+                "Welcome to Remyndly! 🤖\n\n"
+                "I help manage your invoices and payments.\n"
+                "What's your business name to get started?"
+            )
+
+    def _handle_excel_import(self, user_id: str, message: str) -> Dict:
+        """Handle Excel file import choice."""
+        response = (
+            "📎 To import from Excel:\n\n"
+            "1. Download the template from: [Your template URL]\n"
+            "2. Fill it with your job data\n"
+            "3. Send the file here\n\n"
+            "Or reply 'back' to choose another option."
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_excel", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_csv_import(self, user_id: str, message: str) -> Dict:
+        """Handle CSV import choice."""
+        response = (
+            "📋 Paste your CSV data in this format:\n\n"
+            "Client Name,Job Description,Date,Fees,Email\n"
+            "Garnier,Short animation,2026-02-20,2000,email@example.com\n\n"
+            "Send your data or reply 'back' to choose another option."
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_csv", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_manual_entry(self, user_id: str, message: str) -> Dict:
+        """Handle manual entry choice."""
+        response = (
+            "✏️ I'll help you add jobs manually!\n\n"
+            "Let's add your first job. What's the client name?\n\n"
+            "(Type 'cancel' anytime to stop)"
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_manual", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _complete_onboarding(self, user_id: str, message: str) -> Dict:
+        """Complete the onboarding process."""
+        # Mark as onboarded
+        from datetime import datetime
+        self.supabase.upsert_user_profile(user_id, "", {"onboarded_at": datetime.now().isoformat()})
+        
+        response = (
+            "✅ You're all set! Here's how to use me:\n\n"
+            "📊 View data:\n"
+            "• 'How many jobs for Client X?'\n"
+            "• 'Total fees this month'\n"
+            "• 'Last payment date'\n\n"
+            "📄 Generate invoices:\n"
+            "• 'Send invoice to Client for March'\n"
+            "• 'Generate invoice for last job'\n\n"
+            "💳 Manage bank details:\n"
+            "• 'Update bank details'\n"
+            "• 'My bank details'\n\n"
+            "Try: 'Show my jobs from last week'"
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "onboarding_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
     @staticmethod
     def get_help_text() -> str:
         return (
-            "I'm your conversational assistant! You can naturally ask me to:\n"
-            "- 'Add a lead for John Doe'\n"
-            "- 'Get me Garnier invoice for April'\n"
+            "I'm your conversational assistant! Here's what I can do:\n\n"
+            "✏️ Add a job (one message!):\n"
+            "Add job\n"
+            "Bridgestone\n"
+            "10 Feb\n"
+            "Master film 30 sec + 4 cutdowns\n"
+            "Client: The Good Take\n"
+            "Fees: 25k\n\n"
+            "Or ultra-fast: + Bridgestone 10 Feb 25k master film\n\n"
+            "📄 Invoices: 'Send invoice to Garnier for April'\n"
+            "📊 Queries: 'Total fees this month' / 'Jobs for Client X'\n"
+            "💳 Bank: 'Update bank details' / 'My bank details'\n\n"
             "How can I help you today?"
         )

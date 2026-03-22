@@ -1,5 +1,7 @@
 import os
+import json
 import httpx
+from typing import List, Dict, Optional
 from utils.logger import logger
 
 class TelegramService:
@@ -53,3 +55,87 @@ class TelegramService:
             except Exception as e:
                 logger.error(f"Failed to send Telegram document: {e}")
                 return None
+
+    async def send_message_with_buttons(
+        self, chat_id: int, text: str, buttons: List[List[Dict[str, str]]]
+    ):
+        """
+        Send a message with an inline keyboard.
+        buttons: list of rows, each row is a list of {"text": "...", "callback_data": "..."}.
+        """
+        url = f"{self.base_url}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": {"inline_keyboard": buttons},
+        }
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"Failed to send Telegram message with buttons: {e}")
+                return None
+
+    async def answer_callback_query(self, callback_query_id: str, text: str = ""):
+        """Acknowledge an inline button press."""
+        url = f"{self.base_url}/answerCallbackQuery"
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.post(url, json=payload)
+            except Exception as e:
+                logger.debug(f"answer_callback_query failed: {e}")
+
+    async def edit_message_text(self, chat_id: int, message_id: int, text: str):
+        """Edit an existing message (e.g. to remove buttons after action)."""
+        url = f"{self.base_url}/editMessageText"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "Markdown",
+        }
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.post(url, json=payload)
+            except Exception as e:
+                logger.debug(f"edit_message_text failed: {e}")
+
+    # ── Sync helpers (for standalone worker scripts) ──────────────────────
+
+    def send_message_with_buttons_sync(
+        self, chat_id: int, text: str, buttons: List[List[Dict[str, str]]]
+    ):
+        """Synchronous version of send_message_with_buttons for worker scripts."""
+        url = f"{self.base_url}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": {"inline_keyboard": buttons},
+        }
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"[TELEGRAM_SYNC] Failed to send message with buttons: {e}")
+            return None
+
+    def send_text_message_sync(self, chat_id: int, text: str):
+        """Synchronous version of send_text_message for worker scripts."""
+        url = f"{self.base_url}/sendMessage"
+        safe_text = str(text).replace("<", "&lt;").replace(">", "&gt;") if text else ""
+        payload = {"chat_id": chat_id, "text": safe_text, "parse_mode": "HTML"}
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error(f"[TELEGRAM_SYNC] Failed to send text: {e}")
+            return None

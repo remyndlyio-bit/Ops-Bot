@@ -22,7 +22,7 @@ class InvoiceGenerationService:
     def __init__(self):
         pass
 
-    def generate_pdf(self, summary: Dict, client_data: List[Dict]) -> str:
+    def generate_pdf(self, summary: Dict, client_data: List[Dict], bank_details: Dict = None) -> str:
         """
         Generates a PDF using fpdf2.
         """
@@ -118,13 +118,16 @@ class InvoiceGenerationService:
             pdf.ln(10)
 
             # Footer / Bank Details
+            bd = bank_details or {}
             pdf.set_font(font_family, "B", 10)
             pdf.cell(0, 6, sanitize_pdf_text("BANK ACCOUNT DETAILS:"), ln=1)
             pdf.set_font(font_family, "", 10)
-            pdf.cell(0, 5, sanitize_pdf_text("Bank Name: [Your Bank Name]"), ln=1)
-            pdf.cell(0, 5, sanitize_pdf_text("Account Holder: Darshit Mody"), ln=1)
-            pdf.cell(0, 5, sanitize_pdf_text("Account Number: [Your Account Number]"), ln=1)
-            pdf.cell(0, 5, sanitize_pdf_text("IFSC Code: [Your IFSC Code]"), ln=1)
+            pdf.cell(0, 5, sanitize_pdf_text(f"Bank Name: {bd.get('bank_name') or '[Your Bank Name]'}"), ln=1)
+            pdf.cell(0, 5, sanitize_pdf_text(f"Account Holder: {bd.get('bank_account_name') or '[Account Holder]'}"), ln=1)
+            pdf.cell(0, 5, sanitize_pdf_text(f"Account Number: {bd.get('bank_account_number') or '[Your Account Number]'}"), ln=1)
+            pdf.cell(0, 5, sanitize_pdf_text(f"IFSC Code: {bd.get('bank_ifsc') or '[Your IFSC Code]'}"), ln=1)
+            if bd.get("upi_id"):
+                pdf.cell(0, 5, sanitize_pdf_text(f"UPI ID: {bd['upi_id']}"), ln=1)
 
             pdf.ln(5)
             pdf.set_font(font_family, "B", 10)

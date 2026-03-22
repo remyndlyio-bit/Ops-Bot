@@ -111,6 +111,7 @@ else:
     JOB_ENTRIES_COLUMNS = [
         "id",
         "created_at",
+        "user_id",
         "job_date",
         "client_name",
         "brand_name",
@@ -122,6 +123,7 @@ else:
         "added_3rd_party_cut",
         "bill_no",
         "bill_sent",
+        "invoice_date",
         "paid",
         "payment_date",
         "poc_email",
@@ -135,6 +137,7 @@ else:
 
     SCHEMA_DESCRIPTION = """
 Table: public.job_entries
+- user_id (uuid): owner of the row; every SELECT must filter by user_id, every INSERT must include user_id.
 - job_date (date): when the job was done; use for "when", "last gig", time filters.
 - client_name (text): client name or organization.
 - brand_name (text): brand or product (e.g. Titan, Tanishq, Surf Excel).
@@ -143,7 +146,7 @@ Table: public.job_entries
 - client_billing_details (text): billing instructions or special terms for this client.
 - fees (integer): amount in rupees.
 - advance (numeric), added_3rd_party_cut (numeric).
-- bill_no (text), bill_sent (text), paid (text): billing status.
+- bill_no (text), bill_sent (text), invoice_date (date): when the invoice was sent to the client, paid (text): billing status.
 - payment_date (date): when payment was received.
 - poc_email (text), poc_name (text): contact.
 - first_reminder_sent, second_reminder_sent, third_reminder_sent (timestamptz).
@@ -177,9 +180,9 @@ class SupabaseService:
 
     def execute_sql(self, sql: str) -> Dict[str, Any]:
         """
-        Execute validated SQL (SELECT or INSERT) via direct Postgres connection.
+        Execute validated SQL (SELECT, INSERT, or UPDATE) via direct Postgres connection.
         SELECT: returns {"ok": True, "rows": [...], "operation": "select"}.
-        INSERT: returns {"ok": True, "rows": [...]} if RETURNING used, else {"ok": True, "rowcount": 1, "operation": "insert"}.
+        INSERT/UPDATE: returns {"ok": True, "rows": [...]} if RETURNING used, else {"ok": True, "rowcount": N, "operation": "insert"|"update"}.
         On error: {"ok": False, "error": "..."}.
         """
         if not self.db_url:
@@ -194,8 +197,8 @@ class SupabaseService:
 
         sql = sql.strip().rstrip(";")
         upper = sql.upper()
-        if not upper.startswith("SELECT") and not upper.startswith("INSERT"):
-            return {"ok": False, "error": "Only SELECT and INSERT are allowed."}
+        if not upper.startswith("SELECT") and not upper.startswith("INSERT") and not upper.startswith("UPDATE"):
+            return {"ok": False, "error": "Only SELECT, INSERT, and UPDATE are allowed."}
 
         try:
             conn = psycopg2.connect(self.db_url)
@@ -227,7 +230,8 @@ class SupabaseService:
                             out.append(d)
                         rows = out
                     conn.close()
-                    return {"ok": True, "rows": rows, "rowcount": rowcount, "operation": "insert"}
+                    op = "update" if upper.startswith("UPDATE") else "insert"
+                    return {"ok": True, "rows": rows, "rowcount": rowcount, "operation": op}
         except Exception as e:
             logger.error(f"Supabase SQL execution error: {e}")
             err_msg = str(e)
@@ -255,6 +259,10 @@ class SupabaseService:
 
         if not record or not isinstance(record, dict):
             return {"ok": False, "error": "No data provided to insert."}
+
+        # Require user_id for multi-tenant isolation
+        if "user_id" not in record or not record["user_id"]:
+            return {"ok": False, "error": "user_id is required for every insert."}
 
         # Remove disallowed keys
         cleaned = {k: v for k, v in record.items() if k and k not in {"id", "created_at"}}
@@ -305,11 +313,13 @@ class SupabaseService:
         month: Optional[int] = None,
         year: Optional[int] = None,
         bill_no: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Fetch job_entries rows for invoice generation.
         - If bill_no provided: match by bill_no exactly.
         - Else match by client_name (ILIKE) and optional month/year on job_date.
+        - If user_id provided, results are scoped to that user.
         Returns {"ok": True, "rows": [...]} or {"ok": False, "error": "..."}.
         """
         if not self.db_url:
@@ -320,6 +330,10 @@ class SupabaseService:
 
         where = []
         params: List[Any] = []
+
+        if user_id:
+            where.append("user_id = %s")
+            params.append(str(user_id))
 
         if bill_no:
             where.append("bill_no = %s")
@@ -341,6 +355,8 @@ class SupabaseService:
             "ORDER BY job_date ASC "
             "LIMIT 500"
         )
+        logger.info(f"[INVOICE DEBUG] SQL: {sql}")
+        logger.info(f"[INVOICE DEBUG] Params: {params}")
 
         try:
             import psycopg2
@@ -391,19 +407,47 @@ class SupabaseService:
             logger.error(f"Supabase update_job_entry_field error: {e}")
             return {"ok": False, "error": str(e)}
 
+    def update_poc_email_for_client(self, user_id: str, client_name: str, poc_email: str) -> Dict[str, Any]:
+        """
+        Update poc_email for all job_entries matching a client_name (ILIKE) for a user.
+        Returns {"ok": True, "updated": N} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    'UPDATE public.job_entries SET poc_email = %s '
+                    'WHERE user_id = %s AND client_name ILIKE %s AND (poc_email IS NULL OR TRIM(poc_email) = %s)',
+                    (poc_email, str(user_id), f'%{client_name}%', '')
+                )
+                updated = cur.rowcount
+            conn.close()
+            logger.info(f"[POC] Updated poc_email for {updated} rows (client={client_name}, user={user_id})")
+            return {"ok": True, "updated": updated}
+        except Exception as e:
+            logger.error(f"Supabase update_poc_email_for_client error: {e}")
+            return {"ok": False, "error": str(e)}
+
     def fetch_reminder_targets(
         self,
         approaching_days: int = 7,
         payment_terms_days: int = 30,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch job_entries that are unpaid, have poc_email, first_reminder_sent is null,
         and (job_date + payment_terms_days) is within [today, today + approaching_days].
+        If user_id provided, results are scoped to that user.
         Returns list of dicts with id, client_name, poc_email, job_date, fees, bill_no, etc.
         """
         if not self.db_url:
             return []
-        sql = """
+        user_clause = "AND user_id = %s" if user_id else ""
+        sql = f"""
         SELECT id, client_name, poc_email, job_date, fees, bill_no,
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
@@ -413,16 +457,20 @@ class SupabaseService:
           AND job_date IS NOT NULL
           AND (job_date + (%s::int || ' days')::interval)::date >= CURRENT_DATE
           AND (job_date + (%s::int || ' days')::interval)::date <= CURRENT_DATE + (%s::int || ' days')::interval
+          {user_clause}
         ORDER BY job_date ASC
         LIMIT 100
         """
+        params = [payment_terms_days, payment_terms_days, payment_terms_days, approaching_days]
+        if user_id:
+            params.append(str(user_id))
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
             conn = psycopg2.connect(self.db_url)
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql, (payment_terms_days, payment_terms_days, payment_terms_days, approaching_days))
+                cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
             conn.close()
             out = []
@@ -437,29 +485,36 @@ class SupabaseService:
             logger.error(f"Supabase fetch_reminder_targets error: {e}")
             return []
 
-    def fetch_overdue_jobs(self, payment_terms_days: int = 30) -> List[Dict[str, Any]]:
+    def fetch_overdue_jobs(self, payment_terms_days: int = 30, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Fetch job_entries that are unpaid and (job_date + payment_terms_days) < today.
+        If user_id provided, results are scoped to that user.
         """
         if not self.db_url:
             return []
-        sql = """
+        user_clause = "AND user_id = %s" if user_id else ""
+        sql = f"""
         SELECT id, client_name, job_date, fees, bill_no, poc_email,
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
         WHERE (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
           AND job_date IS NOT NULL
           AND (job_date + (%s::int || ' days')::interval)::date < CURRENT_DATE
+          {user_clause}
         ORDER BY (job_date + (%s::int || ' days')::interval)::date ASC
         LIMIT 100
         """
+        params = [payment_terms_days, payment_terms_days]
+        if user_id:
+            params.append(str(user_id))
+        params.append(payment_terms_days)
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
             conn = psycopg2.connect(self.db_url)
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql, (payment_terms_days, payment_terms_days, payment_terms_days))
+                cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
             conn.close()
             out = []
@@ -473,3 +528,213 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Supabase fetch_overdue_jobs error: {e}")
             return []
+
+    # --- User Config (bank details) ---
+
+    _BANK_DETAIL_FIELDS = [
+        "bank_account_name", "bank_account_number", "bank_ifsc",
+        "bank_name", "upi_id",
+    ]
+
+    def get_user_bank_details(self, user_id: str) -> Dict[str, Any]:
+        """
+        Fetch bank details from user_config for a given user_id.
+        Returns {"ok": True, "data": {...}} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        if not user_id:
+            return {"ok": False, "error": "user_id is required."}
+
+        sql = "SELECT * FROM public.user_config WHERE user_id = %s LIMIT 1"
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, (str(user_id),))
+                row = cur.fetchone()
+            conn.close()
+            if not row:
+                logger.info(f"[BANK] No bank details found for user_id={user_id}")
+                return {"ok": True, "data": None}
+            out = dict(row)
+            for k, v in list(out.items()):
+                if hasattr(v, "isoformat") and v is not None:
+                    out[k] = v.isoformat()
+            logger.info(f"[BANK] Retrieved bank details for user_id={user_id}")
+            return {"ok": True, "data": out}
+        except Exception as e:
+            logger.error(f"Supabase get_user_bank_details error: {e}")
+            return {"ok": False, "error": "Failed to retrieve bank details."}
+
+    def upsert_user_config(self, user_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Insert or update user_config row for a given user_id.
+        Only bank-detail fields are written; unknown keys are ignored.
+        Returns {"ok": True, "data": {...}} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        if not user_id:
+            return {"ok": False, "error": "user_id is required."}
+
+        cleaned = {k: v for k, v in config.items() if k in self._BANK_DETAIL_FIELDS and v}
+        if not cleaned:
+            return {"ok": False, "error": "No valid bank detail fields provided."}
+
+        cols = list(cleaned.keys())
+        values = [cleaned[c] for c in cols]
+
+        col_list = ", ".join([f'"{c}"' for c in cols])
+        placeholders = ", ".join(["%s"] * len(cols))
+        update_set = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in cols])
+
+        sql = (
+            f'INSERT INTO public.user_config (user_id, {col_list}) '
+            f"VALUES (%s, {placeholders}) "
+            f"ON CONFLICT (user_id) DO UPDATE SET {update_set}, "
+            f"updated_at = now() "
+            f"RETURNING *"
+        )
+        params = [str(user_id)] + values
+
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+            conn.close()
+            out = dict(row) if row else {}
+            for k, v in list(out.items()):
+                if hasattr(v, "isoformat") and v is not None:
+                    out[k] = v.isoformat()
+            logger.info(f"[BANK] Upserted bank details for user_id={user_id}: fields={cols}")
+            return {"ok": True, "data": out}
+        except Exception as e:
+            logger.error(f"Supabase upsert_user_config error: {e}")
+            return {"ok": False, "error": "Failed to save bank details."}
+
+    # --- User Profiles (onboarding) ---
+
+    def get_user_profile(self, user_id: str) -> Dict[str, Any]:
+        """
+        Fetch user profile for a given user_id.
+        Returns {"ok": True, "data": {...}} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        if not user_id:
+            return {"ok": False, "error": "user_id is required."}
+
+        sql = "SELECT * FROM public.user_profiles WHERE user_id = %s LIMIT 1"
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, (str(user_id),))
+                row = cur.fetchone()
+            conn.close()
+            if not row:
+                logger.info(f"[PROFILE] No profile found for user_id={user_id}")
+                return {"ok": True, "data": None}
+            out = dict(row)
+            for k, v in list(out.items()):
+                if hasattr(v, "isoformat") and v is not None:
+                    out[k] = v.isoformat()
+            logger.info(f"[PROFILE] Retrieved profile for user_id={user_id}")
+            return {"ok": True, "data": out}
+        except Exception as e:
+            logger.error(f"Supabase get_user_profile error: {e}")
+            return {"ok": False, "error": "Failed to retrieve user profile."}
+
+    def upsert_user_profile(self, user_id: str, platform: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Insert or update user profile for a given user_id.
+        Returns {"ok": True, "data": {...}} or {"ok": False, "error": "..."}.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        if not user_id:
+            return {"ok": False, "error": "user_id is required."}
+
+        # Merge with existing profile if updating
+        existing = self.get_user_profile(user_id)
+        if existing.get("ok") and existing.get("data"):
+            # Keep existing fields that aren't being updated
+            current = existing["data"]
+            for k, v in profile.items():
+                current[k] = v
+            profile = current
+
+        # Add/update platform and timestamps
+        if platform:  # Only set platform if provided
+            profile["platform"] = platform
+        if not profile.get("platform"):
+            profile["platform"] = "telegram" if user_id.isdigit() else "whatsapp"
+
+        # Convert JSONB field to string for PostgreSQL
+        if "preferences" in profile:
+            if isinstance(profile["preferences"], dict):
+                import json
+                profile["preferences"] = json.dumps(profile["preferences"])
+            # If it's already a string (from DB), keep it as is
+
+        # Build dynamic upsert query
+        # Remove system columns and None values to avoid issues
+        skip_cols = {'user_id', 'updated_at', 'created_at', 'id'}
+        profile_for_update = {k: v for k, v in profile.items() 
+                             if k not in skip_cols and v is not None}
+        logger.info(f"[PROFILE] Upsert cols for {user_id}: {list(profile_for_update.keys())}")
+        cols = list(profile_for_update.keys())
+        values = [profile_for_update[c] for c in cols]
+        
+        if cols:  # Only if there are columns to update
+            col_list = ", ".join([f'"{c}"' for c in cols])
+            placeholders = ", ".join(["%s"] * len(cols))
+            update_set = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in cols])
+            
+            sql = (
+                f'INSERT INTO public.user_profiles (user_id, {col_list}) '
+                f"VALUES (%s, {placeholders}) "
+                f"ON CONFLICT (user_id) DO UPDATE SET {update_set}, "
+                f"updated_at = now() "
+                f"RETURNING *"
+            )
+            params = [str(user_id)] + values
+        else:  # Just insert with user_id only
+            sql = (
+                'INSERT INTO public.user_profiles (user_id) '
+                "VALUES (%s) "
+                "ON CONFLICT (user_id) DO UPDATE SET "
+                "updated_at = now() "
+                "RETURNING *"
+            )
+            params = [str(user_id)]
+
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                logger.info(f"[PROFILE] SQL: {sql}")
+                logger.info(f"[PROFILE] Params: {params}")
+                cur.execute(sql, params)
+                row = cur.fetchone()
+            conn.close()
+            out = dict(row) if row else {}
+            for k, v in list(out.items()):
+                if hasattr(v, "isoformat") and v is not None:
+                    out[k] = v.isoformat()
+            logger.info(f"[PROFILE] Upserted profile for user_id={user_id}")
+            return {"ok": True, "data": out}
+        except Exception as e:
+            logger.error(f"Supabase upsert_user_profile error: {e}")
+            return {"ok": False, "error": "Failed to save user profile."}

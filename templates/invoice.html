@@ -82,10 +82,11 @@
         <div class="footer">
             <div class="bank-details">
                 <strong>BANK ACCOUNT DETAILS:</strong><br>
-                Bank Name: [Bank Name]<br>
-                Account Holder: Darshit Mody<br>
-                Account Number: [Account Number]<br>
-                IFSC Code: [IFSC Code]
+                Bank Name: {{ bank_name or '[Bank Name]' }}<br>
+                Account Holder: {{ bank_account_name or '[Account Holder]' }}<br>
+                Account Number: {{ bank_account_number or '[Account Number]' }}<br>
+                IFSC Code: {{ bank_ifsc or '[IFSC Code]' }}
+                {% if upi_id %}<br>UPI ID: {{ upi_id }}{% endif %}
             </div>
             
             <div style="margin-top: 20px;">

@@ -55,6 +55,13 @@ async def startup_event():
             resp = await client.post(f"https://api.telegram.org/bot{token}/setWebhook", data={"url": webhook_url})
             logger.info(f"Telegram webhook set to {webhook_url}: {resp.json()}")
 
+    # Log the expected WhatsApp webhook URL (must be configured manually in Twilio console)
+    if base_url:
+        wa_webhook = f"{base_url.rstrip('/')}/webhooks/whatsapp"
+        logger.info(f"WhatsApp webhook URL (set this in Twilio console): {wa_webhook}")
+    else:
+        logger.warning("BASE_URL not set — WhatsApp webhook URL unknown. Set BASE_URL env var.")
+
     # Send "I've been updated" message to all known Telegram chats (user_id = chat_id for Telegram)
     if token:
         try:
@@ -75,6 +82,27 @@ async def startup_event():
 def health_check():
     return {"status": "healthy", "version": "1.0.0"}
 
+@app.get("/webhooks/whatsapp")
+def whatsapp_health():
+    """GET handler so you can verify the WhatsApp webhook URL is reachable."""
+    return {"status": "ok", "endpoint": "whatsapp_webhook"}
+
+
+def _notify_user(platform: str, chat_id, user_id_str: str, msg: str):
+    """Send a notification to the user on either platform."""
+    try:
+        if platform == "telegram" and chat_id:
+            import asyncio as _asyncio
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(telegram_service.send_text_message(chat_id, msg))
+            else:
+                loop.run_until_complete(telegram_service.send_text_message(chat_id, msg))
+        elif platform == "whatsapp" and user_id_str:
+            whatsapp_service.send_text_message(user_id_str, msg)
+    except Exception as e:
+        logger.warning(f"Failed to notify {platform} user: {e}")
+
 
 def send_invoice_email(
     client_name: str,
@@ -84,12 +112,15 @@ def send_invoice_email(
     rows: list,
     platform: str = "telegram",
     chat_id: int | None = None,
+    user_id: str | None = None,
 ) -> None:
     """
     Send the generated invoice PDF via email using poc_email from job_entries.
-    - If poc_email is missing, log and optionally notify the Telegram user.
-    - On success, confirm in Telegram; on failure, log and notify.
+    Notifies the user on BOTH platforms if poc_email is missing or email fails.
     """
+    # Resolve user_id for notifications (works for both platforms)
+    user_id_str = user_id or (str(chat_id) if chat_id else None)
+
     # 1. Look up poc_email
     poc_email = None
     for row in rows or []:
@@ -100,28 +131,24 @@ def send_invoice_email(
 
     if not poc_email:
         logger.warning("Invoice generated but client email (poc_email) is missing.")
-        if platform == "telegram" and chat_id:
-            # Best-effort notification; ignore failures here.
-            try:
-                import asyncio as _asyncio
+        # Store state so user can provide POC email
+        try:
+            if user_id_str and hasattr(intent_service, 'memory'):
+                intent_service.memory.update_user_memory(user_id_str, {
+                    "awaiting_poc_email": True,
+                    "poc_email_client": client_name,
+                    "poc_email_pdf_path": file_path,
+                    "poc_email_month": month,
+                    "poc_email_year": year,
+                })
+        except Exception as mem_err:
+            logger.warning(f"Failed to store POC email state: {mem_err}")
 
-                loop = _asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(
-                        telegram_service.send_text_message(
-                            chat_id,
-                            "Invoice generated but client email is missing.",
-                        )
-                    )
-                else:
-                    loop.run_until_complete(
-                        telegram_service.send_text_message(
-                            chat_id,
-                            "Invoice generated but client email is missing.",
-                        )
-                    )
-            except Exception as notify_err:
-                logger.warning(f"Failed to notify Telegram about missing email: {notify_err}")
+        _notify_user(platform, chat_id, user_id_str, (
+            f"Invoice generated but I don't have a contact email for {client_name}.\n\n"
+            f"Please provide the client's email so I can send it:\n"
+            f"Example: client@agency.com"
+        ))
         return
 
     # 2. Send email with PDF attached
@@ -139,51 +166,11 @@ def send_invoice_email(
 
     if not ok:
         logger.error("Invoice generated but email sending failed.")
-        if platform == "telegram" and chat_id:
-            try:
-                import asyncio as _asyncio
-
-                loop = _asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(
-                        telegram_service.send_text_message(
-                            chat_id,
-                            "Invoice generated but email sending failed.",
-                        )
-                    )
-                else:
-                    loop.run_until_complete(
-                        telegram_service.send_text_message(
-                            chat_id,
-                            "Invoice generated but email sending failed.",
-                        )
-                    )
-            except Exception as notify_err:
-                logger.warning(f"Failed to notify Telegram about email failure: {notify_err}")
+        _notify_user(platform, chat_id, user_id_str, "Invoice generated but email sending failed.")
         return
 
-    # 3. On success, confirm in Telegram
-    if platform == "telegram" and chat_id:
-        try:
-            import asyncio as _asyncio
-
-            loop = _asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(
-                    telegram_service.send_text_message(
-                        chat_id,
-                        f"Invoice has been emailed to {poc_email}.",
-                    )
-                )
-            else:
-                loop.run_until_complete(
-                    telegram_service.send_text_message(
-                        chat_id,
-                        f"Invoice has been emailed to {poc_email}.",
-                    )
-                )
-        except Exception as notify_err:
-            logger.warning(f"Failed to send Telegram confirmation for emailed invoice: {notify_err}")
+    # 3. On success, confirm
+    _notify_user(platform, chat_id, user_id_str, f"Invoice has been emailed to {poc_email}.")
 
 
 async def process_and_send_invoice(
@@ -194,6 +181,7 @@ async def process_and_send_invoice(
     chat_id: int = None,
     bill_number: str = None,
     year: int = None,
+    user_id: str = None,
 ):
     """
     Background task to generate PDF and send it via WhatsApp or Telegram.
@@ -205,9 +193,9 @@ async def process_and_send_invoice(
             from datetime import datetime
             year = datetime.now().year
         if bill_number:
-            result = supabase_service.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number)
+            result = supabase_service.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=user_id)
         else:
-            result = supabase_service.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year)
+            result = supabase_service.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year, user_id=user_id)
         if not result.get("ok") or not result.get("rows"):
             logger.warning(f"No data found for invoice generation: {client_name} - {month} (Year: {year})")
             return
@@ -225,85 +213,60 @@ async def process_and_send_invoice(
         if os.path.exists(candidate_path):
             pdf_path = candidate_path
         else:
-            pdf_path = invoice_gen_service.generate_pdf(summary, data)
+            bank_details = None
+            if user_id:
+                bank_result = supabase_service.get_user_bank_details(user_id)
+                if bank_result.get("ok") and bank_result.get("data"):
+                    bank_details = bank_result["data"]
+                    logger.info(f"[INVOICE] Loaded bank details for user_id={user_id}")
+                else:
+                    logger.info(f"[INVOICE] No bank details found for user_id={user_id}, using defaults")
+            pdf_path = invoice_gen_service.generate_pdf(summary, data, bank_details=bank_details)
         if not pdf_path:
             logger.error("Failed to generate PDF")
             return
 
         confirmation_text = f"Here’s the invoice for {summary['client']} {summary['month']}."
 
-        if platform == "whatsapp":
-            # 4. Construct Public URL
+        # 4. Send PDF + confirmation — platform-specific transport only
+        if platform == "whatsapp" and to_number:
             base_url = os.getenv("BASE_URL", "").strip()
             if base_url and not base_url.startswith("http"):
                 base_url = f"https://{base_url}"
-            
             if not base_url:
-                base_url = "http://localhost:8080" # Fallback
-
+                base_url = "http://localhost:8080"
             filename = os.path.basename(pdf_path)
             media_url = f"{base_url}/static/{filename}"
-
-            # 5. Send PDF first (no caption to ensure it's first)
-            whatsapp_service.send_media_message(
-                to_number=to_number,
-                body="",
-                media_url=media_url
-            )
-            # 6. Then send confirmation
+            whatsapp_service.send_media_message(to_number=to_number, body="", media_url=media_url)
             whatsapp_service.send_text_message(to_number, confirmation_text)
 
         elif platform == "telegram" and chat_id:
-            # 5. Send PDF first
-            await telegram_service.send_document(
-                chat_id=chat_id,
-                file_path=pdf_path,
-                caption=""
-            )
-            # 6. Then send confirmation
+            await telegram_service.send_document(chat_id=chat_id, file_path=pdf_path, caption="")
             await telegram_service.send_text_message(chat_id, confirmation_text)
-            # 7. Then send the same PDF over email (if possible)
-            send_invoice_email(
-                client_name=summary.get("client", client_name),
-                month=summary.get("month", month or "Request"),
-                year=year,
-                file_path=pdf_path,
-                rows=data,
-                platform="telegram",
-                chat_id=chat_id,
+
+        # 5. Update invoice_date for all affected rows — SAME for both platforms
+        row_ids = [r["id"] for r in data if r.get("id")]
+        if row_ids:
+            ids_str = ",".join(f"'{rid}'" for rid in row_ids)
+            supabase_service.execute_sql(
+                f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE WHERE id IN ({ids_str})"
             )
+            logger.info(f"[INVOICE] Updated invoice_date for {len(row_ids)} row(s)")
+
+        # 6. Send invoice via email — SAME for both platforms
+        send_invoice_email(
+            client_name=summary.get("client", client_name),
+            month=summary.get("month", month or "Request"),
+            year=year,
+            file_path=pdf_path,
+            rows=data,
+            platform=platform,
+            chat_id=chat_id,
+            user_id=user_id,
+        )
 
     except Exception as e:
         logger.error(f"Error in process_and_send_invoice task: {e}")
-
-@app.post("/webhooks/whatsapp")
-async def whatsapp_webhook(
-    background_tasks: BackgroundTasks,
-    Body: str = Form(...),
-    From: str = Form(...)
-):
-    """Twilio WhatsApp Webhook"""
-    logger.info(f"Received message from {From}: {Body}")
-
-    # Use the new Three-Stage architecture
-    result = intent_service.process_request(user_id=From, message=Body)
-    
-    # Only send immediate response if it's not a suppressed retrieval response
-    if result.get("response"):
-        whatsapp_service.send_text_message(From, result["response"])
-
-    if result.get("trigger_invoice"):
-        data = result["invoice_data"]
-        background_tasks.add_task(
-            process_and_send_invoice, 
-            From, data["client_name"], data["month"], 
-            platform="whatsapp",
-            bill_number=data.get("bill_number"),
-            year=data.get("year")
-        )
-
-    # Return an empty 204 so Twilio does not send an extra 'OK' message.
-    return Response(status_code=204)
 
 async def _keep_typing(chat_id: int, stop_event: asyncio.Event):
     """Send typing action every 4 seconds until stop_event is set."""
@@ -314,11 +277,301 @@ async def _keep_typing(chat_id: int, stop_event: asyncio.Event):
         except asyncio.TimeoutError:
             pass
 
+
+async def _handle_bot_message(
+    user_id: str,
+    message: str,
+    platform: str,
+    background_tasks: BackgroundTasks,
+    chat_id: int = None,
+):
+    """
+    Unified message handler for both Telegram and WhatsApp.
+    Ensures IDENTICAL processing flow regardless of platform.
+    """
+    tag = platform.upper()
+
+    # 1. Typing indicator (Telegram only — WhatsApp/Twilio has no native equivalent)
+    stop_typing = None
+    typing_task = None
+    if platform == "telegram" and chat_id:
+        await telegram_service.send_chat_action(chat_id, "typing")
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(_keep_typing(chat_id, stop_typing))
+
+    try:
+        # 2. Process the message — SAME for both platforms
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: intent_service.process_request(user_id=user_id, message=message)
+        )
+        logger.info(f"[{tag}] Result operation={result.get('operation')} for {user_id}")
+    finally:
+        # 3. Stop typing indicator
+        if stop_typing:
+            stop_typing.set()
+        if typing_task:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+
+    # 4. Send response — platform-specific transport only
+    if result.get("response"):
+        if platform == "telegram" and chat_id:
+            await telegram_service.send_text_message(chat_id, result["response"])
+        elif platform == "whatsapp":
+            whatsapp_service.send_text_message(user_id, result["response"])
+
+    # 5. Handle invoice generation — SAME for both platforms
+    if result.get("trigger_invoice"):
+        inv = result["invoice_data"]
+        background_tasks.add_task(
+            process_and_send_invoice,
+            user_id if platform == "whatsapp" else None,  # to_number (WhatsApp only)
+            inv["client_name"],
+            inv["month"],
+            platform=platform,
+            chat_id=chat_id,
+            bill_number=inv.get("bill_number"),
+            year=inv.get("year"),
+            user_id=user_id,
+        )
+
+    return result
+
+
+@app.post("/webhooks/whatsapp")
+async def whatsapp_webhook(
+    background_tasks: BackgroundTasks,
+    Body: str = Form(...),
+    From: str = Form(...)
+):
+    """Twilio WhatsApp Webhook — delegates to unified handler."""
+    try:
+        logger.info(f"Received WhatsApp message from {From}: {Body}")
+        await _handle_bot_message(
+            user_id=From, message=Body, platform="whatsapp",
+            background_tasks=background_tasks,
+        )
+    except Exception as e:
+        logger.error(f"WhatsApp webhook error: {e}")
+    return Response(status_code=204)
+
+async def _handle_send_all_reminders(callback_query: dict):
+    """Handle 'Send All' button — send reminder emails for every job in the inline keyboard."""
+    chat_id = callback_query["message"]["chat"]["id"]
+    message_id = callback_query["message"]["message_id"]
+    user_id = str(chat_id)
+
+    # Extract job_id:level pairs from the other inline buttons' callback_data
+    reply_markup = callback_query["message"].get("reply_markup", {})
+    job_pairs = []
+    for row in reply_markup.get("inline_keyboard", []):
+        for btn in row:
+            cb = btn.get("callback_data", "")
+            parts = cb.split(":")
+            if len(parts) == 3 and parts[0] == "remind" and parts[1] not in ("skip", "send"):
+                job_pairs.append((parts[1], parts[2]))  # (job_id, level)
+
+    if not job_pairs:
+        await telegram_service.edit_message_text(chat_id, message_id, "No reminders found to send.")
+        return
+
+    # Get sender name once
+    profile = supabase_service.get_user_profile(user_id)
+    sender_name = "Team"
+    if profile.get("ok") and profile.get("data"):
+        sender_name = profile["data"].get("name") or sender_name
+
+    sent = []
+    failed = []
+    flag_map = {
+        "first": "first_reminder_sent",
+        "second": "second_reminder_sent",
+        "third": "third_reminder_sent",
+    }
+    subject_map_tpl = {
+        "first": "First Payment Reminder – Invoice #{bill_no}",
+        "second": "Second Payment Reminder – Invoice #{bill_no}",
+        "third": "Final Payment Reminder – Invoice #{bill_no}",
+    }
+
+    await telegram_service.edit_message_text(
+        chat_id, message_id, f"⏳ Sending {len(job_pairs)} reminder(s)..."
+    )
+
+    for job_id, level in job_pairs:
+        fetch_sql = f"SELECT * FROM public.job_entries WHERE id = '{job_id}'"
+        result = supabase_service.execute_sql(fetch_sql)
+        if not result.get("ok") or not result.get("rows"):
+            failed.append(job_id)
+            continue
+
+        row = result["rows"][0]
+        poc_email = row.get("poc_email")
+        if not poc_email:
+            failed.append(row.get("client_name") or job_id)
+            continue
+
+        bill_no = row.get("bill_no") or "N/A"
+        client_name = row.get("client_name") or "Client"
+        poc_name = row.get("poc_name") or client_name
+        fees = row.get("fees")
+        try:
+            amount_str = f"₹{int(float(fees)):,}"
+        except (ValueError, TypeError):
+            amount_str = str(fees) if fees else "N/A"
+
+        subject = subject_map_tpl.get(level, "Payment Reminder – Invoice #{bill_no}").replace("{bill_no}", str(bill_no))
+        body = (
+            f"Hi {poc_name},\n\n"
+            f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
+            f"Amount Due: {amount_str}\n\n"
+            f"Please let us know if payment has already been processed.\n\n"
+            f"Best regards,\n{sender_name}\n"
+        )
+
+        ok = email_service.send_email(to_email=poc_email, subject=subject, body=body)
+        if ok:
+            sent.append(f"{client_name} → {poc_email}")
+            flag_col = flag_map.get(level)
+            if flag_col:
+                supabase_service.execute_sql(
+                    f"UPDATE public.job_entries SET {flag_col} = NOW() WHERE id = '{job_id}'"
+                )
+        else:
+            failed.append(f"{client_name} ({poc_email})")
+
+    # Build summary
+    lines = [f"✅ Sent {len(sent)} reminder(s)."]
+    for s in sent:
+        lines.append(f"  • {s}")
+    if failed:
+        lines.append(f"\n❌ Failed for {len(failed)}:")
+        for f_item in failed:
+            lines.append(f"  • {f_item}")
+    await telegram_service.edit_message_text(chat_id, message_id, "\n".join(lines))
+
+
+async def _handle_reminder_callback(callback_query: dict):
+    """Handle inline button presses from the reminder worker notifications."""
+    cb_id = callback_query.get("id")
+    cb_data = callback_query.get("data", "")
+    chat_id = callback_query["message"]["chat"]["id"]
+    message_id = callback_query["message"]["message_id"]
+
+    # Acknowledge the button press immediately
+    await telegram_service.answer_callback_query(cb_id)
+
+    if cb_data == "remind:skip:all":
+        await telegram_service.edit_message_text(
+            chat_id, message_id, "⏭ Reminders skipped. You can always send them manually later."
+        )
+        return
+
+    if cb_data == "remind:send:all":
+        await _handle_send_all_reminders(callback_query)
+        return
+
+    # Parse callback_data: remind:<job_id>:<level>
+    parts = cb_data.split(":")
+    if len(parts) != 3 or parts[0] != "remind":
+        return
+    job_id, level = parts[1], parts[2]
+
+    # Fetch the job row to get email details
+    fetch_sql = f"SELECT * FROM public.job_entries WHERE id = '{job_id}'"
+    result = supabase_service.execute_sql(fetch_sql)
+    if not result.get("ok") or not result.get("rows"):
+        await telegram_service.edit_message_text(
+            chat_id, message_id, "❌ Could not find that invoice. It may have been deleted."
+        )
+        return
+
+    row = result["rows"][0]
+    poc_email = row.get("poc_email")
+    if not poc_email:
+        await telegram_service.edit_message_text(
+            chat_id, message_id,
+            f"❌ No email on file for {row.get('client_name', 'this client')}. "
+            f"Please add a POC email first."
+        )
+        return
+
+    # Build email
+    bill_no = row.get("bill_no") or "N/A"
+    client_name = row.get("client_name") or "Client"
+    poc_name = row.get("poc_name") or client_name
+    fees = row.get("fees")
+    try:
+        amount_str = f"₹{int(float(fees)):,}"
+    except (ValueError, TypeError):
+        amount_str = str(fees) if fees else "N/A"
+
+    subject_map = {
+        "first": f"First Payment Reminder – Invoice #{bill_no}",
+        "second": f"Second Payment Reminder – Invoice #{bill_no}",
+        "third": f"Final Payment Reminder – Invoice #{bill_no}",
+    }
+    subject = subject_map.get(level, f"Payment Reminder – Invoice #{bill_no}")
+
+    # Get sender name from user profile
+    user_id = str(chat_id)
+    profile = supabase_service.get_user_profile(user_id)
+    sender_name = "Team"
+    if profile.get("ok") and profile.get("data"):
+        sender_name = profile["data"].get("name") or sender_name
+
+    body = (
+        f"Hi {poc_name},\n\n"
+        f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
+        f"Amount Due: {amount_str}\n\n"
+        f"Please let us know if payment has already been processed.\n\n"
+        f"Best regards,\n{sender_name}\n"
+    )
+
+    # Send email
+    ok = email_service.send_email(to_email=poc_email, subject=subject, body=body)
+
+    if not ok:
+        await telegram_service.edit_message_text(
+            chat_id, message_id,
+            f"❌ Failed to send reminder email to {poc_email}. Please try again later."
+        )
+        return
+
+    # Update DB flag
+    flag_map = {
+        "first": "first_reminder_sent",
+        "second": "second_reminder_sent",
+        "third": "third_reminder_sent",
+    }
+    flag_col = flag_map.get(level)
+    if flag_col:
+        update_sql = f"UPDATE public.job_entries SET {flag_col} = NOW() WHERE id = '{job_id}'"
+        supabase_service.execute_sql(update_sql)
+
+    label_map = {"first": "First", "second": "Second", "third": "Final"}
+    label = label_map.get(level, level.title())
+    await telegram_service.edit_message_text(
+        chat_id, message_id,
+        f"✅ {label} reminder sent to {poc_email} for invoice #{bill_no}."
+    )
+
+
 @app.post("/webhooks/telegram")
 async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
-    """Telegram Webhook"""
+    """Telegram Webhook — delegates to unified handler."""
     try:
         data = await request.json()
+
+        # Handle inline button callbacks (e.g. reminder confirmations)
+        if "callback_query" in data:
+            await _handle_reminder_callback(data["callback_query"])
+            return {"status": "ok"}
+
         if "message" not in data:
             return {"status": "ok"}
 
@@ -326,36 +579,10 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
         text = data["message"].get("text", "")
         logger.info(f"Received Telegram message from {chat_id}: {text}")
 
-        await telegram_service.send_chat_action(chat_id, "typing")
-        stop_typing = asyncio.Event()
-        typing_task = asyncio.create_task(_keep_typing(chat_id, stop_typing))
-
-        user_id = str(chat_id)
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None, lambda: intent_service.process_request(user_id=user_id, message=text)
+        await _handle_bot_message(
+            user_id=str(chat_id), message=text, platform="telegram",
+            background_tasks=background_tasks, chat_id=chat_id,
         )
-
-        stop_typing.set()
-        typing_task.cancel()
-        try:
-            await typing_task
-        except asyncio.CancelledError:
-            pass
-
-        if result.get("response"):
-            await telegram_service.send_text_message(chat_id, result["response"])
-
-        if result.get("trigger_invoice"):
-            data_inv = result["invoice_data"]
-            background_tasks.add_task(
-                process_and_send_invoice, 
-                None, data_inv["client_name"], data_inv["month"], 
-                platform="telegram", chat_id=chat_id,
-                bill_number=data_inv.get("bill_number"),
-                year=data_inv.get("year")
-            )
-
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Telegram webhook error: {e}")

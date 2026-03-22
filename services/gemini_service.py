@@ -495,6 +495,58 @@ class GeminiService:
                 "clarification_question": None,
             }
 
+    def extract_job_fields(self, message: str, today: str = None) -> Optional[Dict]:
+        """
+        Extract structured job fields from a natural language message.
+        Returns a dict with keys: job_date, brand_name, client_name,
+        job_description_details, fees, notes. Missing fields are null.
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key:
+            return None
+
+        if not today:
+            from datetime import date
+            today = date.today().isoformat()
+
+        prompt = f"""Extract job/project information from the user's message into structured JSON.
+
+Today's date is {today}. Use this to resolve relative dates (e.g. "10 Feb" = {today[:4]}-02-10, "yesterday" = the day before today).
+
+Return ONLY valid JSON with these keys:
+- "job_date": ISO date string "YYYY-MM-DD" or null
+- "brand_name": The brand or product name (e.g. "Bridgestone", "Xiaomi") or null
+- "client_name": The production house, agency, or client entity (e.g. "The Good Take", "Leo Burnett") or null
+- "job_description_details": What was done — film type, deliverables, role, duration (e.g. "Master film 30 sec + 4 cutdowns") or null
+- "fees": Numeric amount in integer (e.g. "25k" = 25000, "1.5L" = 150000, "2000" = 2000) or null
+- "notes": Any additional info that doesn't fit above, or null
+
+Rules:
+- If the brand and client are the same entity, put it in brand_name and set client_name to null.
+- "k" means thousands (25k = 25000), "L" or "lac" or "lakh" means 100000 (1.5L = 150000).
+- If a field is not mentioned, set it to null.
+- Do NOT hallucinate or invent data. Only extract what's explicitly stated.
+
+User message:
+{message}
+
+JSON:"""
+
+        try:
+            raw = self._call_api(prompt, generation_config={
+                "responseMimeType": "application/json",
+                "temperature": 0,
+                "maxOutputTokens": 400,
+            })
+            if not raw:
+                return None
+            data = json.loads(raw.strip())
+            logger.info(f"[SMART_CAPTURE] Extracted fields: {data}")
+            return data
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error(f"[SMART_CAPTURE] Extraction failed: {e}")
+            return None
+
     def generate_response(self, user_message: str, backend_result: str) -> str:
         fallback = "I don't see this information in my records yet."
         self._ensure_initialized()

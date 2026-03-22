@@ -4,6 +4,7 @@
 create table if not exists public.job_entries (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz default now(),
+  user_id text not null,
 
   job_date date,
   client_name text,
@@ -31,7 +32,60 @@ create table if not exists public.job_entries (
   notes text
 );
 
+-- Index on user_id for fast per-user queries
+create index if not exists idx_job_entries_user_id on public.job_entries(user_id);
+
 comment on table public.job_entries is 'Job/invoice entries loaded from Excel template';
+
+-- ============================================================
+-- MIGRATION: If job_entries already exists with user_id as uuid,
+-- run this to convert it to text (supports Telegram/WhatsApp IDs):
+-- ============================================================
+-- ALTER TABLE public.job_entries DROP CONSTRAINT IF EXISTS fk_job_entries_user;
+-- ALTER TABLE public.job_entries ALTER COLUMN user_id TYPE text USING user_id::text;
+-- ============================================================
+-- If job_entries exists WITHOUT user_id at all:
+-- ============================================================
+-- ALTER TABLE public.job_entries ADD COLUMN user_id text;
+-- CREATE INDEX IF NOT EXISTS idx_job_entries_user_id ON public.job_entries(user_id);
+-- UPDATE public.job_entries SET user_id = 'YOUR_DEFAULT_USER_ID' WHERE user_id IS NULL;
+-- ALTER TABLE public.job_entries ALTER COLUMN user_id SET NOT NULL;
+-- ============================================================
+
+-- ============================================================
+-- User configuration table (bank details, one row per user)
+-- ============================================================
+create table if not exists public.user_config (
+  id uuid primary key default gen_random_uuid(),
+  user_id text unique not null,
+  bank_account_name text,
+  bank_account_number text,
+  bank_ifsc text,
+  bank_name text,
+  upi_id text,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+comment on table public.user_config is 'Per-user configuration: bank details for invoice generation';
+alter table public.user_config disable row level security;
+
+-- ============================================================
+-- User profiles table (onboarding and preferences)
+-- ============================================================
+create table if not exists public.user_profiles (
+  user_id text primary key,
+  platform text not null,  -- 'telegram' or 'whatsapp'
+  name text,
+  company_name text,
+  onboarded_at timestamptz,
+  preferences jsonb default '{}',
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+comment on table public.user_profiles is 'User profiles and onboarding status';
+alter table public.user_profiles disable row level security;
 
 -- If SELECT returns 0 rows even though data exists, RLS is likely blocking the direct DB connection.
 -- Run ONE of the following in Supabase SQL Editor:
