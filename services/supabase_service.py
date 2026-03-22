@@ -133,6 +133,7 @@ else:
         "third_reminder_sent",
         "payment_details",
         "notes",
+        "isDeleted",
     ]
 
     SCHEMA_DESCRIPTION = """
@@ -151,6 +152,7 @@ Table: public.job_entries
 - poc_email (text), poc_name (text): contact.
 - first_reminder_sent, second_reminder_sent, third_reminder_sent (timestamptz).
 - payment_details (text), notes (text).
+- isDeleted (boolean): soft-delete flag. Rows with isDeleted=true are considered deleted and MUST be excluded from all queries.
 Use exact column names. For dates use ISO YYYY-MM-DD. TODAY for relative ranges.
 """
 
@@ -328,7 +330,7 @@ class SupabaseService:
         if not client_name and not bill_no:
             return {"ok": False, "error": "client_name or bill_no is required."}
 
-        where = []
+        where = ["(\"isDeleted\" IS NOT TRUE)"]
         params: List[Any] = []
 
         if user_id:
@@ -451,7 +453,8 @@ class SupabaseService:
         SELECT id, client_name, poc_email, job_date, fees, bill_no,
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
-        WHERE (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
+        WHERE ("isDeleted" IS NOT TRUE)
+          AND (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
           AND poc_email IS NOT NULL AND TRIM(poc_email::text) != ''
           AND first_reminder_sent IS NULL
           AND job_date IS NOT NULL
@@ -497,7 +500,8 @@ class SupabaseService:
         SELECT id, client_name, job_date, fees, bill_no, poc_email,
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
-        WHERE (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
+        WHERE ("isDeleted" IS NOT TRUE)
+          AND (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
           AND job_date IS NOT NULL
           AND (job_date + (%s::int || ' days')::interval)::date < CURRENT_DATE
           {user_clause}

@@ -502,7 +502,7 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
         select = "*"
 
     # WHERE clause
-    where = [f"user_id = {_sql_quote(user_id)}"]
+    where = [f"user_id = {_sql_quote(user_id)}", '("isDeleted" IS NOT TRUE)']
     for col, val in filters.items():
         if col.startswith("_"):
             continue
@@ -544,7 +544,7 @@ def _build_update(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     set_parts = [f"{col} = {_sql_quote(val)}" for col, val in updates.items()]
     set_clause = ", ".join(set_parts)
 
-    where = [f"user_id = {_sql_quote(user_id)}"]
+    where = [f"user_id = {_sql_quote(user_id)}", '("isDeleted" IS NOT TRUE)']
     for col, val in filters.items():
         if col.startswith("_"):
             continue
