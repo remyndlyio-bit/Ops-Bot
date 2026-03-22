@@ -58,6 +58,7 @@ RULES FOR SELECT:
 4. "latest", "last job", "most recent" → ORDER BY job_date DESC LIMIT 1.
 5. Client/brand: WHERE client_name ILIKE '%name%' or = 'Name'.
 6. Return at most 50 rows; use LIMIT 50.
+6a. When using GROUP BY, ORDER BY must only reference grouped columns or aggregate functions (e.g. COUNT(*), MAX(job_date), SUM(fees)). Never ORDER BY a non-grouped, non-aggregate column.
 
 RULES FOR INSERT:
 7. Use when the user wants to ADD a job, LOG a job, RECORD an entry, or CREATE a new row (e.g. "add a job for Garnier", "log: Xiaomi, 2000, 15sec", "new entry: client X, fees 5000").
