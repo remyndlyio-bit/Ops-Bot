@@ -209,11 +209,44 @@ def notify_user_whatsapp(user_id: str, reminders: list, whatsapp: WhatsAppServic
     whatsapp.send_text_message(user_id, plain_text)
 
 
+# ── DB Flag Update ────────────────────────────────────────────────────────
+
+LEVEL_TO_FLAG = {
+    "first": "first_reminder_sent",
+    "second": "second_reminder_sent",
+    "third": "third_reminder_sent",
+}
+
+
+def mark_reminders_sent(db: SupabaseService, reminders: list):
+    """Update the DB flag for each reminder that was sent.
+
+    Called immediately after successful notification to ensure idempotency
+    (no duplicate sends on retry).  Uses independent if-blocks so all
+    pending levels for old jobs are handled in a single pass.
+    """
+    for row in reminders:
+        job_id = row.get("id")
+        level = row.get("_reminder_level")
+        flag_col = LEVEL_TO_FLAG.get(level)
+        if not job_id or not flag_col:
+            continue
+        try:
+            db.execute_sql(
+                f"UPDATE public.job_entries SET {flag_col} = NOW() WHERE id = '{job_id}'"
+            )
+            logger.info(f"[REMINDER_WORKER] Marked {flag_col} for job {job_id}")
+        except Exception as e:
+            logger.error(f"[REMINDER_WORKER] Failed to mark {flag_col} for job {job_id}: {e}")
+
+
 # ── Entry Point ───────────────────────────────────────────────────────────
 
 def run():
     """Main entry point for the reminder worker."""
     logger.info("[REMINDER_WORKER] === Starting reminder scan ===")
+
+    db = SupabaseService()
 
     rows = scan_reminders()
     if not rows:
@@ -226,16 +259,25 @@ def run():
     telegram = TelegramService()
     whatsapp = WhatsAppService()
 
+    total_sent = 0
+    total_failed = 0
+
     for user_id, reminders in grouped.items():
         try:
             if _is_telegram_user(user_id):
                 notify_user_telegram(user_id, reminders, telegram)
             else:
                 notify_user_whatsapp(user_id, reminders, whatsapp)
+
+            # Mark DB flags immediately after successful notification
+            mark_reminders_sent(db, reminders)
+            total_sent += len(reminders)
+            logger.info(f"[REMINDER_WORKER] Sent {len(reminders)} reminder(s) for user {user_id}")
         except Exception as e:
+            total_failed += len(reminders)
             logger.error(f"[REMINDER_WORKER] Failed to notify user {user_id}: {e}")
 
-    logger.info("[REMINDER_WORKER] === Scan complete ===")
+    logger.info(f"[REMINDER_WORKER] === Scan complete: {total_sent} sent, {total_failed} failed ===")
 
 
 if __name__ == "__main__":
