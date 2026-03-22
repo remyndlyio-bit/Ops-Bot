@@ -518,7 +518,7 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     if order:
         order_col = "result" if (metric and metric not in ("value",)) else (column or dc)
         sql += f" ORDER BY {order_col} {order.upper()}"
-    elif metric == "value" or (not metric and not group_by):
+    elif not group_by and (metric == "value" or not metric):
         sql += f" ORDER BY {dc} DESC"
 
     if limit:
