@@ -1615,12 +1615,20 @@ class IntentService:
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
                     if client_name and not month_num and not bill_number:
+                        # Check if user explicitly asked to send via email
+                        send_email = "email" in msg_lower or "e-mail" in msg_lower
                         months_result = self.supabase.get_available_months_for_client(client_name, user_id=data_user_id)
                         if months_result.get("ok") and months_result.get("months"):
                             month_options = "\n".join(f"• {m['label']}" for m in months_result["months"])
                             response = f"I see you want an invoice for {client_name}. Which month?\n\n{month_options}\n\nReply with the month, e.g. 'Send invoice for {client_name} for March 2025'."
                         else:
                             response = f"I see you want an invoice for {client_name}. Which month? For example: 'Send invoice for {client_name} for March'."
+                        # Set awaiting state so the next reply routes to invoice month handler
+                        self.memory.update_user_memory(user_id, {
+                            "awaiting_invoice_month": True,
+                            "pending_invoice_client": client_name,
+                            "pending_invoice_send_email": send_email,
+                        })
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
