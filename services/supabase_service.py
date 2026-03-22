@@ -407,7 +407,7 @@ class SupabaseService:
             "FROM public.job_entries "
             f"WHERE client_name ILIKE %s {user_filter}"
             "AND job_date IS NOT NULL "
-            "AND (is_deleted IS NULL OR is_deleted = FALSE) "
+            "AND (\"isDeleted\" IS NOT TRUE) "
             "GROUP BY yr, mo "
             "ORDER BY yr DESC, mo DESC "
             "LIMIT 36"
