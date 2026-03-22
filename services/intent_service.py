@@ -1570,7 +1570,7 @@ class IntentService:
                         safe_uid = data_user_id.replace("'", "''")
                         clients_sql = (
                             f"SELECT DISTINCT client_name FROM public.job_entries "
-                            f"WHERE user_id = '{safe_uid}' AND client_name IS NOT NULL"
+                            f"WHERE user_id = '{safe_uid}' AND client_name IS NOT NULL AND (\"isDeleted\" IS NOT TRUE)"
                         )
                         clients_result = self.supabase.execute_sql(clients_sql)
                         if clients_result.get("ok"):
@@ -1643,7 +1643,7 @@ class IntentService:
                                 f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
                                 f"FROM public.job_entries "
                                 f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_client}%' "
-                                f"AND job_date IS NOT NULL ORDER BY period"
+                                f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
                             )
                             avail = self.supabase.execute_sql(avail_sql)
                             periods = [r["period"].strip() for r in (avail.get("rows") or [])]
@@ -1766,6 +1766,14 @@ class IntentService:
                     response = "\n".join(lines)
                 self._store_conversation(user_id, message, response)
                 return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # 3b. Delete intent → soft-delete (SET "isDeleted" = true)
+            _DELETE_TRIGGERS = ["delete", "remove", "erase", "trash", "discard"]
+            is_delete = any(w in message.lower() for w in _DELETE_TRIGGERS) and any(
+                w in message.lower() for w in ["job", "entry", "record", "row", "last", "this", "it", "that"]
+            )
+            if is_delete:
+                return self._handle_soft_delete(user_id, message, data_user_id, conversation_history)
 
             # 4. SQL path: intent → generate SQL → validate → execute on Supabase → format → response
             columns = [c for c in JOB_ENTRIES_COLUMNS if not c.startswith("_")]
@@ -2004,11 +2012,11 @@ class IntentService:
 
         # "how many jobs" / "count" / "total jobs"
         if re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of)\b.*\b(job|entr|record|work)\b', msg):
-            return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}"
+            return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
 
         # "total fees" / "total earnings" / "sum of fees"
         if re.search(r'\b(total|sum|overall)\b.*\b(fees|earning|income|revenue|billing)\b', msg):
-            return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}"
+            return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
 
         # "show all jobs" / "list jobs" / "my jobs"
         if re.search(r'\b(show|list|all|my)\b.*\b(job|entr|record|work)\b', msg):

@@ -502,7 +502,7 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
         select = "*"
 
     # WHERE clause
-    where = [f"user_id = {_sql_quote(user_id)}"]
+    where = [f"user_id = {_sql_quote(user_id)}", '("isDeleted" IS NOT TRUE)']
     for col, val in filters.items():
         if col.startswith("_"):
             continue
@@ -518,7 +518,7 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     if order:
         order_col = "result" if (metric and metric not in ("value",)) else (column or dc)
         sql += f" ORDER BY {order_col} {order.upper()}"
-    elif metric == "value" or (not metric and not group_by):
+    elif not group_by and (metric == "value" or not metric):
         sql += f" ORDER BY {dc} DESC"
 
     if limit:
@@ -544,7 +544,7 @@ def _build_update(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     set_parts = [f"{col} = {_sql_quote(val)}" for col, val in updates.items()]
     set_clause = ", ".join(set_parts)
 
-    where = [f"user_id = {_sql_quote(user_id)}"]
+    where = [f"user_id = {_sql_quote(user_id)}", '("isDeleted" IS NOT TRUE)']
     for col, val in filters.items():
         if col.startswith("_"):
             continue

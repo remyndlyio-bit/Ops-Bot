@@ -330,7 +330,7 @@ class SupabaseService:
         if not client_name and not bill_no:
             return {"ok": False, "error": "client_name or bill_no is required."}
 
-        where = []
+        where = ["(\"isDeleted\" IS NOT TRUE)"]
         params: List[Any] = []
 
         if user_id:
@@ -504,7 +504,8 @@ class SupabaseService:
         SELECT id, client_name, poc_email, job_date, fees, bill_no,
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
-        WHERE (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
+        WHERE ("isDeleted" IS NOT TRUE)
+          AND (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
           AND poc_email IS NOT NULL AND TRIM(poc_email::text) != ''
           AND first_reminder_sent IS NULL
           AND job_date IS NOT NULL
@@ -550,7 +551,8 @@ class SupabaseService:
         SELECT id, client_name, job_date, fees, bill_no, poc_email,
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
-        WHERE (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
+        WHERE ("isDeleted" IS NOT TRUE)
+          AND (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
           AND job_date IS NOT NULL
           AND (job_date + (%s::int || ' days')::interval)::date < CURRENT_DATE
           {user_clause}
