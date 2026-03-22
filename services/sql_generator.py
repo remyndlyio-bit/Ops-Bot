@@ -51,9 +51,11 @@ MULTI-TENANT RULE (MANDATORY):
 - NEVER omit user_id from any query.
 
 SOFT-DELETE RULE (MANDATORY):
-- Every SELECT, UPDATE must include: ("isDeleted" IS NOT TRUE) in the WHERE clause.
-- DELETE requests must be converted to: UPDATE public.job_entries SET "isDeleted" = true WHERE ... RETURNING *
-- Never use actual DELETE statements.
+- Rows with is_deleted = TRUE are considered deleted. NEVER show them.
+- Every SELECT MUST include AND (is_deleted IS NULL OR is_deleted = FALSE) in the WHERE clause.
+- When the user wants to DELETE or REMOVE a row, do NOT generate a DELETE statement. Instead generate:
+  UPDATE public.job_entries SET is_deleted = TRUE WHERE user_id = '{user_id or 'UNKNOWN'}' AND <conditions> RETURNING *
+  Use conversation context or filters to identify the specific row(s). Always require at least one additional condition beyond user_id (e.g. client_name, job_date, id).
 
 RULES FOR SELECT:
 1. Use only columns from the list above. Use snake_case for column names.
@@ -63,7 +65,7 @@ RULES FOR SELECT:
 4. "latest", "last job", "most recent" → ORDER BY job_date DESC LIMIT 1.
 5. Client/brand: WHERE client_name ILIKE '%name%' or = 'Name'.
 6. Return at most 50 rows; use LIMIT 50.
-6a. GROUP BY rule: When using GROUP BY, the ORDER BY clause must only reference columns in the GROUP BY list or aggregate functions (e.g. COUNT(*), MAX(job_date)). Never ORDER BY a column that is not grouped or aggregated.
+6a. When using GROUP BY, ORDER BY must only reference grouped columns or aggregate functions (e.g. COUNT(*), MAX(job_date), SUM(fees)). Never ORDER BY a non-grouped, non-aggregate column.
 
 RULES FOR INSERT:
 7. Use when the user wants to ADD a job, LOG a job, RECORD an entry, or CREATE a new row (e.g. "add a job for Garnier", "log: Xiaomi, 2000, 15sec", "new entry: client X, fees 5000").
