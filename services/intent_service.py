@@ -1542,10 +1542,27 @@ class IntentService:
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
                     rows = result.get("rows") or []
                     if not rows:
+                        # Check what months actually have data for this client
+                        hint = ""
+                        if client_name:
+                            safe_client = client_name.replace("'", "''")
+                            safe_uid = data_user_id.replace("'", "''")
+                            avail_sql = (
+                                f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
+                                f"FROM public.job_entries "
+                                f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_client}%' "
+                                f"AND job_date IS NOT NULL ORDER BY period"
+                            )
+                            avail = self.supabase.execute_sql(avail_sql)
+                            periods = [r["period"].strip() for r in (avail.get("rows") or [])]
+                            if periods:
+                                hint = f"\n\nI do have records for {client_name} in: {', '.join(periods)}."
+                            else:
+                                hint = f"\n\nI don't have any records for {client_name} at all."
                         if client_name and month_num:
-                            response = f"I found no invoice for {client_name} for {month_name or month_num} {year_val}."
+                            response = f"I found no jobs for {client_name} in {month_name or month_num} {year_val}.{hint}"
                         else:
-                            response = f"I don't see any records for {client_name or 'that bill'} in my records."
+                            response = f"I don't see any records for {client_name or 'that bill'} in my records.{hint}"
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
                     display_client = (rows[0].get("client_name") or client_name or "Client").strip()
