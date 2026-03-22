@@ -1,14 +1,25 @@
 import json
 import os
+import threading
 from typing import Dict, Optional, List
 from datetime import datetime
 
 class MemoryService:
     def __init__(self, file_path: str = "user_memory.json"):
         self.file_path = file_path
+        self._lock = threading.Lock()          # Global lock for file I/O
+        self._user_locks: Dict[str, threading.Lock] = {}  # Per-user locks
         self._load_memory()
         # Get memory level from environment variable, default to 5 if not set
         self.memory_level = int(os.getenv("CHAT_MEMORYLEVEL", "5"))
+
+    def _get_user_lock(self, user_id: str) -> threading.Lock:
+        """Get or create a per-user lock to prevent concurrent modifications."""
+        if user_id not in self._user_locks:
+            with self._lock:
+                if user_id not in self._user_locks:
+                    self._user_locks[user_id] = threading.Lock()
+        return self._user_locks[user_id]
 
     def _load_memory(self):
         if os.path.exists(self.file_path):
@@ -18,18 +29,23 @@ class MemoryService:
             self.memory = {}
 
     def _save_memory(self):
-        with open(self.file_path, 'w') as f:
-            json.dump(self.memory, f, indent=2)
+        with self._lock:
+            with open(self.file_path, 'w') as f:
+                json.dump(self.memory, f, indent=2)
 
     def get_user_memory(self, user_id: str) -> Dict:
-        return self.memory.get(user_id, {"name": "User", "role": "Client", "last_sheet": "Leads"})
+        lock = self._get_user_lock(user_id)
+        with lock:
+            return dict(self.memory.get(user_id, {"name": "User", "role": "Client", "last_sheet": "Leads"}))
 
     def update_user_memory(self, user_id: str, data: Dict):
-        if user_id not in self.memory:
-            self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads"}
-        
-        self.memory[user_id].update(data)
-        self._save_memory()
+        lock = self._get_user_lock(user_id)
+        with lock:
+            if user_id not in self.memory:
+                self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads"}
+
+            self.memory[user_id].update(data)
+            self._save_memory()
 
     def get_memory_context(self, user_id: str) -> str:
         mem = self.get_user_memory(user_id)
@@ -54,44 +70,48 @@ class MemoryService:
         role: 'user' or 'assistant'
         content: the message content
         """
-        if user_id not in self.memory:
-            self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads", "conversation": []}
-        
-        if "conversation" not in self.memory[user_id]:
-            self.memory[user_id]["conversation"] = []
-        
-        # Add the new message
-        self.memory[user_id]["conversation"].append({
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # Keep only the last N*2 messages (N user messages + N assistant messages)
-        conversation = self.memory[user_id]["conversation"]
-        if len(conversation) > self.memory_level * 2:
-            self.memory[user_id]["conversation"] = conversation[-self.memory_level * 2:]
-        
-        self._save_memory()
+        lock = self._get_user_lock(user_id)
+        with lock:
+            if user_id not in self.memory:
+                self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads", "conversation": []}
+
+            if "conversation" not in self.memory[user_id]:
+                self.memory[user_id]["conversation"] = []
+
+            # Add the new message
+            self.memory[user_id]["conversation"].append({
+                "role": role,
+                "content": content,
+                "timestamp": datetime.now().isoformat()
+            })
+
+            # Keep only the last N*2 messages (N user messages + N assistant messages)
+            conversation = self.memory[user_id]["conversation"]
+            if len(conversation) > self.memory_level * 2:
+                self.memory[user_id]["conversation"] = conversation[-self.memory_level * 2:]
+
+            self._save_memory()
 
     # --- Form state for multi-step data entry (e.g. "add new job") ---
 
     def start_form(self, user_id: str, fields: List[str], form_override: Dict = None) -> None:
         """Start a new form flow for the user. fields = list of column names to collect.
         If form_override is provided, use it directly (for smart capture states)."""
-        if user_id not in self.memory:
-            self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads"}
-        if form_override:
-            form_override["active"] = True
-            self.memory[user_id]["form"] = form_override
-        else:
-            self.memory[user_id]["form"] = {
-                "active": True,
-                "fields": fields,
-                "step": 0,
-                "values": {},
-            }
-        self._save_memory()
+        lock = self._get_user_lock(user_id)
+        with lock:
+            if user_id not in self.memory:
+                self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads"}
+            if form_override:
+                form_override["active"] = True
+                self.memory[user_id]["form"] = form_override
+            else:
+                self.memory[user_id]["form"] = {
+                    "active": True,
+                    "fields": fields,
+                    "step": 0,
+                    "values": {},
+                }
+            self._save_memory()
 
     def get_form_state(self, user_id: str) -> Optional[Dict]:
         """Return form state dict or None if no active form."""
@@ -104,30 +124,38 @@ class MemoryService:
 
     def set_form_value(self, user_id: str, field: str, value: str) -> None:
         """Store a value for the current form field."""
-        form = self.get_form_state(user_id)
-        if form:
-            form["values"][field] = value
-            self._save_memory()
+        lock = self._get_user_lock(user_id)
+        with lock:
+            form = self.get_form_state(user_id)
+            if form:
+                form["values"][field] = value
+                self._save_memory()
 
     def advance_form_step(self, user_id: str) -> None:
         """Move to the next step in the form."""
-        form = self.get_form_state(user_id)
-        if form:
-            form["step"] += 1
-            self._save_memory()
+        lock = self._get_user_lock(user_id)
+        with lock:
+            form = self.get_form_state(user_id)
+            if form:
+                form["step"] += 1
+                self._save_memory()
 
     def complete_form(self, user_id: str) -> Optional[Dict[str, str]]:
         """Mark form complete and return collected values. Clears form state."""
-        form = self.get_form_state(user_id)
-        if not form:
-            return None
-        values = dict(form.get("values", {}))
-        self.memory[user_id]["form"] = {"active": False}
-        self._save_memory()
-        return values
+        lock = self._get_user_lock(user_id)
+        with lock:
+            form = self.get_form_state(user_id)
+            if not form:
+                return None
+            values = dict(form.get("values", {}))
+            self.memory[user_id]["form"] = {"active": False}
+            self._save_memory()
+            return values
 
     def cancel_form(self, user_id: str) -> None:
         """Cancel any active form."""
-        if user_id in self.memory:
-            self.memory[user_id]["form"] = {"active": False}
-            self._save_memory()
+        lock = self._get_user_lock(user_id)
+        with lock:
+            if user_id in self.memory:
+                self.memory[user_id]["form"] = {"active": False}
+                self._save_memory()
