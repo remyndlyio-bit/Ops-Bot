@@ -1595,8 +1595,9 @@ class IntentService:
                               "generate", "create", "make", "prepare", "need", "want", "share"]
             has_verb = any(w in msg_lower for w in _INVOICE_VERBS)
             has_invoice_word = "invoice" in msg_lower or "bill" in msg_lower
-            # Also match standalone "invoice for <client>" (no verb needed)
-            is_retrieval = (has_verb and has_invoice_word) or (has_invoice_word and "for " in msg_lower)
+            # If the message mentions "invoice" or "bill", always route to the
+            # invoice flow — the LLM intent parser handles typos and variations.
+            is_retrieval = has_invoice_word
             logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
             if is_retrieval:
                 # Check if this is a "send to client" follow-up and we have a cached invoice
