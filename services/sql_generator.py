@@ -51,10 +51,10 @@ MULTI-TENANT RULE (MANDATORY):
 - NEVER omit user_id from any query.
 
 SOFT-DELETE RULE (MANDATORY):
-- Rows with is_deleted = TRUE are considered deleted. NEVER show them.
-- Every SELECT MUST include AND (is_deleted IS NULL OR is_deleted = FALSE) in the WHERE clause.
+- Rows with "isDeleted" = TRUE are considered deleted. NEVER show them.
+- Every SELECT MUST include AND ("isDeleted" IS NOT TRUE) in the WHERE clause.
 - When the user wants to DELETE or REMOVE a row, do NOT generate a DELETE statement. Instead generate:
-  UPDATE public.job_entries SET is_deleted = TRUE WHERE user_id = '{user_id or 'UNKNOWN'}' AND <conditions> RETURNING *
+  UPDATE public.job_entries SET "isDeleted" = TRUE WHERE user_id = '{user_id or 'UNKNOWN'}' AND <conditions> RETURNING *
   Use conversation context or filters to identify the specific row(s). Always require at least one additional condition beyond user_id (e.g. client_name, job_date, id).
 
 RULES FOR SELECT:

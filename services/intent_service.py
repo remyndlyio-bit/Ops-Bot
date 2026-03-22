@@ -1913,7 +1913,7 @@ class IntentService:
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             # Disambiguation: if an UPDATE matches multiple rows, show real options before executing.
-            # This covers soft-deletes (SET is_deleted = TRUE) and any other UPDATE.
+            # This covers soft-deletes (SET "isDeleted" = TRUE) and any other UPDATE.
             if sanitized_sql.upper().lstrip().startswith("UPDATE"):
                 _where_m = re.search(r'WHERE\s+(.+?)(?=\s+RETURNING\b|$)', sanitized_sql, re.IGNORECASE | re.DOTALL)
                 if _where_m:
@@ -1982,7 +1982,7 @@ class IntentService:
                 if not rows:
                     # Check if user has ANY data at all
                     count_result = self.supabase.execute_sql(
-                        f"SELECT COUNT(*) AS cnt FROM public.job_entries WHERE user_id = '{data_user_id.replace(chr(39), chr(39)+chr(39))}' AND (is_deleted IS NULL OR is_deleted = FALSE)"
+                        f"SELECT COUNT(*) AS cnt FROM public.job_entries WHERE user_id = '{data_user_id.replace(chr(39), chr(39)+chr(39))}' AND (\"isDeleted\" IS NOT TRUE)"
                     )
                     has_data = False
                     if count_result.get("ok") and count_result.get("rows"):
@@ -2039,7 +2039,7 @@ class IntentService:
         """
         msg = message.strip().lower()
         uid = user_id.replace("'", "''")
-        _not_deleted = "(is_deleted IS NULL OR is_deleted = FALSE)"
+        _not_deleted = "(\"isDeleted\" IS NOT TRUE)"
         base = f"SELECT * FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}"
 
         # "last job" / "latest job" / "most recent job" / "recent job"
