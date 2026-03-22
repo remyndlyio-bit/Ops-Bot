@@ -99,6 +99,115 @@ class IntentService:
         self.memory.add_message(user_id, "user", user_message)
         self.memory.add_message(user_id, "assistant", bot_response)
 
+    # ── Structured intent tracking for context reconstruction ──
+
+    def _save_last_intent(self, user_id: str, *, operation: str = None, client_name: str = None,
+                          month: str = None, year=None, entity: str = None,
+                          pending_clarification: str = None, extra: dict = None):
+        """Persist the most recent structured intent so follow-ups can inherit it."""
+        intent = {k: v for k, v in {
+            "operation": operation,
+            "client_name": client_name,
+            "month": month,
+            "year": year,
+            "entity": entity,
+            "pending_clarification": pending_clarification,
+        }.items() if v is not None}
+        if extra:
+            intent.update(extra)
+        self.memory.update_user_memory(user_id, {"last_intent": intent})
+        logger.info(f"[CONTEXT] Saved last_intent for {user_id}: {intent}")
+
+    def _reconstruct_message(self, user_id: str, message: str, conversation_history: List[Dict]) -> str:
+        """
+        Context reconstruction: if the message is short/ambiguous, merge it
+        with stored last_intent and recent conversation to produce a fully
+        self-contained query.  Returns the original message unchanged when no
+        reconstruction is needed.
+        """
+        msg_lower = message.strip().lower()
+        word_count = len(message.strip().split())
+
+        # Skip reconstruction for messages that are already self-contained
+        # (long enough AND contain an action verb + entity)
+        _ACTION_VERBS = {"generate", "create", "send", "show", "get", "list", "give",
+                         "update", "delete", "remove", "add", "fetch", "download",
+                         "make", "prepare", "invoice", "query", "find", "search"}
+        has_action = any(v in msg_lower for v in _ACTION_VERBS)
+        if word_count >= 4 and has_action:
+            return message  # Already self-contained
+
+        # Short or ambiguous message — try to reconstruct from context
+        user_mem = self.memory.get_user_memory(user_id)
+        last_intent = user_mem.get("last_intent", {})
+        if not last_intent:
+            return message  # No prior context to merge
+
+        pending = last_intent.get("pending_clarification", "")
+        operation = last_intent.get("operation", "")
+        client_name = last_intent.get("client_name", "")
+        month_val = last_intent.get("month", "")
+        entity = last_intent.get("entity", "")
+
+        # Get last assistant message to understand what was asked
+        last_assistant_msg = ""
+        if conversation_history:
+            assistant_msgs = [m for m in conversation_history if m.get("role") == "assistant"]
+            if assistant_msgs:
+                last_assistant_msg = assistant_msgs[-1].get("content", "").lower()
+
+        reconstructed = None
+
+        # Case 1: Bot asked "Which month?" and user replied with a month name
+        _MONTH_NAMES = {"january", "february", "march", "april", "may", "june",
+                        "july", "august", "september", "october", "november", "december",
+                        "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"}
+        first_word = msg_lower.split()[0] if msg_lower.split() else ""
+        is_month_reply = first_word in _MONTH_NAMES or any(m in msg_lower for m in _MONTH_NAMES)
+        if is_month_reply and pending == "month" and client_name:
+            verb = "Send" if "send" in operation.lower() else "Generate"
+            reconstructed = f"{verb} invoice for {client_name} for {message.strip()}"
+
+        # Case 2: Bot asked for a client name and user replied with one
+        elif pending == "client_name" and word_count <= 4:
+            if "invoice" in entity or "invoice" in operation.lower():
+                month_part = f" for {month_val}" if month_val else ""
+                reconstructed = f"Generate invoice for {message.strip()}{month_part}"
+            else:
+                reconstructed = f"Show jobs for {message.strip()}"
+
+        # Case 3: User says something like "for March" or "for Garnier"
+        elif msg_lower.startswith("for ") and word_count <= 4:
+            rest = message.strip()[4:]  # strip "for "
+            rest_lower = rest.lower().strip()
+            if any(m in rest_lower for m in _MONTH_NAMES) and client_name:
+                verb = "Send" if "send" in operation.lower() else "Generate"
+                reconstructed = f"{verb} invoice for {client_name} for {rest.strip()}"
+            elif operation and client_name:
+                reconstructed = f"{operation} for {client_name} for {rest.strip()}"
+
+        # Case 4: Very short replies (1-2 words) with a pending clarification
+        elif word_count <= 2 and pending and client_name:
+            if pending == "month":
+                verb = "Send" if "send" in operation.lower() else "Generate"
+                reconstructed = f"{verb} invoice for {client_name} for {message.strip()}"
+            elif pending == "confirm":
+                pass  # Let awaiting_* handlers deal with yes/no
+
+        # Case 5: "this month", "last month", "this year" relative time with prior client
+        elif client_name and any(t in msg_lower for t in ["this month", "last month", "this year", "last year"]):
+            if "invoice" in entity or "invoice" in operation.lower():
+                reconstructed = f"Generate invoice for {client_name} for {message.strip()}"
+            else:
+                reconstructed = f"Show jobs for {client_name} for {message.strip()}"
+
+        if reconstructed and reconstructed.strip().lower() != message.strip().lower():
+            logger.info(f"[CONTEXT] Reconstructed message: '{message}' → '{reconstructed}' "
+                        f"(last_intent={last_intent})")
+            return reconstructed
+
+        return message
+
     def _get_schema_and_columns(self, records: List[Dict]) -> tuple:
         """Return (schema_description, allowed_columns, date_column). Prefer AI-generated schema; fallback to rule-based."""
         from services.business_logic_service import BusinessLogicService
@@ -1508,6 +1617,14 @@ class IntentService:
                             self._store_conversation(user_id, message, response)
                             return {"operation": "decline_followup", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # ── Context Reconstruction ──────────────────────────────────
+            # For short / ambiguous messages, merge with stored last_intent
+            # to produce a fully self-contained query before main pipeline.
+            original_message = message
+            message = self._reconstruct_message(user_id, message, conversation_history)
+            if message != original_message:
+                msg_lower = message.strip().lower()  # refresh after reconstruction
+
             # 0c. Payment reminder queries
             reminder_keywords = [
                 "remind clients",
@@ -1737,6 +1854,11 @@ class IntentService:
                             logger.info(f"[INVOICE] Resolved from last_saved_job: client={client_name}, month={month_name}")
 
                     if not client_name and not bill_number:
+                        # Save intent so follow-up can provide client name
+                        op_name = intent_result.get("operation", "invoice")
+                        self._save_last_intent(user_id, operation=op_name, entity="invoice",
+                                               month=month_name, year=year_val,
+                                               pending_clarification="client_name")
                         response = "I need a client name or bill number to find an invoice. For example: 'Send invoice for Garnier for March'."
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -1749,6 +1871,11 @@ class IntentService:
                             response = f"I see you want an invoice for {client_name}. Which month?\n\n{month_options}\n\nReply with the month, e.g. 'Send invoice for {client_name} for March 2025'."
                         else:
                             response = f"I see you want an invoice for {client_name}. Which month? For example: 'Send invoice for {client_name} for March'."
+                        # Save intent so follow-up "March" reconstructs to full query
+                        op_name = "SEND_EMAIL" if send_email else intent_result.get("operation", "invoice")
+                        self._save_last_intent(user_id, operation=op_name, client_name=client_name,
+                                               entity="invoice", year=year_val,
+                                               pending_clarification="month")
                         # Set awaiting state so the next reply routes to invoice month handler
                         self.memory.update_user_memory(user_id, {
                             "awaiting_invoice_month": True,
@@ -1859,6 +1986,9 @@ class IntentService:
 
                     # Default path: generate PDF and send via WhatsApp/Telegram (existing behavior)
                     trigger_invoice = True
+                    self._save_last_intent(user_id, operation="generate_invoice",
+                                           client_name=display_client, month=month_display,
+                                           year=year_val, entity="invoice")
                     response = f"Confirmed. I've found the record for {display_client}. Generating the invoice now."
                     self._store_conversation(user_id, message, response)
                     return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
@@ -1988,6 +2118,14 @@ class IntentService:
 
             # Handle clarification from planner
             if plan_result.get("clarification"):
+                # Save intent context so follow-up can fill in the gap
+                plan_data = plan_result.get("plan", {}) if isinstance(plan_result.get("plan"), dict) else {}
+                self._save_last_intent(
+                    user_id, operation=plan_data.get("operation", "query"),
+                    client_name=plan_data.get("filters", {}).get("client_name", "") if isinstance(plan_data.get("filters"), dict) else "",
+                    entity="query",
+                    pending_clarification="details",
+                )
                 response = plan_result["clarification"]
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
