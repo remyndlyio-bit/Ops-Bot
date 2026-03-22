@@ -844,6 +844,64 @@ class IntentService:
         # Re-enter process_request with the full synthetic message
         return self.process_request(user_id=user_id, message=synthetic_msg)
 
+    def _handle_send_confirmation(self, user_id: str, message: str) -> Dict:
+        """Handle user confirming/declining sending invoice to client email."""
+        # Clear the awaiting flag
+        pending = self.memory.get_user_memory(user_id).get("pending_send_invoice", {})
+        self.memory.update_user_memory(user_id, {
+            "awaiting_send_confirmation": False,
+            "pending_send_invoice": None,
+        })
+
+        msg_lower = message.strip().lower()
+        _YES = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "send it", "do it", "confirm", "yes please"}
+        if msg_lower in _YES:
+            poc_email = pending.get("poc_email", "")
+            client_name = pending.get("client_name", "Client")
+            month_display = pending.get("month", "Request")
+            year_val = pending.get("year")
+            row_ids = pending.get("row_ids", [])
+
+            if not poc_email:
+                response = "I don't have the client email anymore. Please try again with 'Send invoice for ...'."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "send_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # Find the generated PDF
+            safe_client = client_name.replace(" ", "_")
+            safe_month = month_display.replace(" ", "_")
+            pdf_path = os.path.join("output", f"Invoice_{safe_client}_{safe_month}.pdf")
+
+            if not os.path.exists(pdf_path):
+                response = "I can't find the generated PDF. Please regenerate the invoice first."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "send_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            ok = self.email.send_invoice_email(
+                to_email=poc_email,
+                client_name=client_name,
+                month=month_display,
+                year=year_val,
+                pdf_path=pdf_path,
+            )
+            if ok:
+                # Update invoice_date for affected rows
+                if row_ids:
+                    ids_str = ",".join(f"'{rid}'" for rid in row_ids)
+                    self.supabase.execute_sql(
+                        f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE WHERE id IN ({ids_str})"
+                    )
+                    logger.info(f"[INVOICE] Updated invoice_date for {len(row_ids)} row(s)")
+                response = f"Invoice has been sent to {poc_email}. ✅"
+            else:
+                response = "I couldn't send the invoice email. Please check the email configuration and try again."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "send_confirmed", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        else:
+            response = "👍 Got it, invoice not sent. You can say 'Send invoice for ...' anytime to email it."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "send_declined", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
     def _handle_poc_email_response(self, user_id: str, message: str) -> Dict:
         """Handle user providing a client POC email after invoice generation."""
         import re
@@ -1374,6 +1432,10 @@ class IntentService:
             if user_mem.get("awaiting_poc_email"):
                 return self._handle_poc_email_response(user_id, message)
 
+            # 0b1.6. Check if user is confirming sending invoice to client email
+            if user_mem.get("awaiting_send_confirmation"):
+                return self._handle_send_confirmation(user_id, message)
+
             # 0b2. Check if user is responding with bank details (awaiting state)
             if user_mem.get("awaiting_bank_details"):
                 return self._handle_bank_details_response(user_id, message)
@@ -1686,48 +1748,28 @@ class IntentService:
                             self._store_conversation(user_id, message, response)
                             return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-                        # Reuse existing PDF if present; otherwise generate it
-                        from services.invoice_service import InvoiceService
-                        from services.invoice_generation_service import InvoiceGenerationService
-
-                        safe_client = display_client.replace(" ", "_")
-                        safe_month = month_display.replace(" ", "_")
-                        pdf_candidate = os.path.join("output", f"Invoice_{safe_client}_{safe_month}.pdf")
-
-                        pdf_path = pdf_candidate if os.path.exists(pdf_candidate) else None
-                        if not pdf_path:
-                            summary = InvoiceService.process_invoice_data(rows, display_client, month_display)
-                            bank_result = self.supabase.get_user_bank_details(data_user_id)
-                            bank_details = bank_result.get("data") if bank_result.get("ok") else None
-                            pdf_path = InvoiceGenerationService().generate_pdf(summary, rows, bank_details=bank_details)
-
-                        if not pdf_path:
-                            response = "I tried to generate the invoice PDF but something went wrong. Please try again."
-                            self._store_conversation(user_id, message, response)
-                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-                        # Send via Resend with attachment
-                        ok = self.email.send_invoice_email(
-                            to_email=poc_email,
-                            client_name=display_client,
-                            month=month_display,
-                            year=year_val,
-                            pdf_path=pdf_path,
+                        # Generate the invoice first, then ask for confirmation before emailing
+                        invoice_data["send_to_client"] = True
+                        # Store pending send confirmation so user can approve
+                        self.memory.update_user_memory(user_id, {
+                            "awaiting_send_confirmation": True,
+                            "pending_send_invoice": {
+                                "client_name": display_client,
+                                "month": month_display,
+                                "year": year_val,
+                                "poc_email": poc_email,
+                                "row_ids": [r["id"] for r in rows if r.get("id")],
+                            },
+                        })
+                        # Generate PDF and send to user first via WhatsApp/Telegram
+                        trigger_invoice = True
+                        response = (
+                            f"I've generated the invoice for {display_client} ({month_display}).\n\n"
+                            f"Should I email it to **{poc_email}**?\n"
+                            f"Reply 'Yes' to send or 'No' to skip."
                         )
-                        if ok:
-                            response = f"The invoice has been sent to {poc_email}."
-                            # Update invoice_date for all affected rows
-                            row_ids = [r["id"] for r in rows if r.get("id")]
-                            if row_ids:
-                                ids_str = ",".join(f"'{rid}'" for rid in row_ids)
-                                self.supabase.execute_sql(
-                                    f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE WHERE id IN ({ids_str})"
-                                )
-                                logger.info(f"[INVOICE] Updated invoice_date for {len(row_ids)} row(s)")
-                        else:
-                            response = "I couldn't send the invoice email. Please check the email configuration and try again."
                         self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
 
                     # Check if bank details exist before generating invoice
                     bank_result = self.supabase.get_user_bank_details(data_user_id)

@@ -253,17 +253,8 @@ async def process_and_send_invoice(
             )
             logger.info(f"[INVOICE] Updated invoice_date for {len(row_ids)} row(s)")
 
-        # 6. Send invoice via email — SAME for both platforms
-        send_invoice_email(
-            client_name=summary.get("client", client_name),
-            month=summary.get("month", month or "Request"),
-            year=year,
-            file_path=pdf_path,
-            rows=data,
-            platform=platform,
-            chat_id=chat_id,
-            user_id=user_id,
-        )
+        # 6. Do NOT auto-email to client. Just confirm to user.
+        #    User must explicitly ask to "send invoice" for emailing flow.
 
     except Exception as e:
         logger.error(f"Error in process_and_send_invoice task: {e}")
