@@ -50,6 +50,13 @@ MULTI-TENANT RULE (MANDATORY):
 - Every UPDATE MUST include WHERE user_id = '{user_id or 'UNKNOWN'}' (combine with AND if other conditions exist).
 - NEVER omit user_id from any query.
 
+SOFT-DELETE RULE (MANDATORY):
+- Rows with is_deleted = TRUE are considered deleted. NEVER show them.
+- Every SELECT MUST include AND (is_deleted IS NULL OR is_deleted = FALSE) in the WHERE clause.
+- When the user wants to DELETE or REMOVE a row, do NOT generate a DELETE statement. Instead generate:
+  UPDATE public.job_entries SET is_deleted = TRUE WHERE user_id = '{user_id or 'UNKNOWN'}' AND <conditions> RETURNING *
+  Use conversation context or filters to identify the specific row(s). Always require at least one additional condition beyond user_id (e.g. client_name, job_date, id).
+
 RULES FOR SELECT:
 1. Use only columns from the list above. Use snake_case for column names.
 2. Relative dates: "last month" = date between first and last day of previous month. "this year" = year = {today[:4]}. "last 7 days" = job_date >= CURRENT_DATE - 7.
