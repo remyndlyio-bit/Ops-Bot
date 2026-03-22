@@ -133,7 +133,7 @@ else:
         "third_reminder_sent",
         "payment_details",
         "notes",
-        "is_deleted",
+        "isDeleted",
     ]
 
     SCHEMA_DESCRIPTION = """
@@ -152,7 +152,7 @@ Table: public.job_entries
 - poc_email (text), poc_name (text): contact.
 - first_reminder_sent, second_reminder_sent, third_reminder_sent (timestamptz).
 - payment_details (text), notes (text).
-- is_deleted (boolean): soft-delete flag; rows with is_deleted = true are treated as deleted and must be excluded from all queries.
+- "isDeleted" (boolean): soft-delete flag; rows with "isDeleted" = true are treated as deleted and must be excluded from all queries.
 Use exact column names. For dates use ISO YYYY-MM-DD. TODAY for relative ranges.
 """
 
@@ -350,8 +350,6 @@ class SupabaseService:
         if year:
             where.append("EXTRACT(YEAR FROM job_date) = %s")
             params.append(int(year))
-
-        where.append("(is_deleted IS NULL OR is_deleted = FALSE)")
 
         sql = (
             "SELECT * FROM public.job_entries "
