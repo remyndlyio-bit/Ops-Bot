@@ -99,4 +99,4 @@ Railway with `Procfile`: `web: uvicorn main:app --host 0.0.0.0 --port $PORT`. Py
 - **Always try the simplest fix first.** Remove/tweak config before adding new files. One-line fix > new config file > new tool (e.g. Dockerfile). Don't introduce new infrastructure (Docker, CI configs, build tools) unless the simple path is truly exhausted.
 - **Don't jump to workarounds.** Diagnose the root cause fully before proposing a fix. If the first attempt fails, re-examine assumptions rather than escalating to a heavier solution.
 - **Keep changes minimal.** Touch the fewest files possible. Prefer deleting over adding.
-- **Commit directly to main.** No PRs or feature branches — merge straight into main and push. Commit messages start with `Claude Cowork : ...`.
+- **Commit directly to main.** No PRs or feature branches — merge straight into main and push. Commit messages start with `C C : ...`.
