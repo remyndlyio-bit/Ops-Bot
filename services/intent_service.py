@@ -1793,6 +1793,30 @@ class IntentService:
                 conv = self.memory.get_conversation_history(user_id)
                 if conv and len(conv) >= 2:
                     last_assistant = conv[-1].get("content", "").lower() if conv[-1].get("role") == "assistant" else ""
+
+                    # "Would you like to see more/full details?" → re-run last query as SELECT *
+                    _detail_markers = ("more details", "see details", "full details", "see more", "more information", "see other jobs", "would you like")
+                    if any(m in last_assistant for m in _detail_markers) and "generate an invoice" not in last_assistant:
+                        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+                        last_sql = ctx.get("last_sql")
+                        if last_sql:
+                            import re as _re
+                            full_sql = _re.sub(r"^SELECT\s+.+?\s+FROM\s", "SELECT * FROM ", last_sql, count=1, flags=_re.IGNORECASE | _re.DOTALL)
+                            logger.info(f"[FOLLOWUP] User confirmed details; re-running as SELECT *: {full_sql[:200]}")
+                            exec_result = self.supabase.execute_sql(full_sql)
+                            if exec_result.get("ok"):
+                                rows = exec_result.get("rows", [])
+                                if rows:
+                                    self._update_sql_context(user_id, rows)
+                                    ctx["last_sql"] = full_sql
+                                    self.memory.update_user_memory(user_id, {"uscf_context": ctx})
+                                    payload = build_clean_payload(rows, "select")
+                                    response = self.gemini.synthesize_response(payload, message)
+                                    if not response or not response.strip():
+                                        response = "Here are the full details for your records."
+                                    self._store_conversation(user_id, message, response)
+                                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
                     if "generate an invoice" in last_assistant and "would you like" in last_assistant:
                         # Generate invoice for the last job we found
                         ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
@@ -1972,6 +1996,10 @@ class IntentService:
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                 self._update_sql_context(user_id, rows)
+                # Store last SQL so "Yes, show details" follow-ups can re-run it as SELECT *
+                ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+                ctx["last_sql"] = sanitized_sql
+                self.memory.update_user_memory(user_id, {"uscf_context": ctx})
                 payload = build_clean_payload(rows, "select")
                 response = self.gemini.synthesize_response(payload, message)
                 if not response or not response.strip():

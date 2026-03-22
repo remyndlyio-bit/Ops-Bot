@@ -241,6 +241,7 @@ def _build_planner_prompt(
         "RULES:\n"
         "- Only use columns from the schema. Only use metrics from the list.\n"
         "- 'Top N' → limit:N, order:'desc'. 'Bottom N' → limit:N, order:'asc'.\n"
+        "- 'list all', 'show all', 'give all', 'view all', 'all records', 'all jobs', 'all entries' → set metric:null AND column:null (produces SELECT *).\n"
         "- If unclear, set confidence:'low' and include clarification_question.\n"
         "- For update: 'mark as paid' → updates: {paid_column: 'true'}.\n"
         "- For create: extract ALL mentioned fields into values dict.\n"
