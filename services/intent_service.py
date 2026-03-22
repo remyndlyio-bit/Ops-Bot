@@ -908,6 +908,7 @@ class IntentService:
 
     def _handle_invoice_month_reply(self, user_id: str, message: str, user_mem: dict, data_user_id: str, conversation_history: list) -> Dict:
         """Handle user providing a month after bot asked 'Which month?' for invoice."""
+        import re as _re
         from datetime import datetime
         # Clear the awaiting state
         client_name = user_mem.get("pending_invoice_client", "")
@@ -935,7 +936,7 @@ class IntentService:
                 break
 
         if not month_num:
-            response = f"I couldn't detect a month from your reply. Please say something like: 'March' or 'For April'."
+            response = f"I couldn't detect a month from your reply. Please say something like: 'March' or 'March 2025'."
             self._store_conversation(user_id, message, response)
             # Re-set awaiting state
             self.memory.update_user_memory(user_id, {
@@ -945,12 +946,20 @@ class IntentService:
             })
             return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        year_val = datetime.now().year
-        # Reconstruct full invoice message and route through invoice logic
-        synthetic_msg = f"Generate invoice for {client_name} for {month_name}"
+        # Extract year from user reply (e.g. "April 2025", "March 2024")
+        # Look for 4-digit year in the message
+        year_match = _re.search(r'\b(20\d{2})\b', message)
+        if year_match:
+            year_val = int(year_match.group(1))
+        else:
+            year_val = datetime.now().year
+
+        # Build synthetic message preserving ALL extracted entities
+        year_part = f" {year_val}" if year_match else ""
+        synthetic_msg = f"Generate invoice for {client_name} for {month_name}{year_part}"
         if send_email:
-            synthetic_msg = f"Send invoice for {client_name} for {month_name} over email"
-        logger.info(f"[INVOICE_FOLLOWUP] Resuming invoice flow: client={client_name}, month={month_name}, synthetic='{synthetic_msg}'")
+            synthetic_msg = f"Send invoice for {client_name} for {month_name}{year_part} over email"
+        logger.info(f"[INVOICE_FOLLOWUP] Resuming invoice flow: client={client_name}, month={month_name}, year={year_val}, synthetic='{synthetic_msg}'")
         # Re-enter process_request with the full synthetic message
         return self.process_request(user_id=user_id, message=synthetic_msg)
 
@@ -1804,6 +1813,14 @@ class IntentService:
                     year_val = params.get("year")
                     bill_number = (params.get("bill_number") or "").strip() or None
                     month_num = month_name_to_number(month_name) if month_name else None
+
+                    # Validate: if user's message contains an explicit year but LLM
+                    # missed it, extract it directly from the message text.
+                    if not year_val:
+                        _year_match = re.search(r'\b(20\d{2})\b', message)
+                        if _year_match:
+                            year_val = int(_year_match.group(1))
+                            logger.info(f"[INVOICE] LLM missed year; extracted {year_val} from message text")
                     if not year_val:
                         from datetime import datetime
                         year_val = datetime.now().year
@@ -1908,9 +1925,11 @@ class IntentService:
                         else:
                             response = f"I see you want an invoice for {client_name}. Which month? For example: 'Send invoice for {client_name} for March'."
                         # Save intent so follow-up "March" reconstructs to full query
+                        # Do NOT store inferred year — only store confirmed fields.
+                        # Year will come from the user's follow-up reply (e.g. "April 2025").
                         op_name = "SEND_EMAIL" if send_email else intent_result.get("operation", "invoice")
                         self._save_last_intent(user_id, operation=op_name, client_name=client_name,
-                                               entity="invoice", year=year_val,
+                                               entity="invoice",
                                                pending_clarification="month")
                         # Set awaiting state so the next reply routes to invoice month handler
                         self.memory.update_user_memory(user_id, {
