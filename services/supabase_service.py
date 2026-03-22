@@ -133,6 +133,7 @@ else:
         "third_reminder_sent",
         "payment_details",
         "notes",
+        "is_deleted",
     ]
 
     SCHEMA_DESCRIPTION = """
@@ -151,6 +152,7 @@ Table: public.job_entries
 - poc_email (text), poc_name (text): contact.
 - first_reminder_sent, second_reminder_sent, third_reminder_sent (timestamptz).
 - payment_details (text), notes (text).
+- is_deleted (boolean): soft-delete flag; rows with is_deleted = true are treated as deleted and must be excluded from all queries.
 Use exact column names. For dates use ISO YYYY-MM-DD. TODAY for relative ranges.
 """
 
@@ -349,6 +351,8 @@ class SupabaseService:
             where.append("EXTRACT(YEAR FROM job_date) = %s")
             params.append(int(year))
 
+        where.append("(is_deleted IS NULL OR is_deleted = FALSE)")
+
         sql = (
             "SELECT * FROM public.job_entries "
             f"WHERE {' AND '.join(where)} "
@@ -382,6 +386,55 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Supabase fetch invoice rows error: {e}")
             return {"ok": False, "error": "Failed to fetch invoice rows."}
+
+    def get_available_months_for_client(self, client_name: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Return distinct (year, month) pairs for a client with non-deleted job entries.
+        Returns {"ok": True, "months": [{"year": 2025, "month": 3, "label": "March 2025"}, ...]}
+        sorted newest first.
+        """
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+
+        params: List[Any] = [f"%{client_name.strip()}%"]
+        user_filter = ""
+        if user_id:
+            user_filter = "AND user_id = %s "
+            params.append(str(user_id))
+
+        sql = (
+            "SELECT EXTRACT(YEAR FROM job_date)::int AS yr, EXTRACT(MONTH FROM job_date)::int AS mo "
+            "FROM public.job_entries "
+            f"WHERE client_name ILIKE %s {user_filter}"
+            "AND job_date IS NOT NULL "
+            "AND (is_deleted IS NULL OR is_deleted = FALSE) "
+            "GROUP BY yr, mo "
+            "ORDER BY yr DESC, mo DESC "
+            "LIMIT 36"
+        )
+
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+        except ImportError:
+            return {"ok": False, "error": "psycopg2 not installed."}
+
+        try:
+            import calendar
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+            conn.close()
+            months = []
+            for row in rows:
+                yr, mo = int(row["yr"]), int(row["mo"])
+                months.append({"year": yr, "month": mo, "label": f"{calendar.month_name[mo]} {yr}"})
+            return {"ok": True, "months": months}
+        except Exception as e:
+            logger.error(f"get_available_months_for_client error: {e}")
+            return {"ok": False, "error": "Failed to fetch months."}
 
     def update_job_entry_field(self, row_id: str, field: str, value: Any) -> Dict[str, Any]:
         """
