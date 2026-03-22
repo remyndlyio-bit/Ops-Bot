@@ -253,8 +253,28 @@ async def process_and_send_invoice(
             )
             logger.info(f"[INVOICE] Updated invoice_date for {len(row_ids)} row(s)")
 
-        # 6. Do NOT auto-email to client. Just confirm to user.
-        #    User must explicitly ask to "send invoice" for emailing flow.
+        # 6. Cache last generated invoice in user memory for follow-up commands
+        try:
+            if user_id and hasattr(intent_service, 'memory'):
+                poc_email = None
+                for row in data:
+                    val = (row.get("poc_email") or "").strip()
+                    if val:
+                        poc_email = val
+                        break
+                intent_service.memory.update_user_memory(user_id, {
+                    "last_generated_invoice": {
+                        "client_name": summary.get("client", client_name),
+                        "month": summary.get("month", month or "Request"),
+                        "year": year,
+                        "pdf_path": pdf_path,
+                        "poc_email": poc_email,
+                        "row_ids": [r["id"] for r in data if r.get("id")],
+                    }
+                })
+                logger.info(f"[INVOICE] Cached last_generated_invoice for user {user_id}")
+        except Exception as cache_err:
+            logger.warning(f"Failed to cache invoice context: {cache_err}")
 
     except Exception as e:
         logger.error(f"Error in process_and_send_invoice task: {e}")

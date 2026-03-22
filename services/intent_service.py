@@ -1599,6 +1599,65 @@ class IntentService:
             is_retrieval = (has_verb and has_invoice_word) or (has_invoice_word and "for " in msg_lower)
             logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
             if is_retrieval:
+                # Check if this is a "send to client" follow-up and we have a cached invoice
+                _SEND_TO_CLIENT_PATTERNS = [
+                    "send invoice to client", "send it to client", "send to client",
+                    "send invoice to the client", "send it to the client",
+                    "email invoice to client", "email it to client",
+                    "mail invoice to client", "forward invoice",
+                    "send invoice to poc", "send it to poc",
+                ]
+                is_send_to_client = any(p in msg_lower for p in _SEND_TO_CLIENT_PATTERNS)
+                cached_invoice = user_mem.get("last_generated_invoice")
+
+                if is_send_to_client and cached_invoice:
+                    # Use the cached invoice instead of regenerating
+                    cached_client = cached_invoice.get("client_name", "Client")
+                    cached_month = cached_invoice.get("month", "Request")
+                    cached_year = cached_invoice.get("year")
+                    poc_email = cached_invoice.get("poc_email", "")
+                    cached_row_ids = cached_invoice.get("row_ids", [])
+                    pdf_path = cached_invoice.get("pdf_path", "")
+
+                    if not poc_email:
+                        response = (
+                            f"I have the invoice for {cached_client} ({cached_month}) ready, "
+                            f"but there's no contact email (poc_email) on file.\n\n"
+                            f"Please provide the client's email so I can send it:\n"
+                            f"Example: client@agency.com"
+                        )
+                        self.memory.update_user_memory(user_id, {
+                            "awaiting_poc_email": True,
+                            "pending_send_invoice": {
+                                "client_name": cached_client,
+                                "month": cached_month,
+                                "year": cached_year,
+                                "row_ids": cached_row_ids,
+                            },
+                        })
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                    # We have the PDF and the email — ask for confirmation
+                    self.memory.update_user_memory(user_id, {
+                        "awaiting_send_confirmation": True,
+                        "pending_send_invoice": {
+                            "client_name": cached_client,
+                            "month": cached_month,
+                            "year": cached_year,
+                            "poc_email": poc_email,
+                            "row_ids": cached_row_ids,
+                        },
+                    })
+                    response = (
+                        f"I have the invoice for {cached_client} ({cached_month}) ready.\n\n"
+                        f"Should I email it to **{poc_email}**?\n"
+                        f"Reply 'Yes' to send or 'No' to skip."
+                    )
+                    logger.info(f"[INVOICE] Using cached invoice for send-to-client: {cached_client} {cached_month}")
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
                 schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
                 intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
                 params = intent_result.get("parameters", {})
@@ -1613,8 +1672,12 @@ class IntentService:
                         "mail invoice",
                         "share invoice via email",
                         "forward invoice",
+                        "send invoice to client",
+                        "send it to client",
+                        "send to client",
+                        "send invoice to the client",
                     ]
-                    if "email" in msg_lower or "e-mail" in msg_lower or any(k in msg_lower for k in email_keywords):
+                    if "email" in msg_lower or "e-mail" in msg_lower or "to client" in msg_lower or any(k in msg_lower for k in email_keywords):
                         intent_result["operation"] = "SEND_EMAIL"
 
                     client_name = (params.get("client_name") or "").strip()
