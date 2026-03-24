@@ -747,6 +747,16 @@ class IntentService:
             brand = extracted.get("brand_name", "")
             client = extracted.get("client_name", "")
             response = f"Job saved! ✅ {brand} has been added to your records."
+
+            # Check if user had a compound intent (e.g. "add job and send invoice")
+            user_mem = self.memory.get_user_memory(user_id)
+            suggested_next = user_mem.get("suggested_next_action")
+            if suggested_next:
+                # Clear it so it doesn't persist across unrelated turns
+                self.memory.update_user_memory(user_id, {"suggested_next_action": None})
+                response += f"\n\nYou also mentioned: \"{suggested_next}\"\nWant me to do that now? (Yes / No)"
+                logger.info(f"[COMPOUND] Suggesting next action after job save: '{suggested_next}'")
+
             # Store last job context so user can reference "this job" in follow-up
             self.memory.update_user_memory(user_id, {
                 "last_saved_job": {
@@ -1542,6 +1552,22 @@ class IntentService:
             is_add_job = any(t in msg_stripped.lower() for t in add_job_triggers)
             is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
             if is_add_job or is_plus:
+                # Detect compound intent: "add a job AND send invoice / generate invoice"
+                _COMPOUND_SPLITS = [" and ", " then ", " after that ", " & "]
+                msg_low = msg_stripped.lower()
+                suggested_next = None
+                for sp in _COMPOUND_SPLITS:
+                    if sp in msg_low:
+                        parts = msg_low.split(sp, 1)
+                        second_part = parts[1].strip()
+                        if any(kw in second_part for kw in ["invoice", "bill", "send", "email"]):
+                            suggested_next = second_part
+                            logger.info(f"[COMPOUND] Detected second intent: '{suggested_next}'")
+                            break
+                if suggested_next:
+                    self.memory.update_user_memory(user_id, {
+                        "suggested_next_action": suggested_next,
+                    })
                 return self._start_smart_capture(user_id, message)
 
             if user_mem.get("awaiting_job_input"):
