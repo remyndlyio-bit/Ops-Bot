@@ -855,17 +855,20 @@ class IntentService:
             extracted = None
 
         if not extracted:
+            # No fields extracted — user likely just expressed intent ("add a job")
+            # without providing actual data. Show a friendly prompt, not an error.
+            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
             response = (
-                "I couldn't understand the job details. Please try again.\n\n"
+                "Describe the job in one message.\n\n"
                 "Example:\n"
                 "Bridgestone\n"
                 "10 Feb\n"
-                "Master film 30 sec\n"
+                "Master film 30 sec + 4 cutdowns\n"
+                "Client: The Good Take\n"
                 "Fees: 25k"
             )
-            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
             self._store_conversation(user_id, content, response)
-            return {"operation": "smart_capture_failed", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         # Check required fields
         required = ["brand_name", "job_date", "job_description_details"]
@@ -1531,17 +1534,18 @@ class IntentService:
             if user_mem.get("pending_disambiguation"):
                 return self._handle_disambiguation_reply(user_id, message, user_mem["pending_disambiguation"])
 
-            if user_mem.get("awaiting_job_input"):
-                return self._extract_and_confirm(user_id, message)
-
             # 0b. Check for "add job" / "+" trigger → AI Smart Capture
             msg_stripped = message.strip()
-            add_job_triggers = ["add job", "add a job", "add new job", "new job",
-                               "log a job", "log job", "record job", "record a job"]
+            add_job_triggers = ["add job", "add a job", "add new job", "add a new job",
+                               "new job", "log a job", "log job", "record job", "record a job",
+                               "create job", "create a job", "create a new job"]
             is_add_job = any(t in msg_stripped.lower() for t in add_job_triggers)
             is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
             if is_add_job or is_plus:
                 return self._start_smart_capture(user_id, message)
+
+            if user_mem.get("awaiting_job_input"):
+                return self._extract_and_confirm(user_id, message)
 
             # 0b1.4. Check if user is providing the month for a pending invoice
             if user_mem.get("awaiting_invoice_month"):
