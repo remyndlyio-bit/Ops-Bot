@@ -495,6 +495,45 @@ class GeminiService:
                 "clarification_question": None,
             }
 
+    def decompose_compound_intent(self, message: str) -> Optional[List[str]]:
+        """
+        Check if a message contains multiple distinct intents.
+        Returns a list of individual intent strings if compound, or None if single intent.
+        Only called when the message is long enough to plausibly contain multiple intents.
+        """
+        self._ensure_initialized()
+        prompt = f"""Analyze this user message and determine if it contains multiple distinct action requests.
+
+Message: "{message}"
+
+Rules:
+- Only split if there are genuinely SEPARATE actions (e.g. "add a job AND send invoice")
+- Do NOT split a single action with details (e.g. "add a job for Garnier on 10 Feb" is ONE intent)
+- Do NOT split if the second part is just context for the first
+- Return the intents in the logical execution order
+
+Return JSON:
+- If SINGLE intent: {{"compound": false, "intents": ["{message}"]}}
+- If MULTIPLE intents: {{"compound": true, "intents": ["first action", "second action"]}}
+
+Return ONLY valid JSON, nothing else."""
+
+        try:
+            raw = self._call_api(prompt, generation_config={
+                "temperature": 0.0,
+                "maxOutputTokens": 200,
+                "responseMimeType": "application/json",
+            })
+            if not raw:
+                return None
+            result = json.loads(raw)
+            if result.get("compound") and len(result.get("intents", [])) > 1:
+                logger.info(f"[AI_COMPOUND] Decomposed into {len(result['intents'])} intents: {result['intents']}")
+                return result["intents"]
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"[AI_COMPOUND] Failed to decompose: {e}")
+        return None
+
     def extract_job_fields(self, message: str, today: str = None) -> Optional[Dict]:
         """
         Extract structured job fields from a natural language message.

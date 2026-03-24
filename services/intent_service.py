@@ -1552,23 +1552,18 @@ class IntentService:
             is_add_job = any(t in msg_stripped.lower() for t in add_job_triggers)
             is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
             if is_add_job or is_plus:
-                # Detect compound intent: "add a job AND send invoice / generate invoice"
-                _COMPOUND_SPLITS = [" and ", " then ", " after that ", " & "]
-                msg_low = msg_stripped.lower()
-                suggested_next = None
-                for sp in _COMPOUND_SPLITS:
-                    if sp in msg_low:
-                        parts = msg_low.split(sp, 1)
-                        second_part = parts[1].strip()
-                        if any(kw in second_part for kw in ["invoice", "bill", "send", "email"]):
-                            suggested_next = second_part
-                            logger.info(f"[COMPOUND] Detected second intent: '{suggested_next}'")
-                            break
-                if suggested_next:
-                    self.memory.update_user_memory(user_id, {
-                        "suggested_next_action": suggested_next,
-                    })
-                return self._start_smart_capture(user_id, message)
+                # Check for compound intent using AI (e.g. "add a job and send invoice")
+                first_part_msg = message
+                if len(message.split()) >= 6:  # only check if message is long enough
+                    intents = self.gemini.decompose_compound_intent(message)
+                    if intents and len(intents) > 1:
+                        first_part_msg = intents[0]
+                        suggested_next = intents[1]
+                        logger.info(f"[COMPOUND] AI split: first='{first_part_msg}', next='{suggested_next}'")
+                        self.memory.update_user_memory(user_id, {
+                            "suggested_next_action": suggested_next,
+                        })
+                return self._start_smart_capture(user_id, first_part_msg)
 
             if user_mem.get("awaiting_job_input"):
                 return self._extract_and_confirm(user_id, message)
