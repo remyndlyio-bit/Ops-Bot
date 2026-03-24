@@ -752,8 +752,8 @@ class IntentService:
             user_mem = self.memory.get_user_memory(user_id)
             suggested_next = user_mem.get("suggested_next_action")
             if suggested_next:
-                # Clear it so it doesn't persist across unrelated turns
-                self.memory.update_user_memory(user_id, {"suggested_next_action": None})
+                # Keep suggested_next_action in memory so the handler can use it
+                self.memory.update_user_memory(user_id, {"awaiting_compound_response": True})
                 response += f"\n\nYou also mentioned: \"{suggested_next}\"\nWant me to do that now? (Yes / No)"
                 logger.info(f"[COMPOUND] Suggesting next action after job save: '{suggested_next}'")
 
@@ -1544,6 +1544,25 @@ class IntentService:
             if user_mem.get("pending_disambiguation"):
                 return self._handle_disambiguation_reply(user_id, message, user_mem["pending_disambiguation"])
 
+            # Handle compound intent follow-up ("Yes" after "You also mentioned: ...")
+            if user_mem.get("awaiting_compound_response"):
+                pending_action = user_mem.get("suggested_next_action", "")
+                # Always clear the state first (interruption-safe)
+                self.memory.update_user_memory(user_id, {
+                    "awaiting_compound_response": False,
+                    "suggested_next_action": None,
+                })
+                msg_lower_check = message.strip().lower()
+                _YES = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "do it", "yes please"}
+                if msg_lower_check in _YES and pending_action:
+                    logger.info(f"[COMPOUND] User confirmed next action: '{pending_action}'")
+                    return self.process_request(user_id=user_id, message=pending_action)
+                elif msg_lower_check in {"no", "nah", "nope", "skip", "not now", "later"}:
+                    response = "👍 No problem. Let me know if you need anything else."
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "compound_declined", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                # else: user said something unrelated — fall through to normal processing
+
             # 0b. Check for "add job" / "+" trigger → AI Smart Capture
             msg_stripped = message.strip()
             add_job_triggers = ["add job", "add a job", "add new job", "add a new job",
@@ -2302,6 +2321,13 @@ class IntentService:
                     response = format_response(ASSISTANT_MODE, insert_confirmation=True)
                 else:
                     response = format_response(ASSISTANT_MODE, insert_confirmation=True)
+                # Check for compound intent — suggest next action after job save
+                insert_mem = self.memory.get_user_memory(user_id)
+                suggested_next = insert_mem.get("suggested_next_action")
+                if suggested_next:
+                    self.memory.update_user_memory(user_id, {"awaiting_compound_response": True})
+                    response += f"\n\nYou also mentioned: \"{suggested_next}\"\nWant me to do that now? (Yes / No)"
+                    logger.info(f"[COMPOUND] Suggesting next action after insert: '{suggested_next}'")
             else:
                 if not rows:
                     # Check if user has ANY data at all
