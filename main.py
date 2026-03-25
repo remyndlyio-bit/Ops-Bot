@@ -262,6 +262,7 @@ async def process_and_send_invoice(
                     if val:
                         poc_email = val
                         break
+                from datetime import datetime
                 intent_service.memory.update_user_memory(user_id, {
                     "last_generated_invoice": {
                         "client_name": summary.get("client", client_name),
@@ -270,6 +271,7 @@ async def process_and_send_invoice(
                         "pdf_path": pdf_path,
                         "poc_email": poc_email,
                         "row_ids": [r["id"] for r in data if r.get("id")],
+                        "cached_at": datetime.now().isoformat(),
                     }
                 })
                 logger.info(f"[INVOICE] Cached last_generated_invoice for user {user_id}")

@@ -534,6 +534,38 @@ Return ONLY valid JSON, nothing else."""
             logger.warning(f"[AI_COMPOUND] Failed to decompose: {e}")
         return None
 
+    def is_send_to_client_intent(self, message: str, last_bot_message: str = "", cached_client: str = "") -> bool:
+        """
+        Use AI to determine if the user is asking to send/email a previously
+        generated invoice to a client. Works with any phrasing — no pattern list.
+        """
+        self._ensure_initialized()
+        client_ctx = f'\nThe cached invoice is for client: "{cached_client}".' if cached_client else ""
+        prompt = f"""The bot just generated an invoice and sent it to the user.
+
+Last bot message: "{last_bot_message[:300]}"{client_ctx}
+User's reply: "{message}"
+
+Is the user asking to SEND or EMAIL this specific invoice to the client/recipient?
+Examples of YES: "send it to the client", "email this to them", "forward to poc", "send to client", "mail it", "share with client"
+Examples of NO: "thanks", "show me jobs", "generate another invoice", "what's the total"
+Also NO if the user mentions a DIFFERENT client name than the cached one.
+
+Return ONLY JSON: {{"send_to_client": true}} or {{"send_to_client": false}}"""
+
+        try:
+            raw = self._call_api(prompt, generation_config={
+                "temperature": 0.0,
+                "maxOutputTokens": 50,
+                "responseMimeType": "application/json",
+            })
+            if raw:
+                result = json.loads(raw)
+                return result.get("send_to_client", False)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"[AI_SEND_CHECK] Failed: {e}")
+        return False
+
     def extract_job_fields(self, message: str, today: str = None) -> Optional[Dict]:
         """
         Extract structured job fields from a natural language message.

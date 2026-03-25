@@ -1760,8 +1760,84 @@ class IntentService:
                     "trigger_invoice": False,
                 }
 
-            # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
+            # 1b. "Send to client" follow-up — use AI to detect intent, no pattern list
             msg_lower = message.lower()
+            cached_invoice = user_mem.get("last_generated_invoice")
+
+            # TTL: expire cached invoice after 30 minutes
+            if cached_invoice:
+                from datetime import datetime, timedelta
+                cached_at = cached_invoice.get("cached_at", "")
+                if cached_at:
+                    try:
+                        cache_time = datetime.fromisoformat(cached_at)
+                        if datetime.now() - cache_time > timedelta(minutes=30):
+                            logger.info(f"[SEND_CHECK] Cached invoice expired (>30min), clearing")
+                            self.memory.update_user_memory(user_id, {"last_generated_invoice": None})
+                            cached_invoice = None
+                    except (ValueError, TypeError):
+                        pass
+
+            if cached_invoice:
+                cached_client = cached_invoice.get("client_name", "")
+                # Get last bot message for context
+                last_bot_msg = ""
+                if conversation_history:
+                    bot_msgs = [m for m in conversation_history if m.get("role") == "assistant"]
+                    if bot_msgs:
+                        last_bot_msg = bot_msgs[-1].get("content", "")
+                is_send_to_client = self.gemini.is_send_to_client_intent(message, last_bot_msg, cached_client=cached_client)
+                logger.info(f"[SEND_CHECK] AI determined send_to_client={is_send_to_client} for msg='{message[:60]}' (cached_client={cached_client})")
+            else:
+                is_send_to_client = False
+
+            if is_send_to_client and cached_invoice:
+                cached_client = cached_invoice.get("client_name", "Client")
+                cached_month = cached_invoice.get("month", "Request")
+                cached_year = cached_invoice.get("year")
+                poc_email = cached_invoice.get("poc_email", "")
+                cached_row_ids = cached_invoice.get("row_ids", [])
+
+                if not poc_email:
+                    response = (
+                        f"I have the invoice for {cached_client} ({cached_month}) ready, "
+                        f"but there's no contact email (poc_email) on file.\n\n"
+                        f"Please provide the client's email so I can send it:\n"
+                        f"Example: client@agency.com"
+                    )
+                    self.memory.update_user_memory(user_id, {
+                        "awaiting_poc_email": True,
+                        "pending_send_invoice": {
+                            "client_name": cached_client,
+                            "month": cached_month,
+                            "year": cached_year,
+                            "row_ids": cached_row_ids,
+                        },
+                    })
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                # We have the PDF and the email — ask for confirmation
+                self.memory.update_user_memory(user_id, {
+                    "awaiting_send_confirmation": True,
+                    "pending_send_invoice": {
+                        "client_name": cached_client,
+                        "month": cached_month,
+                        "year": cached_year,
+                        "poc_email": poc_email,
+                        "row_ids": cached_row_ids,
+                    },
+                })
+                response = (
+                    f"I have the invoice for {cached_client} ({cached_month}) ready.\n\n"
+                    f"Should I email it to **{poc_email}**?\n"
+                    f"Reply 'Yes' to send or 'No' to skip."
+                )
+                logger.info(f"[INVOICE] Using cached invoice for send-to-client: {cached_client} {cached_month}")
+                self._store_conversation(user_id, message, response)
+                return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
             _INVOICE_VERBS = ["get", "download", "send", "give", "show", "retrieve", "fetch",
                               "generate", "create", "make", "prepare", "need", "want", "share"]
             has_verb = any(w in msg_lower for w in _INVOICE_VERBS)
@@ -1771,65 +1847,6 @@ class IntentService:
             is_retrieval = has_invoice_word
             logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
             if is_retrieval:
-                # Check if this is a "send to client" follow-up and we have a cached invoice
-                _SEND_TO_CLIENT_PATTERNS = [
-                    "send invoice to client", "send it to client", "send to client",
-                    "send invoice to the client", "send it to the client",
-                    "email invoice to client", "email it to client",
-                    "mail invoice to client", "forward invoice",
-                    "send invoice to poc", "send it to poc",
-                ]
-                is_send_to_client = any(p in msg_lower for p in _SEND_TO_CLIENT_PATTERNS)
-                cached_invoice = user_mem.get("last_generated_invoice")
-
-                if is_send_to_client and cached_invoice:
-                    # Use the cached invoice instead of regenerating
-                    cached_client = cached_invoice.get("client_name", "Client")
-                    cached_month = cached_invoice.get("month", "Request")
-                    cached_year = cached_invoice.get("year")
-                    poc_email = cached_invoice.get("poc_email", "")
-                    cached_row_ids = cached_invoice.get("row_ids", [])
-                    pdf_path = cached_invoice.get("pdf_path", "")
-
-                    if not poc_email:
-                        response = (
-                            f"I have the invoice for {cached_client} ({cached_month}) ready, "
-                            f"but there's no contact email (poc_email) on file.\n\n"
-                            f"Please provide the client's email so I can send it:\n"
-                            f"Example: client@agency.com"
-                        )
-                        self.memory.update_user_memory(user_id, {
-                            "awaiting_poc_email": True,
-                            "pending_send_invoice": {
-                                "client_name": cached_client,
-                                "month": cached_month,
-                                "year": cached_year,
-                                "row_ids": cached_row_ids,
-                            },
-                        })
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-                    # We have the PDF and the email — ask for confirmation
-                    self.memory.update_user_memory(user_id, {
-                        "awaiting_send_confirmation": True,
-                        "pending_send_invoice": {
-                            "client_name": cached_client,
-                            "month": cached_month,
-                            "year": cached_year,
-                            "poc_email": poc_email,
-                            "row_ids": cached_row_ids,
-                        },
-                    })
-                    response = (
-                        f"I have the invoice for {cached_client} ({cached_month}) ready.\n\n"
-                        f"Should I email it to **{poc_email}**?\n"
-                        f"Reply 'Yes' to send or 'No' to skip."
-                    )
-                    logger.info(f"[INVOICE] Using cached invoice for send-to-client: {cached_client} {cached_month}")
-                    self._store_conversation(user_id, message, response)
-                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
                 schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
                 intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
                 params = intent_result.get("parameters", {})
