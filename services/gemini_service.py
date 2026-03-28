@@ -158,9 +158,9 @@ class GeminiService:
             "- Use ONLY the provided structured data. Do not invent or assume values. Do not expose technical fields.\n"
             "- If a field is null, omit it naturally.\n"
             "- Convert dates to readable format (e.g. 20 Feb 2026). Mention fees naturally (e.g. ₹2,000).\n"
-            "- For multiple records: summarize intelligently, do not dump rows.\n"
+            "- For multiple records: use bullet points. Each bullet = one job/record. Format: '• [Date] – [Client/Brand]: [brief description], ₹[fee] ([paid/unpaid])'. Add a 1-line summary at the end (e.g. total jobs, total value).\n"
             "- For field_answer type: answer the user's question naturally (e.g. 'Your most recent client was Xiaomi.', 'That project was valued at ₹4,000.'). Never output raw field:value or one-word answers.\n"
-            "- Output plain text only, no bullet lists or key:value format. 2–4 sentences max.\n\n"
+            "- For single records or aggregates: plain text, 2–4 sentences max. No bullets needed.\n\n"
             "TONE RULES:\n"
             "- Default: composed and minimal, but you can use light transitions like 'Here’s the snapshot', 'Quick read:', or 'In short,'.\n"
             "- When context justifies it, add subtle momentum (never hype or over-celebrate):\n"
@@ -198,7 +198,7 @@ class GeminiService:
         try:
             out = self._call_api(
                 full_prompt,
-                generation_config={"temperature": 0.2, "maxOutputTokens": 300},
+                generation_config={"temperature": 0.2, "maxOutputTokens": 600},
             )
             if out and isinstance(out, str) and out.strip():
                 return out.strip()
