@@ -679,9 +679,9 @@ class IntentService:
             response = (
                 "No problem! Send the corrected job info in one message.\n\n"
                 "Example:\n"
-                "Bridgestone\n"
-                "10 Feb\n"
-                "Master film 30 sec\n"
+                "Brand: Bridgestone\n"
+                "Date: 10 Feb\n"
+                "Job: Master film 30 sec\n"
                 "Client: The Good Take\n"
                 "Fees: 25k"
             )
@@ -841,9 +841,9 @@ class IntentService:
             response = (
                 "Describe the job in one message.\n\n"
                 "Example:\n"
-                "Bridgestone\n"
-                "10 Feb\n"
-                "Master film 30 sec + 4 cutdowns\n"
+                "Brand: Bridgestone\n"
+                "Date: 10 Feb\n"
+                "Job: Master film 30 sec + 4 cutdowns\n"
                 "Client: The Good Take\n"
                 "Fees: 25k"
             )
@@ -871,9 +871,9 @@ class IntentService:
             response = (
                 "Describe the job in one message.\n\n"
                 "Example:\n"
-                "Bridgestone\n"
-                "10 Feb\n"
-                "Master film 30 sec + 4 cutdowns\n"
+                "Brand: Bridgestone\n"
+                "Date: 10 Feb\n"
+                "Job: Master film 30 sec + 4 cutdowns\n"
                 "Client: The Good Take\n"
                 "Fees: 25k"
             )
