@@ -1552,9 +1552,11 @@ class IntentService:
                     "awaiting_compound_response": False,
                     "suggested_next_action": None,
                 })
-                msg_lower_check = message.strip().lower()
-                _YES = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "do it", "yes please"}
-                if msg_lower_check in _YES and pending_action:
+                msg_lower_check = message.strip().lower().rstrip("., !")
+                _YES_EXACT = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "do it", "yes please"}
+                _YES_PREFIXES = ("yes,", "yes ", "yeah,", "yeah ", "sure,", "sure ", "ok,", "ok ", "okay,", "okay ")
+                _is_yes = msg_lower_check in _YES_EXACT or msg_lower_check.startswith(_YES_PREFIXES)
+                if _is_yes and pending_action:
                     logger.info(f"[COMPOUND] User confirmed next action: '{pending_action}'")
                     return self.process_request(user_id=user_id, message=pending_action)
                 elif msg_lower_check in {"no", "nah", "nope", "skip", "not now", "later"}:
@@ -2051,7 +2053,22 @@ class IntentService:
                     if intent_result.get("operation") == "SEND_EMAIL":
                         poc_email = (rows[0].get("poc_email") or "").strip()
                         if not poc_email:
-                            response = f"I found the invoice for {display_client} but there's no contact email (poc_email) stored."
+                            row_ids = [r["id"] for r in rows if r.get("id")]
+                            response = (
+                                f"I have the invoice for {display_client} ({month_display}) ready, "
+                                f"but there's no contact email on file.\n\n"
+                                f"Please provide the client's email so I can send it:\n"
+                                f"Example: client@agency.com"
+                            )
+                            self.memory.update_user_memory(user_id, {
+                                "awaiting_poc_email": True,
+                                "pending_send_invoice": {
+                                    "client_name": display_client,
+                                    "month": month_display,
+                                    "year": year_val,
+                                    "row_ids": row_ids,
+                                },
+                            })
                             self._store_conversation(user_id, message, response)
                             return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
