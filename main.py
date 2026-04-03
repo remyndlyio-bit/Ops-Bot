@@ -263,18 +263,44 @@ async def process_and_send_invoice(
                         poc_email = val
                         break
                 from datetime import datetime
+                cached_client_name = summary.get("client", client_name)
+                cached_month_name = summary.get("month", month or "Request")
+                cached_row_ids = [r["id"] for r in data if r.get("id")]
                 intent_service.memory.update_user_memory(user_id, {
                     "last_generated_invoice": {
-                        "client_name": summary.get("client", client_name),
-                        "month": summary.get("month", month or "Request"),
+                        "client_name": cached_client_name,
+                        "month": cached_month_name,
                         "year": year,
                         "pdf_path": pdf_path,
                         "poc_email": poc_email,
-                        "row_ids": [r["id"] for r in data if r.get("id")],
+                        "row_ids": cached_row_ids,
                         "cached_at": datetime.now().isoformat(),
                     }
                 })
                 logger.info(f"[INVOICE] Cached last_generated_invoice for user {user_id}")
+
+                # Auto-prompt to email invoice to client if poc_email is available,
+                # so user doesn't need to ask a second time.
+                if poc_email:
+                    intent_service.memory.update_user_memory(user_id, {
+                        "awaiting_send_confirmation": True,
+                        "pending_send_invoice": {
+                            "client_name": cached_client_name,
+                            "month": cached_month_name,
+                            "year": year,
+                            "poc_email": poc_email,
+                            "row_ids": cached_row_ids,
+                        },
+                    })
+                    prompt_msg = (
+                        f"Should I also email this to {poc_email}?\n"
+                        f"Reply Yes to send or No to skip."
+                    )
+                    if platform == "telegram" and chat_id:
+                        await telegram_service.send_text_message(chat_id, prompt_msg)
+                    elif platform == "whatsapp" and to_number:
+                        whatsapp_service.send_text_message(to_number, prompt_msg)
+                    logger.info(f"[INVOICE] Auto-prompted email confirmation for {cached_client_name} → {poc_email}")
         except Exception as cache_err:
             logger.warning(f"Failed to cache invoice context: {cache_err}")
 
