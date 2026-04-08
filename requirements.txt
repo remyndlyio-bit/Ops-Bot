@@ -16,3 +16,4 @@ google-auth-httplib2
 google-auth-oauthlib
 supabase
 psycopg2-binary
+pytest
