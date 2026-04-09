@@ -1038,12 +1038,14 @@ class IntentService:
         """Handle user providing a client POC email after invoice generation."""
         import re
         user_mem = self.memory.get_user_memory(user_id)
+        pending = user_mem.get("pending_send_invoice", {})
 
         # Clear awaiting state
         self.memory.update_user_memory(user_id, {"awaiting_poc_email": False})
 
         # Allow cancel
         if message.strip().lower() in ("cancel", "skip", "no", "nevermind"):
+            self.memory.update_user_memory(user_id, {"pending_send_invoice": None})
             response = "No problem, skipped. You can add the client email later."
             self._store_conversation(user_id, message, response)
             return {"operation": "poc_email_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -1057,23 +1059,30 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "poc_email_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+        # Read client info from pending_send_invoice (the actual stored data)
+        client_name = pending.get("client_name", "")
+        month = pending.get("month", "")
+        year = pending.get("year")
+        row_ids = pending.get("row_ids", [])
+
+        if not client_name:
+            logger.warning(f"[POC] No client_name in pending_send_invoice for user {user_id}")
+
         # Save POC email to job entries for this client
-        client_name = user_mem.get("poc_email_client", "")
         result = self.supabase.update_poc_email_for_client(user_id, client_name, email)
 
         if result.get("ok"):
             updated = result.get("updated", 0)
-            pdf_path = user_mem.get("poc_email_pdf_path")
-            month = user_mem.get("poc_email_month", "")
-            year = user_mem.get("poc_email_year")
 
-            # Try to send the invoice email now
+            # Try to send the invoice email now using the already-generated PDF
+            safe_client = client_name.replace(" ", "_")
+            safe_month = month.replace(" ", "_")
+            pdf_path = os.path.join("output", f"Invoice_{safe_client}_{safe_month}.pdf")
+
             email_sent = False
-            if pdf_path:
+            if os.path.exists(pdf_path):
                 try:
-                    from services.resend_email_service import ResendEmailService
-                    email_svc = ResendEmailService()
-                    ok = email_svc.send_invoice_email(
+                    ok = self.email.send_invoice_email(
                         to_email=email,
                         client_name=client_name,
                         month=month,
@@ -1083,31 +1092,30 @@ class IntentService:
                     email_sent = ok
                 except Exception as e:
                     logger.error(f"[POC] Failed to send invoice email after saving POC: {e}")
+            else:
+                logger.warning(f"[POC] PDF not found at {pdf_path} — cannot auto-send invoice")
 
             if email_sent:
                 response = f"Saved! Email {email} has been added for {client_name} and the invoice has been sent. ✅"
-                # Update invoice_date for matching rows
-                try:
-                    self.supabase.execute_sql(
-                        f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE "
-                        f"WHERE user_id = '{user_id}' AND client_name ILIKE '%{client_name}%' "
-                        f"AND invoice_date IS NULL"
-                    )
-                    logger.info(f"[INVOICE] Updated invoice_date for {client_name} after POC email save")
-                except Exception as e:
-                    logger.warning(f"[INVOICE] Failed to update invoice_date after POC save: {e}")
+                # Update invoice_date for affected rows
+                if row_ids:
+                    try:
+                        ids_str = ",".join(f"'{rid}'" for rid in row_ids)
+                        self.supabase.execute_sql(
+                            f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE WHERE id IN ({ids_str})"
+                        )
+                        logger.info(f"[INVOICE] Updated invoice_date for {len(row_ids)} row(s) after POC email save")
+                    except Exception as e:
+                        logger.warning(f"[INVOICE] Failed to update invoice_date after POC save: {e}")
             else:
                 response = f"Saved! Email {email} has been added for {client_name} ({updated} job{'s' if updated != 1 else ''} updated)."
+                if not email_sent and os.path.exists(pdf_path):
+                    response += "\n\nI couldn't send the invoice email automatically. You can try 'Send invoice for " + client_name + "' again."
         else:
             response = f"I couldn't save the email: {result.get('error', 'Unknown error')}. Please try again."
 
         # Clean up memory
-        self.memory.update_user_memory(user_id, {
-            "poc_email_client": None,
-            "poc_email_pdf_path": None,
-            "poc_email_month": None,
-            "poc_email_year": None,
-        })
+        self.memory.update_user_memory(user_id, {"pending_send_invoice": None})
         self._store_conversation(user_id, message, response)
         return {"operation": "poc_email_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
