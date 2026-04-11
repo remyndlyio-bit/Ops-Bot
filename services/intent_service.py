@@ -1847,9 +1847,33 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # 1c. Invoice feedback — user complains about the just-generated invoice
+            _INVOICE_FEEDBACK_WORDS = ["missing", "wrong", "incorrect", "update", "change",
+                                       "fix", "edit", "add", "remove", "doesn't have",
+                                       "not showing", "no client", "no billing", "no address"]
+            if cached_invoice and not is_send_to_client:
+                has_invoice_ref = "invoice" in msg_lower or "bill" in msg_lower or "pdf" in msg_lower
+                has_feedback = any(w in msg_lower for w in _INVOICE_FEEDBACK_WORDS)
+                if has_invoice_ref and has_feedback:
+                    cached_client = cached_invoice.get("client_name", "Client")
+                    response = (
+                        f"Got it — you'd like to update the invoice for {cached_client}. "
+                        f"You can customize the invoice by updating your profile settings. "
+                        f"Here's what you can set:\n\n"
+                        f"1. Your name/title/address/email on the invoice header — say: "
+                        f"\"Update invoice profile\"\n"
+                        f"2. Client billing details (billing name, address, GST) — say: "
+                        f"\"Update client billing for {cached_client}\"\n\n"
+                        f"After updating, say \"Regenerate invoice for {cached_client}\" "
+                        f"and I'll create a fresh PDF with the new details."
+                    )
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "invoice_feedback", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
             _INVOICE_VERBS = ["get", "download", "send", "give", "show", "retrieve", "fetch",
-                              "generate", "create", "make", "prepare", "need", "want", "share"]
+                              "generate", "create", "make", "prepare", "need", "want", "share",
+                              "regenerate", "redo", "rebuild"]
             has_verb = any(w in msg_lower for w in _INVOICE_VERBS)
             has_invoice_word = "invoice" in msg_lower or "bill" in msg_lower
             # If the message mentions "invoice" or "bill", always route to the

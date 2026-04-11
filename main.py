@@ -208,20 +208,40 @@ async def process_and_send_invoice(
         safe_client = (summary.get("client") or client_name or "Client").replace(" ", "_")
         safe_month = (summary.get("month") or month or "Period").replace(" ", "_")
         os.makedirs("output", exist_ok=True)
-        candidate_path = os.path.join("output", f"Invoice_{safe_client}_{safe_month}.pdf")
 
-        if os.path.exists(candidate_path):
-            pdf_path = candidate_path
-        else:
-            bank_details = None
-            if user_id:
-                bank_result = supabase_service.get_user_bank_details(user_id)
-                if bank_result.get("ok") and bank_result.get("data"):
-                    bank_details = bank_result["data"]
-                    logger.info(f"[INVOICE] Loaded bank details for user_id={user_id}")
-                else:
-                    logger.info(f"[INVOICE] No bank details found for user_id={user_id}, using defaults")
-            pdf_path = invoice_gen_service.generate_pdf(summary, data, bank_details=bank_details)
+        # Always regenerate the PDF to pick up latest profile/bank/billing details.
+        # PDF generation is fast (<1s); caching caused stale invoices after profile updates.
+        bank_details = None
+        user_profile = None
+        if user_id:
+            bank_result = supabase_service.get_user_bank_details(user_id)
+            if bank_result.get("ok") and bank_result.get("data"):
+                bank_details = bank_result["data"]
+                logger.info(f"[INVOICE] Loaded bank details for user_id={user_id}")
+            else:
+                logger.info(f"[INVOICE] No bank details found for user_id={user_id}, using defaults")
+            # Fetch user profile for invoice header (name, title, address, email)
+            prof_result = supabase_service.get_user_profile(user_id)
+            if prof_result.get("ok") and prof_result.get("data"):
+                prof_data = prof_result["data"]
+                prefs = prof_data.get("preferences") or {}
+                if isinstance(prefs, str):
+                    import json as _json
+                    try:
+                        prefs = _json.loads(prefs)
+                    except Exception:
+                        prefs = {}
+                profile_name = prefs.get("invoice_name") or prof_data.get("name")
+                if not profile_name and bank_details:
+                    profile_name = bank_details.get("bank_account_name")
+                user_profile = {
+                    "name": profile_name or "",
+                    "title": prefs.get("invoice_title", ""),
+                    "address": prefs.get("invoice_address", ""),
+                    "email": prefs.get("invoice_email", ""),
+                }
+                logger.info(f"[INVOICE] Loaded user profile for invoice header: name={user_profile.get('name')}")
+        pdf_path = invoice_gen_service.generate_pdf(summary, data, bank_details=bank_details, user_profile=user_profile)
         if not pdf_path:
             logger.error("Failed to generate PDF")
             return

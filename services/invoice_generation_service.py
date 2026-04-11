@@ -22,9 +22,16 @@ class InvoiceGenerationService:
     def __init__(self):
         pass
 
-    def generate_pdf(self, summary: Dict, client_data: List[Dict], bank_details: Dict = None) -> str:
+    def generate_pdf(self, summary: Dict, client_data: List[Dict], bank_details: Dict = None, user_profile: Dict = None) -> str:
         """
         Generates a PDF using fpdf2.
+
+        user_profile (optional) keys used for the header:
+          name, title, address, email  (from user_profiles.preferences or defaults)
+        bank_details keys used for bank section:
+          bank_name, bank_account_name, bank_account_number, bank_ifsc, upi_id
+        client_data rows may contain:
+          client_billing_details, production_house  (used in "Invoice To" section)
         """
         try:
             pdf = FPDF()
@@ -41,13 +48,20 @@ class InvoiceGenerationService:
             except Exception as e:
                 logger.warning(f"Could not load DejaVu font, falling back to Helvetica: {e}")
 
+            # Resolve user profile fields
+            up = user_profile or {}
+            invoicer_name = up.get("name") or "Your Name"
+            invoicer_title = up.get("title") or ""
+            invoicer_address = up.get("address") or ""
+            invoicer_email = up.get("email") or ""
+
             # Colors
             primary_color = (0, 0, 0)
             gray_color = (128, 128, 128)
 
             # Header - Name & Details
             pdf.set_font(font_family, "B", 20)
-            pdf.cell(100, 10, sanitize_pdf_text("Darshit Mody"), ln=0)
+            pdf.cell(100, 10, sanitize_pdf_text(invoicer_name), ln=0)
 
             pdf.set_font(font_family, "B", 12)
             pdf.set_text_color(*gray_color)
@@ -55,26 +69,53 @@ class InvoiceGenerationService:
             pdf.set_text_color(*primary_color)
 
             pdf.set_font(font_family, "", 10)
-            pdf.cell(100, 5, sanitize_pdf_text("Voice Over Artist"), ln=0)
+            if invoicer_title:
+                pdf.cell(100, 5, sanitize_pdf_text(invoicer_title), ln=0)
+            else:
+                pdf.cell(100, 5, "", ln=0)
             client_prefix = sanitize_pdf_text(summary.get("client", "")[:3].upper())
             invoice_no = sanitize_pdf_text(f"Invoice #: {datetime.now().strftime('%y%m%d')}-{client_prefix}")
             pdf.cell(90, 5, invoice_no, ln=1, align="R")
 
-            pdf.cell(100, 5, sanitize_pdf_text("Residence Address: [Your Address]"), ln=0)
+            if invoicer_address:
+                pdf.cell(100, 5, sanitize_pdf_text(invoicer_address), ln=0)
+            else:
+                pdf.cell(100, 5, "", ln=0)
             pdf.cell(90, 5, sanitize_pdf_text(f"Date: {datetime.now().strftime('%d-%m-%Y')}"), ln=1, align="R")
 
-            pdf.cell(100, 5, sanitize_pdf_text("Email: [Your Email]"), ln=0)
+            if invoicer_email:
+                pdf.cell(100, 5, sanitize_pdf_text(f"Email: {invoicer_email}"), ln=0)
+            else:
+                pdf.cell(100, 5, "", ln=0)
             pdf.cell(90, 5, sanitize_pdf_text("Terms: Immediate"), ln=1, align="R")
 
             pdf.ln(10)
 
-            # Client Info
+            # Client Info — use client_billing_details or production_house from data rows
+            client_billing = ""
+            production_house = ""
+            for row in client_data:
+                if not client_billing:
+                    client_billing = (str(row.get("client_billing_details") or "")).strip()
+                if not production_house:
+                    production_house = (str(row.get("production_house") or "")).strip()
+                if client_billing and production_house:
+                    break
+
             pdf.set_font(font_family, "B", 12)
             pdf.cell(0, 7, sanitize_pdf_text("Invoice To:"), ln=1)
             pdf.set_font(font_family, "", 11)
             client_name = sanitize_pdf_text(summary.get("client", "Client Name"))
-            pdf.cell(0, 6, client_name, ln=1)
-            pdf.cell(0, 6, sanitize_pdf_text("Production House"), ln=1)
+            if client_billing:
+                # client_billing_details may contain multi-line info (name, address, GST, etc.)
+                for line in client_billing.split("\n"):
+                    line = line.strip()
+                    if line:
+                        pdf.cell(0, 6, sanitize_pdf_text(line), ln=1)
+            else:
+                pdf.cell(0, 6, client_name, ln=1)
+                if production_house and production_house.lower() not in ("none", ""):
+                    pdf.cell(0, 6, sanitize_pdf_text(production_house), ln=1)
 
             pdf.ln(10)
 
@@ -139,10 +180,11 @@ class InvoiceGenerationService:
                 sanitize_pdf_text("- Advance payments should be made within 2 working days from invoice date."),
                 ln=1,
             )
+            payee_name = (up.get("name") or bd.get("bank_account_name") or "the account holder")
             pdf.cell(
                 0,
                 5,
-                sanitize_pdf_text("- Payment should be made in favor of 'Darshit Mody'."),
+                sanitize_pdf_text(f"- Payment should be made in favor of '{payee_name}'."),
                 ln=1,
             )
 
