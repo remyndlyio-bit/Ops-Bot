@@ -245,6 +245,9 @@ class SupabaseService:
                         "Transaction mode (e.g. aws-0-REGION.pooler.supabase.com:6543), NOT db.PROJECT_REF.supabase.co"
                     )
                 return {"ok": False, "error": "I couldn't reach the database right now. Please try again in a moment."}
+            # Include column-missing errors so callers can do column fallback
+            if "does not exist" in err_msg:
+                return {"ok": False, "error": err_msg}
             return {"ok": False, "error": "Something went wrong with that query. Please try again."}
 
     def execute_read_only_sql(self, sql: str) -> Dict[str, Any]:
