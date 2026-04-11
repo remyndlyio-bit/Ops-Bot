@@ -341,7 +341,8 @@ class SupabaseService:
             where.append("bill_no = %s")
             params.append(str(bill_no).strip())
         else:
-            where.append("client_name ILIKE %s")
+            where.append("(client_name ILIKE %s OR production_house ILIKE %s)")
+            params.append(f"%{client_name.strip()}%")
             params.append(f"%{client_name.strip()}%")
 
         if month:
@@ -394,7 +395,8 @@ class SupabaseService:
         if not self.db_url:
             return {"ok": False, "error": "Database URL not configured."}
 
-        params: List[Any] = [f"%{client_name.strip()}%"]
+        client_pattern = f"%{client_name.strip()}%"
+        params: List[Any] = [client_pattern, client_pattern]
         user_filter = ""
         if user_id:
             user_filter = "AND user_id = %s "
@@ -403,7 +405,7 @@ class SupabaseService:
         sql = (
             "SELECT EXTRACT(YEAR FROM job_date)::int AS yr, EXTRACT(MONTH FROM job_date)::int AS mo "
             "FROM public.job_entries "
-            f"WHERE client_name ILIKE %s {user_filter}"
+            f"WHERE (client_name ILIKE %s OR production_house ILIKE %s) {user_filter}"
             "AND job_date IS NOT NULL "
             "AND (\"isDeleted\" IS NOT TRUE) "
             "GROUP BY yr, mo "

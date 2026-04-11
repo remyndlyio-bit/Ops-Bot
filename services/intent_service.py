@@ -1953,12 +1953,15 @@ class IntentService:
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                     # Validate client exists in DB before proceeding
+                    # Search both client_name (brand) and production_house (agency/client)
+                    # because smart capture maps user's "client" to production_house column.
                     if client_name and not bill_number:
                         safe_uid = data_user_id.replace("'", "''")
                         safe_cn = client_name.replace("'", "''")
                         check_sql = (
                             f"SELECT DISTINCT client_name FROM public.job_entries "
-                            f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_cn}%' "
+                            f"WHERE user_id = '{safe_uid}' "
+                            f"AND (client_name ILIKE '%{safe_cn}%' OR production_house ILIKE '%{safe_cn}%') "
                             f"AND (\"isDeleted\" IS NOT TRUE)"
                         )
                         check_result = self.supabase.execute_sql(check_sql)
@@ -2029,7 +2032,8 @@ class IntentService:
                             avail_sql = (
                                 f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
                                 f"FROM public.job_entries "
-                                f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_client}%' "
+                                f"WHERE user_id = '{safe_uid}' "
+                                f"AND (client_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
                                 f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
                             )
                             avail = self.supabase.execute_sql(avail_sql)
