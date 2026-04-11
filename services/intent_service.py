@@ -978,15 +978,45 @@ class IntentService:
 
     def _handle_send_confirmation(self, user_id: str, message: str) -> Dict:
         """Handle user confirming/declining sending invoice to client email."""
-        # Clear the awaiting flag
         pending = self.memory.get_user_memory(user_id).get("pending_send_invoice", {})
+        msg_lower = message.strip().lower()
+
+        _YES = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "send it", "do it", "confirm", "yes please"}
+        _NO = {"no", "n", "nope", "nah", "skip", "cancel", "not now", "later", "don't send", "dont send"}
+
+        # Detect invoice feedback (e.g. "Invoice is missing client billing info")
+        # instead of treating it as a decline
+        _FEEDBACK_WORDS = ["missing", "wrong", "incorrect", "update", "change",
+                           "fix", "edit", "add", "not correct", "doesn't have",
+                           "not showing", "no client", "no billing", "no address"]
+        is_feedback = any(w in msg_lower for w in _FEEDBACK_WORDS)
+
+        if is_feedback:
+            # Clear confirmation state but keep the cached invoice for the feedback handler
+            self.memory.update_user_memory(user_id, {
+                "awaiting_send_confirmation": False,
+                "pending_send_invoice": None,
+            })
+            client_name = pending.get("client_name", "Client")
+            response = (
+                f"Got it — you'd like to update the invoice for {client_name} before sending. "
+                f"Here's what you can set:\n\n"
+                f"1. Your name/title/address/email on the invoice header — say: "
+                f"\"Update invoice profile\"\n"
+                f"2. Client billing details (billing name, address, GST) — say: "
+                f"\"Update client billing for {client_name}\"\n\n"
+                f"After updating, say \"Regenerate invoice for {client_name}\" "
+                f"and I'll create a fresh PDF with the new details."
+            )
+            self._store_conversation(user_id, message, response)
+            return {"operation": "invoice_feedback", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Clear the awaiting flag
         self.memory.update_user_memory(user_id, {
             "awaiting_send_confirmation": False,
             "pending_send_invoice": None,
         })
 
-        msg_lower = message.strip().lower()
-        _YES = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "send it", "do it", "confirm", "yes please"}
         if msg_lower in _YES:
             poc_email = pending.get("poc_email", "")
             client_name = pending.get("client_name", "Client")
