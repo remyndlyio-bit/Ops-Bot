@@ -1989,6 +1989,14 @@ class IntentService:
                             f"AND (\"isDeleted\" IS NOT TRUE)"
                         )
                         check_result = self.supabase.execute_sql(check_sql)
+                        # Fallback if production_house column doesn't exist
+                        if not check_result.get("ok") and "production_house" in str(check_result.get("error", "")):
+                            check_sql = (
+                                f"SELECT DISTINCT client_name FROM public.job_entries "
+                                f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_cn}%' "
+                                f"AND (\"isDeleted\" IS NOT TRUE)"
+                            )
+                            check_result = self.supabase.execute_sql(check_sql)
                         matching_clients = [r["client_name"] for r in (check_result.get("rows") or []) if r.get("client_name")]
                         if not matching_clients:
                             # No matching client — show available clients and stop
@@ -2061,6 +2069,14 @@ class IntentService:
                                 f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
                             )
                             avail = self.supabase.execute_sql(avail_sql)
+                            if not avail.get("ok") and "production_house" in str(avail.get("error", "")):
+                                avail_sql = (
+                                    f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
+                                    f"FROM public.job_entries "
+                                    f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_client}%' "
+                                    f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
+                                )
+                                avail = self.supabase.execute_sql(avail_sql)
                             periods = [r["period"].strip() for r in (avail.get("rows") or [])]
                             if periods:
                                 hint = f"\n\nI do have records for {client_name} in: {', '.join(periods)}."

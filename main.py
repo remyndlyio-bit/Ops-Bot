@@ -45,7 +45,19 @@ UPDATE_MESSAGE = (
 
 @app.on_event("startup")
 async def startup_event():
-    """Set the Telegram webhook and send update message on startup (e.g. after deploy)."""
+    """Set the Telegram webhook, run migrations, and send update message on startup."""
+    # Run lightweight migrations — add columns that may not exist in older deployments
+    try:
+        _migrations = [
+            "ALTER TABLE public.job_entries ADD COLUMN IF NOT EXISTS production_house text",
+            "ALTER TABLE public.job_entries ADD COLUMN IF NOT EXISTS client_billing_details text",
+        ]
+        for sql in _migrations:
+            supabase_service.execute_sql(sql)
+        logger.info("[STARTUP] Schema migrations applied successfully")
+    except Exception as e:
+        logger.warning(f"[STARTUP] Schema migration failed (non-fatal): {e}")
+
     base_url = os.getenv("BASE_URL")
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 

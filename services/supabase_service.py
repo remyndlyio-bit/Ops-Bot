@@ -371,7 +371,33 @@ class SupabaseService:
             conn = psycopg2.connect(self.db_url)
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql, params)
+                try:
+                    cur.execute(sql, params)
+                except Exception as col_err:
+                    if "production_house" in str(col_err):
+                        logger.warning("[INVOICE] production_house column missing, retrying without it")
+                        # Rebuild query using client_name only
+                        w2 = ['("isDeleted" IS NOT TRUE)']
+                        p2 = []
+                        if user_id:
+                            w2.append("user_id = %s")
+                            p2.append(str(user_id))
+                        if bill_no:
+                            w2.append("bill_no = %s")
+                            p2.append(str(bill_no).strip())
+                        else:
+                            w2.append("client_name ILIKE %s")
+                            p2.append(f"%{client_name.strip()}%")
+                        if month:
+                            w2.append("EXTRACT(MONTH FROM job_date) = %s")
+                            p2.append(int(month))
+                        if year:
+                            w2.append("EXTRACT(YEAR FROM job_date) = %s")
+                            p2.append(int(year))
+                        sql2 = f"SELECT * FROM public.job_entries WHERE {' AND '.join(w2)} ORDER BY job_date ASC LIMIT 500"
+                        cur.execute(sql2, p2)
+                    else:
+                        raise
                 rows = cur.fetchall()
             conn.close()
             out = []
@@ -424,7 +450,27 @@ class SupabaseService:
             conn = psycopg2.connect(self.db_url)
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(sql, params)
+                try:
+                    cur.execute(sql, params)
+                except Exception as col_err:
+                    if "production_house" in str(col_err):
+                        logger.warning("[MONTHS] production_house column missing, retrying without it")
+                        sql_fallback = (
+                            "SELECT EXTRACT(YEAR FROM job_date)::int AS yr, EXTRACT(MONTH FROM job_date)::int AS mo "
+                            "FROM public.job_entries "
+                            f"WHERE client_name ILIKE %s {user_filter}"
+                            "AND job_date IS NOT NULL "
+                            "AND (\"isDeleted\" IS NOT TRUE) "
+                            "GROUP BY yr, mo "
+                            "ORDER BY yr DESC, mo DESC "
+                            "LIMIT 36"
+                        )
+                        fb_params = [client_pattern]
+                        if user_id:
+                            fb_params.append(str(user_id))
+                        cur.execute(sql_fallback, fb_params)
+                    else:
+                        raise
                 rows = cur.fetchall()
             conn.close()
             months = []
