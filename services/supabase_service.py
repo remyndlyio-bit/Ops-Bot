@@ -344,7 +344,8 @@ class SupabaseService:
             where.append("bill_no = %s")
             params.append(str(bill_no).strip())
         else:
-            where.append("(client_name ILIKE %s OR production_house ILIKE %s)")
+            where.append("(client_name ILIKE %s OR brand_name ILIKE %s OR production_house ILIKE %s)")
+            params.append(f"%{client_name.strip()}%")
             params.append(f"%{client_name.strip()}%")
             params.append(f"%{client_name.strip()}%")
 
@@ -425,7 +426,7 @@ class SupabaseService:
             return {"ok": False, "error": "Database URL not configured."}
 
         client_pattern = f"%{client_name.strip()}%"
-        params: List[Any] = [client_pattern, client_pattern]
+        params: List[Any] = [client_pattern, client_pattern, client_pattern]
         user_filter = ""
         if user_id:
             user_filter = "AND user_id = %s "
@@ -434,7 +435,7 @@ class SupabaseService:
         sql = (
             "SELECT EXTRACT(YEAR FROM job_date)::int AS yr, EXTRACT(MONTH FROM job_date)::int AS mo "
             "FROM public.job_entries "
-            f"WHERE (client_name ILIKE %s OR production_house ILIKE %s) {user_filter}"
+            f"WHERE (client_name ILIKE %s OR brand_name ILIKE %s OR production_house ILIKE %s) {user_filter}"
             "AND job_date IS NOT NULL "
             "AND (\"isDeleted\" IS NOT TRUE) "
             "GROUP BY yr, mo "
@@ -523,8 +524,9 @@ class SupabaseService:
             with conn.cursor() as cur:
                 cur.execute(
                     'UPDATE public.job_entries SET poc_email = %s '
-                    'WHERE user_id = %s AND client_name ILIKE %s AND (poc_email IS NULL OR TRIM(poc_email) = %s)',
-                    (poc_email, str(user_id), f'%{client_name}%', '')
+                    'WHERE user_id = %s AND (client_name ILIKE %s OR brand_name ILIKE %s) '
+                    'AND (poc_email IS NULL OR TRIM(poc_email) = %s)',
+                    (poc_email, str(user_id), f'%{client_name}%', f'%{client_name}%', '')
                 )
                 updated = cur.rowcount
             conn.close()

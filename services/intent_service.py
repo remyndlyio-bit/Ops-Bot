@@ -731,8 +731,8 @@ class IntentService:
         record = {"user_id": user_id}
         field_map = {
             "job_date": "job_date",
-            "brand_name": "client_name",  # brand_name maps to client_name column
-            "client_name": "production_house",  # client/agency maps to production_house
+            "brand_name": "brand_name",
+            "client_name": "client_name",
             "job_description_details": "job_description_details",
             "fees": "fees",
             "notes": "notes",
@@ -746,7 +746,8 @@ class IntentService:
         if insert_result.get("ok"):
             brand = extracted.get("brand_name", "")
             client = extracted.get("client_name", "")
-            response = f"Job saved! ✅ {brand} has been added to your records."
+            display_name = brand or client or "Job"
+            response = f"Job saved! ✅ {display_name} has been added to your records."
 
             # Check if user had a compound intent (e.g. "add job and send invoice")
             user_mem = self.memory.get_user_memory(user_id)
@@ -1199,14 +1200,14 @@ class IntentService:
             update_sql = (
                 f"UPDATE public.job_entries SET client_billing_details = '{safe_billing}' "
                 f"WHERE user_id = '{safe_uid}' "
-                f"AND (client_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
+                f"AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
                 f"AND (\"isDeleted\" IS NOT TRUE)"
             )
             result = self.supabase.execute_sql(update_sql)
             if not result.get("ok") and "production_house" in str(result.get("error", "")):
                 update_sql = (
                     f"UPDATE public.job_entries SET client_billing_details = '{safe_billing}' "
-                    f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_client}%' "
+                    f"WHERE user_id = '{safe_uid}' AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%') "
                     f"AND (\"isDeleted\" IS NOT TRUE)"
                 )
                 result = self.supabase.execute_sql(update_sql)
@@ -2105,15 +2106,14 @@ class IntentService:
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                     # Validate client exists in DB before proceeding
-                    # Search both client_name (brand) and production_house (agency/client)
-                    # because smart capture maps user's "client" to production_house column.
+                    # Search client_name, brand_name, and production_house (legacy)
                     if client_name and not bill_number:
                         safe_uid = data_user_id.replace("'", "''")
                         safe_cn = client_name.replace("'", "''")
                         check_sql = (
                             f"SELECT DISTINCT client_name FROM public.job_entries "
                             f"WHERE user_id = '{safe_uid}' "
-                            f"AND (client_name ILIKE '%{safe_cn}%' OR production_house ILIKE '%{safe_cn}%') "
+                            f"AND (client_name ILIKE '%{safe_cn}%' OR brand_name ILIKE '%{safe_cn}%' OR production_house ILIKE '%{safe_cn}%') "
                             f"AND (\"isDeleted\" IS NOT TRUE)"
                         )
                         check_result = self.supabase.execute_sql(check_sql)
@@ -2121,7 +2121,7 @@ class IntentService:
                         if not check_result.get("ok") and "production_house" in str(check_result.get("error", "")):
                             check_sql = (
                                 f"SELECT DISTINCT client_name FROM public.job_entries "
-                                f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_cn}%' "
+                                f"WHERE user_id = '{safe_uid}' AND (client_name ILIKE '%{safe_cn}%' OR brand_name ILIKE '%{safe_cn}%') "
                                 f"AND (\"isDeleted\" IS NOT TRUE)"
                             )
                             check_result = self.supabase.execute_sql(check_sql)
@@ -2193,7 +2193,7 @@ class IntentService:
                                 f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
                                 f"FROM public.job_entries "
                                 f"WHERE user_id = '{safe_uid}' "
-                                f"AND (client_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
+                                f"AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
                                 f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
                             )
                             avail = self.supabase.execute_sql(avail_sql)
@@ -2201,7 +2201,7 @@ class IntentService:
                                 avail_sql = (
                                     f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
                                     f"FROM public.job_entries "
-                                    f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_client}%' "
+                                    f"WHERE user_id = '{safe_uid}' AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%') "
                                     f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
                                 )
                                 avail = self.supabase.execute_sql(avail_sql)
