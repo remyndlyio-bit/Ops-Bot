@@ -2660,31 +2660,107 @@ class IntentService:
         _not_deleted = "(\"isDeleted\" IS NOT TRUE)"
         base = f"SELECT * FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}"
 
+        # Helper: resolve time range from message
+        time_filter = self._resolve_time_filter(msg)
+
         # "last job" / "latest job" / "most recent job" / "recent job"
         if re.search(r'\b(last|latest|most\s+recent|recent)\b.*\b(job|entry|work|project|gig)\b', msg):
             return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 1"
 
         # "how many jobs" / "count" / "total jobs"
         if re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of)\b.*\b(job|entr|record|work)\b', msg):
-            return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
+            return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}{time_filter}"
 
         # "total fees" / "total earnings" / "sum of fees"
         if re.search(r'\b(total|sum|overall)\b.*\b(fees|earning|income|revenue|billing)\b', msg):
-            return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
+            return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}{time_filter}"
+
+        # "which/what clients have paid" / "paid clients"
+        if re.search(r'\b(which|what|list|show)\b.*\b(client|brand).*\b(paid|cleared|settled)\b', msg) or re.search(r'\b(paid|cleared|settled)\b.*\b(client|brand)\b', msg):
+            return (
+                f"SELECT DISTINCT client_name, brand_name, fees, payment_date FROM public.job_entries "
+                f"WHERE user_id = '{uid}' AND {_not_deleted} "
+                f"AND LOWER(COALESCE(paid,'')) IN ('true','t','yes','1','paid'){time_filter} "
+                f"ORDER BY payment_date DESC NULLS LAST LIMIT 25"
+            )
+
+        # "which/what clients haven't paid" / "unpaid clients"
+        if re.search(r'\b(which|what|list|show)\b.*\b(client|brand).*\b(not paid|unpaid|haven.*paid|pending)\b', msg) or re.search(r'\b(unpaid|pending|not\s+paid|outstanding)\b.*\b(client|brand)\b', msg):
+            return (
+                f"SELECT DISTINCT client_name, brand_name, fees, invoice_date FROM public.job_entries "
+                f"WHERE user_id = '{uid}' AND {_not_deleted} "
+                f"AND (paid IS NULL OR LOWER(paid) NOT IN ('true','t','yes','1','paid')){time_filter} "
+                f"AND invoice_date IS NOT NULL "
+                f"ORDER BY invoice_date ASC NULLS LAST LIMIT 25"
+            )
 
         # "show all jobs" / "list jobs" / "my jobs"
         if re.search(r'\b(show|list|all|my)\b.*\b(job|entr|record|work)\b', msg):
-            return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 25"
+            return f"{base}{time_filter} ORDER BY job_date DESC NULLS LAST LIMIT 25"
 
         # "unpaid" / "pending payments"
         if re.search(r'\b(unpaid|pending|not\s+paid|outstanding)\b', msg):
-            return f"{base} AND (paid IS NULL OR paid = '' OR paid = 'false' OR LOWER(paid) != 'true') ORDER BY job_date DESC NULLS LAST LIMIT 25"
+            return f"{base} AND (paid IS NULL OR paid = '' OR paid = 'false' OR LOWER(paid) != 'true'){time_filter} ORDER BY job_date DESC NULLS LAST LIMIT 25"
 
         # Generic fallback for any question with "job" — show recent jobs
         if re.search(r'\bjob\b', msg):
-            return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 5"
+            return f"{base}{time_filter} ORDER BY job_date DESC NULLS LAST LIMIT 5"
 
         return None
+
+    @staticmethod
+    def _resolve_time_filter(msg: str) -> str:
+        """Extract a SQL date filter from common time expressions in the message."""
+        from datetime import date, timedelta
+        today = date.today()
+
+        # "last quarter"
+        if "last quarter" in msg:
+            current_q = (today.month - 1) // 3  # 0-based quarter (0=Q1, 1=Q2, ...)
+            if current_q == 0:
+                start = date(today.year - 1, 10, 1)
+                end = date(today.year - 1, 12, 31)
+            else:
+                start_month = (current_q - 1) * 3 + 1
+                end_month = current_q * 3
+                start = date(today.year, start_month, 1)
+                # Last day of end_month
+                if end_month == 12:
+                    end = date(today.year, 12, 31)
+                else:
+                    end = date(today.year, end_month + 1, 1) - timedelta(days=1)
+            return f" AND job_date >= '{start.isoformat()}' AND job_date <= '{end.isoformat()}'"
+
+        # "this quarter"
+        if "this quarter" in msg:
+            start_month = ((today.month - 1) // 3) * 3 + 1
+            start = date(today.year, start_month, 1)
+            return f" AND job_date >= '{start.isoformat()}' AND job_date <= '{today.isoformat()}'"
+
+        # "last month"
+        if "last month" in msg:
+            first_of_this = today.replace(day=1)
+            last_of_prev = first_of_this - timedelta(days=1)
+            first_of_prev = last_of_prev.replace(day=1)
+            return f" AND job_date >= '{first_of_prev.isoformat()}' AND job_date <= '{last_of_prev.isoformat()}'"
+
+        # "this month"
+        if "this month" in msg:
+            first = today.replace(day=1)
+            return f" AND job_date >= '{first.isoformat()}' AND job_date <= '{today.isoformat()}'"
+
+        # "this year"
+        if "this year" in msg:
+            start = date(today.year, 1, 1)
+            return f" AND job_date >= '{start.isoformat()}' AND job_date <= '{today.isoformat()}'"
+
+        # "last year"
+        if "last year" in msg:
+            start = date(today.year - 1, 1, 1)
+            end = date(today.year - 1, 12, 31)
+            return f" AND job_date >= '{start.isoformat()}' AND job_date <= '{end.isoformat()}'"
+
+        return ""
 
     def _handle_disambiguation_reply(self, user_id: str, message: str, pending: Dict) -> Dict:
         """User is replying with a number to pick one row from a disambiguation list."""
