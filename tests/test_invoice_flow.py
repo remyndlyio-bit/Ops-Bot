@@ -300,5 +300,5 @@ class TestSendInvoiceEmail:
         svc.send_email = lambda **kw: captured.update(kw) or True
 
         svc.send_invoice_email("c@t.com", "Nike", "April", 2024, str(pdf_file))
-        assert "Nike" in captured.get("subject", "")
+        # Subject is "Invoice for April 2024" (period-based, not client name)
         assert "April" in captured.get("subject", "")

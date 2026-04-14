@@ -169,6 +169,14 @@ def send_invoice_email(
         ))
         return
 
+    # Extract poc_name from rows for email greeting
+    poc_name = None
+    for row in rows or []:
+        val = (row.get("poc_name") or "").strip()
+        if val and val.lower() != "none":
+            poc_name = val
+            break
+
     # 2. Send email with PDF attached
     try:
         ok = email_service.send_invoice_email(
@@ -177,6 +185,7 @@ def send_invoice_email(
             month=month,
             year=year,
             pdf_path=file_path,
+            poc_name=poc_name,
         )
     except Exception as e:
         ok = False
@@ -319,6 +328,15 @@ async def process_and_send_invoice(
 
                 # Auto-prompt to email invoice to client if poc_email is available,
                 # so user doesn't need to ask a second time.
+                # Extract poc_name and invoicer_name for email personalization
+                _cached_poc_name = ""
+                for row in data:
+                    val = (row.get("poc_name") or "").strip()
+                    if val and val.lower() != "none":
+                        _cached_poc_name = val
+                        break
+                _cached_invoicer_name = (user_profile or {}).get("name", "")
+
                 if poc_email:
                     intent_service.memory.update_user_memory(user_id, {
                         "awaiting_send_confirmation": True,
@@ -328,6 +346,8 @@ async def process_and_send_invoice(
                             "year": year,
                             "poc_email": poc_email,
                             "row_ids": cached_row_ids,
+                            "poc_name": _cached_poc_name,
+                            "invoicer_name": _cached_invoicer_name,
                         },
                     })
                     prompt_msg = (

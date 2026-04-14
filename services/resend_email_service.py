@@ -154,20 +154,29 @@ class ResendEmailService:
         month: str,
         year: Optional[int],
         pdf_path: str,
+        poc_name: str = None,
+        invoicer_name: str = None,
     ) -> bool:
         """
         Send an invoice email with the PDF attached.
+        poc_name: name of the client's point of contact (used in greeting).
+        invoicer_name: the sender's actual name (used in sign-off).
         """
         if not os.path.exists(pdf_path):
             logger.error(f"[RESEND] Invoice PDF not found at path: {pdf_path}")
             return False
 
-        subject = f"Invoice – {client_name} – {month} {year}" if year else f"Invoice – {client_name} – {month}"
+        period = f"{month} {year}" if year else month
+        greeting_name = poc_name or client_name
+        sign_off_name = invoicer_name or self.from_name
+        subject = f"Invoice for {period}"
         body = (
-            f"Hi {client_name},\n\n"
-            f"Please find your invoice for {month} {year or ''} attached.\n\n"
-            f"If you have any questions about the details or payment, just reply to this email.\n\n"
-            f"Thanks,\n{self.from_name}\n"
+            f"Dear {greeting_name},\n\n"
+            f"Please find attached the invoice for services rendered during {period}.\n\n"
+            f"Kindly review and process the payment at your earliest convenience. "
+            f"If you have any questions regarding the invoice, please feel free to reply to this email.\n\n"
+            f"Thank you for your business.\n\n"
+            f"Best regards,\n{sign_off_name}\n"
         )
 
         try:

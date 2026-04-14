@@ -1039,12 +1039,17 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "send_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # Extract poc_name from pending data rows
+            _poc_name = pending.get("poc_name") or ""
+            _invoicer_name = pending.get("invoicer_name") or ""
             ok = self.email.send_invoice_email(
                 to_email=poc_email,
                 client_name=client_name,
                 month=month_display,
                 year=year_val,
                 pdf_path=pdf_path,
+                poc_name=_poc_name or None,
+                invoicer_name=_invoicer_name or None,
             )
             if ok:
                 # Update invoice_date for affected rows
@@ -1112,12 +1117,16 @@ class IntentService:
             email_sent = False
             if os.path.exists(pdf_path):
                 try:
+                    _poc_name = pending.get("poc_name") or ""
+                    _invoicer_name = pending.get("invoicer_name") or ""
                     ok = self.email.send_invoice_email(
                         to_email=email,
                         client_name=client_name,
                         month=month,
                         year=year or 2026,
                         pdf_path=pdf_path,
+                        poc_name=_poc_name or None,
+                        invoicer_name=_invoicer_name or None,
                     )
                     email_sent = ok
                 except Exception as e:
@@ -1148,6 +1157,79 @@ class IntentService:
         self.memory.update_user_memory(user_id, {"pending_send_invoice": None})
         self._store_conversation(user_id, message, response)
         return {"operation": "poc_email_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_client_billing_response(self, user_id: str, message: str) -> Dict:
+        """Handle user providing client billing details before invoice generation."""
+        user_mem = self.memory.get_user_memory(user_id)
+        pending_invoice = user_mem.get("pending_invoice", {})
+        client_name = user_mem.get("pending_billing_client", "")
+        data_user_id = user_mem.get("pending_billing_user_id", user_id)
+
+        # Clear awaiting state
+        self.memory.update_user_memory(user_id, {
+            "awaiting_client_billing": False,
+            "pending_billing_client": None,
+            "pending_billing_user_id": None,
+        })
+
+        # Allow skip
+        if message.strip().lower() in ("skip", "cancel", "no", "none"):
+            self.memory.update_user_memory(user_id, {"skip_billing_prompt": True})
+            if pending_invoice:
+                response = f"No problem, generating the invoice for {client_name} without billing details."
+                self._store_conversation(user_id, message, response)
+                return {
+                    "operation": "billing_skipped",
+                    "response": response,
+                    "trigger_invoice": True,
+                    "invoice_data": pending_invoice,
+                }
+            response = "Got it, skipped. You can update billing details later."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "billing_skipped", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Parse billing details from the message (freeform — store as-is)
+        billing_text = message.strip()
+
+        # Save to all matching job_entries for this client
+        if client_name:
+            safe_client = client_name.replace("'", "''")
+            safe_uid = data_user_id.replace("'", "''")
+            safe_billing = billing_text.replace("'", "''")
+            update_sql = (
+                f"UPDATE public.job_entries SET client_billing_details = '{safe_billing}' "
+                f"WHERE user_id = '{safe_uid}' "
+                f"AND (client_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
+                f"AND (\"isDeleted\" IS NOT TRUE)"
+            )
+            result = self.supabase.execute_sql(update_sql)
+            if not result.get("ok") and "production_house" in str(result.get("error", "")):
+                update_sql = (
+                    f"UPDATE public.job_entries SET client_billing_details = '{safe_billing}' "
+                    f"WHERE user_id = '{safe_uid}' AND client_name ILIKE '%{safe_client}%' "
+                    f"AND (\"isDeleted\" IS NOT TRUE)"
+                )
+                result = self.supabase.execute_sql(update_sql)
+
+            if result.get("ok"):
+                logger.info(f"[BILLING] Saved client billing details for {client_name}")
+            else:
+                logger.warning(f"[BILLING] Failed to save billing details: {result.get('error')}")
+
+        # Now trigger invoice generation if pending
+        if pending_invoice:
+            response = f"Billing details saved for {client_name}. Generating the invoice now."
+            self._store_conversation(user_id, message, response)
+            return {
+                "operation": "billing_saved",
+                "response": response,
+                "trigger_invoice": True,
+                "invoice_data": pending_invoice,
+            }
+
+        response = f"Billing details saved for {client_name}."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "billing_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _prompt_bank_details_format(self, user_id: str, message: str) -> Dict:
         """Ask the user to send all bank details in a single structured message."""
@@ -1639,6 +1721,10 @@ class IntentService:
             if user_mem.get("awaiting_send_confirmation"):
                 return self._handle_send_confirmation(user_id, message)
 
+            # 0b1.7. Check if user is providing client billing details
+            if user_mem.get("awaiting_client_billing"):
+                return self._handle_client_billing_response(user_id, message)
+
             # 0b2. Check if user is responding with bank details (awaiting state)
             if user_mem.get("awaiting_bank_details"):
                 return self._handle_bank_details_response(user_id, message)
@@ -1980,11 +2066,11 @@ class IntentService:
                                             client_name = p
                                             break
 
-                    # Resolve "this job" / missing client from last saved job context
+                    # Resolve "this job" / missing client from context
                     if not client_name and not bill_number:
+                        # 1. Check last_saved_job (from smart capture)
                         last_job = user_mem.get("last_saved_job")
                         if last_job:
-                            # Use the DB column value (brand stored as client_name)
                             client_name = last_job.get("db_client_name") or last_job.get("brand_name", "")
                             if not month_name and last_job.get("job_date"):
                                 try:
@@ -1995,6 +2081,18 @@ class IntentService:
                                 except (ValueError, IndexError):
                                     pass
                             logger.info(f"[INVOICE] Resolved from last_saved_job: client={client_name}, month={month_name}")
+
+                    if not client_name and not bill_number:
+                        # 2. Check uscf_context (from recent query/update results)
+                        ctx = user_mem.get("uscf_context", {})
+                        last_row = ctx.get("last_row_data", {})
+                        if last_row.get("client_name"):
+                            client_name = last_row["client_name"]
+                            logger.info(f"[INVOICE] Resolved from uscf_context: client={client_name}")
+                        # 3. Check last_intent (from recent interactions)
+                        elif user_mem.get("last_intent", {}).get("client_name"):
+                            client_name = user_mem["last_intent"]["client_name"]
+                            logger.info(f"[INVOICE] Resolved from last_intent: client={client_name}")
 
                     if not client_name and not bill_number:
                         # Save intent so follow-up can provide client name
@@ -2131,6 +2229,28 @@ class IntentService:
                         month_display = "Request"
                     invoice_data = {"client_name": display_client, "month": month_display, "bill_number": bill_number, "year": year_val}
 
+                    # Extract poc_name and invoicer_name for email personalization
+                    _inv_poc_name = ""
+                    for _r in rows:
+                        _v = (_r.get("poc_name") or "").strip()
+                        if _v and _v.lower() != "none":
+                            _inv_poc_name = _v
+                            break
+                    _inv_invoicer_name = ""
+                    try:
+                        _prof = self.supabase.get_user_profile(data_user_id)
+                        if _prof.get("ok") and _prof.get("data"):
+                            _prefs = _prof["data"].get("preferences") or {}
+                            if isinstance(_prefs, str):
+                                import json as _json
+                                try:
+                                    _prefs = _json.loads(_prefs)
+                                except Exception:
+                                    _prefs = {}
+                            _inv_invoicer_name = _prefs.get("invoice_name") or _prof["data"].get("name") or ""
+                    except Exception:
+                        pass
+
                     # Decide between generating/sending invoice via WhatsApp/Telegram vs email
                     if intent_result.get("operation") == "SEND_EMAIL":
                         poc_email = (rows[0].get("poc_email") or "").strip()
@@ -2149,6 +2269,8 @@ class IntentService:
                                     "month": month_display,
                                     "year": year_val,
                                     "row_ids": row_ids,
+                                    "poc_name": _inv_poc_name,
+                                    "invoicer_name": _inv_invoicer_name,
                                 },
                             })
                             self._store_conversation(user_id, message, response)
@@ -2165,6 +2287,8 @@ class IntentService:
                                 "year": year_val,
                                 "poc_email": poc_email,
                                 "row_ids": [r["id"] for r in rows if r.get("id")],
+                                "poc_name": _inv_poc_name,
+                                "invoicer_name": _inv_invoicer_name,
                             },
                         })
                         # Generate PDF and send to user first via WhatsApp/Telegram
@@ -2176,6 +2300,34 @@ class IntentService:
                         )
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
+
+                    # Check if client billing details exist — prompt if missing
+                    _has_billing = any(
+                        (str(r.get("client_billing_details") or "")).strip()
+                        for r in rows
+                    )
+                    if not _has_billing:
+                        # Check if we've already asked and user skipped (avoid loop)
+                        _skip_billing = self.memory.get_user_memory(user_id).get("skip_billing_prompt")
+                        if not _skip_billing:
+                            self.memory.update_user_memory(user_id, {
+                                "awaiting_client_billing": True,
+                                "pending_invoice": invoice_data,
+                                "pending_billing_client": display_client,
+                                "pending_billing_user_id": data_user_id,
+                            })
+                            response = (
+                                f"I have the records for {display_client}, but client billing details are missing.\n\n"
+                                f"Please provide the billing info (or type 'skip' to generate without it):\n\n"
+                                f"Billing Name: Company Pvt Ltd\n"
+                                f"Address: 123 Street, City\n"
+                                f"GST: 22AAAAA0000A1Z5 (optional)\n"
+                            )
+                            self._store_conversation(user_id, message, response)
+                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                        else:
+                            # Clear skip flag for next time
+                            self.memory.update_user_memory(user_id, {"skip_billing_prompt": False})
 
                     # Check if bank details exist before generating invoice
                     bank_result = self.supabase.get_user_bank_details(data_user_id)
