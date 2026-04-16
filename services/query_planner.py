@@ -145,6 +145,48 @@ def _strip_markdown_json(raw: str) -> str:
 # Stage 2 — Schema-Aware Operation Planner
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _precompute_time_ranges() -> str:
+    """Compute common time ranges so the AI doesn't have to do date math."""
+    from datetime import timedelta
+    today = date.today()
+
+    # This month
+    this_month_start = today.replace(day=1)
+
+    # Last month
+    last_month_end = this_month_start - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+
+    # This quarter
+    current_q_start_month = ((today.month - 1) // 3) * 3 + 1
+    this_q_start = date(today.year, current_q_start_month, 1)
+
+    # Last quarter
+    if current_q_start_month == 1:
+        last_q_start = date(today.year - 1, 10, 1)
+        last_q_end = date(today.year - 1, 12, 31)
+    else:
+        lq_start_month = current_q_start_month - 3
+        last_q_start = date(today.year, lq_start_month, 1)
+        last_q_end = this_q_start - timedelta(days=1)
+
+    # This year
+    this_year_start = date(today.year, 1, 1)
+
+    # Last year
+    last_year_start = date(today.year - 1, 1, 1)
+    last_year_end = date(today.year - 1, 12, 31)
+
+    return (
+        f"- 'this month' → start: {this_month_start.isoformat()}, end: {today.isoformat()}\n"
+        f"- 'last month' → start: {last_month_start.isoformat()}, end: {last_month_end.isoformat()}\n"
+        f"- 'this quarter' → start: {this_q_start.isoformat()}, end: {today.isoformat()}\n"
+        f"- 'last quarter' → start: {last_q_start.isoformat()}, end: {last_q_end.isoformat()}\n"
+        f"- 'this year' → start: {this_year_start.isoformat()}, end: {today.isoformat()}\n"
+        f"- 'last year' → start: {last_year_start.isoformat()}, end: {last_year_end.isoformat()}\n"
+    )
+
+
 def _build_planner_prompt(
     message: str,
     operation: str,
@@ -155,6 +197,7 @@ def _build_planner_prompt(
 ) -> str:
     today = date.today().isoformat()
     columns_list = ", ".join(sorted(allowed_columns)[:50])
+    precomputed_ranges = _precompute_time_ranges()
 
     context_section = ""
     if conversation_history:
@@ -211,9 +254,9 @@ def _build_planner_prompt(
         "- 'contact', 'email' → the contact/email column.\n"
         "- 'paid', 'payment' status → the payment status column.\n"
         "- NEVER invent column names not in the schema.\n\n"
-        "TIME RANGES:\n"
+        "TIME RANGES (use these EXACT dates — do NOT compute your own):\n"
         f"- Date column: '{dc}'\n"
-        "- 'last month', 'this year', 'last quarter' → type 'absolute', compute start/end.\n"
+        f"{precomputed_ranges}"
         "- 'all time', 'overall', no period → time_range: null.\n"
         "- 'latest', 'most recent', 'last job' → no time_range; use limit:1, order:'desc'.\n\n"
         "CONTEXT RESOLUTION:\n"
@@ -238,6 +281,9 @@ def _build_planner_prompt(
         '  "confidence": "high"|"low",\n'
         '  "clarification_question": "string"|null\n'
         "}\n\n"
+        "LANGUAGE: Users may write in English, Hindi (Devanagari), Roman Hindi, or Hinglish. "
+        "Understand all. Examples: 'pichle mahine ki kamai' = last month earnings (metric:sum, column:fees, time_range:last month), "
+        "'kitne client hain' = how many clients (metric:count, group_by:client_name). Always output JSON in English.\n\n"
         "RULES:\n"
         "- Only use columns from the schema. Only use metrics from the list.\n"
         "- 'Top N' → limit:N, order:'desc'. 'Bottom N' → limit:N, order:'asc'.\n"

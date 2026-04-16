@@ -173,8 +173,9 @@ class GeminiService:
             "  • 20 Feb 2026 — Content Factory — Short animation — ₹2,000\n"
             "  • 10 Feb 2026 — Microsoft — 4 cutdowns and audio — ₹25,000\n\n"
             "  Would you like invoice details for any of these?\n\n"
+            "LANGUAGE: The user may write in English, Hindi, Roman Hindi, or Hinglish. Always respond in English regardless of input language.\n\n"
             "TONE RULES:\n"
-            "- Default: composed and minimal, but you can use light transitions like 'Here’s the snapshot', 'Quick read:', or 'In short,'.\n"
+            "- Default: composed and minimal, but you can use light transitions like ‘Here’s the snapshot’, ‘Quick read:’, or ‘In short,’.\n"
             "- When context justifies it, add subtle momentum (never hype or over-celebrate):\n"
             "  * High-value project or record/highest metric: 'solid project', 'strong number', 'tops the list'.\n"
             "  * Payment completed: 'Payment has been received and recorded. Good progress.'\n"
@@ -365,6 +366,10 @@ class GeminiService:
             "   -> {\"operation\": \"READ_ENTITY\", \"entity\": \"job\", \"confidence\": 0.9, \"clarification_question\": null, \"resolved_columns\": {\"order_by\": null, \"filter_by\": null, \"display\": \"client,notes\"}, \"timeline_hint\": \"last\", \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": null, \"year\": null, \"period\": null, \"days\": null, \"specific_date\": \"2026-01-18\", \"scope\": null}}\n"
             "11. Context: Assistant said 'Here are the client names in my records: 7up, Duracell...'; user asks 'What are the dates on these jobs?' or 'What is the billing amount?' then 'All' / 'All jobs'\n"
             "   -> {\"operation\": \"READ_ENTITY\" or \"AGGREGATE_ENTITY\", \"entity\": \"job\" or \"invoice\", \"confidence\": 0.9, \"clarification_question\": null, \"resolved_columns\": {}, \"timeline_hint\": null, \"parameters\": {\"client_name\": null, \"bill_number\": null, \"month\": null, \"year\": null, \"period\": null, \"days\": null, \"specific_date\": null, \"scope\": \"all\"}}\n\n"
+            "LANGUAGE: Users may write in English, Hindi (Devanagari), Roman Hindi (Hindi in English script), or Hinglish (mixed Hindi-English). "
+            "Understand ALL of these. Examples: 'mera last job kya tha' = 'what was my last job', 'kitna paisa aaya' = 'how much payment received', "
+            "'invoice bhejo Nike ka' = 'send invoice for Nike', 'पिछले महीने की कमाई' = 'last month earnings'. "
+            "Always respond in English but understand input in any of these languages.\n\n"
             "RULES: 1) Handle typos. 2) NEVER omit keys. 3) Use null for unknown values. 4) Resolve 'it'/'these'/'all' from conversation when clear. 5) confidence < 0.7 with ambiguity -> NEED_CLARIFICATION. 6) Return ONLY valid JSON."
         )
         try:
@@ -607,9 +612,10 @@ Return ONLY valid JSON with these keys:
 
 Rules:
 - If the brand and client are the same entity, put it in brand_name and set client_name to null.
-- "k" means thousands (25k = 25000), "L" or "lac" or "lakh" means 100000 (1.5L = 150000).
+- "k" means thousands (25k = 25000), "L" or "lac" or "lakh" means 100000 (1.5L = 150000). "hazaar" = thousands, "lakh" = 100000.
 - If a field is not mentioned, set it to null.
 - Do NOT hallucinate or invent data. Only extract what's explicitly stated.
+- The user may write in English, Hindi (Devanagari), Roman Hindi, or Hinglish. Understand all. Examples: "Nike ka kaam kiya 10 April ko, 25 hazaar" → brand_name: "Nike", job_date: "2026-04-10", fees: 25000.
 
 User message:
 {message}
