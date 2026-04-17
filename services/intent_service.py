@@ -2994,18 +2994,17 @@ class IntentService:
         """Get platform-specific welcome message."""
         if platform == "telegram":
             return (
-                "👋 Welcome! I'm your personal invoice assistant.\n\n"
-                "I help you:\n"
-                "• Track jobs and payments\n"
-                "• Generate professional invoices\n"
-                "• Send payment reminders\n\n"
-                "Let's get started! What's your name?"
+                "👋 Hi, I'm Remyndly!\n\n"
+                "I help freelancers and creators stay on top of their business — "
+                "log jobs, generate invoices, track payments, and chase clients who owe you money. All from chat.\n\n"
+                "Let's set you up. What's your name?"
             )
         else:  # WhatsApp
             return (
-                "Welcome to Remyndly! 🤖\n\n"
-                "I help manage your invoices and payments.\n"
-                "What's your business name to get started?"
+                "👋 Hi, I'm Remyndly!\n\n"
+                "I help freelancers and creators stay on top of their business — "
+                "log jobs, generate invoices, track payments, and chase clients who owe you money. All from chat.\n\n"
+                "Let's set you up. What's your name?"
             )
 
     def _handle_excel_import(self, user_id: str, message: str) -> Dict:
