@@ -2123,10 +2123,21 @@ class IntentService:
             has_verb = has_verb or any(t in msg_lower for t in _VERB_TYPOS)
             # Catch common invoice/bill typos: invoce, invoic, invoise, incoice, bll, bil
             _INVOICE_TYPOS = ["invoce", "invoic", "invoise", "incoice", "invioce", "invocice"]
+            # "bill" must match as a whole word — "billing"/"billed"/"billable" are
+            # financial/revenue terms and must NOT route to the invoice pipeline.
+            _bill_as_word = bool(re.search(r'\bbill\b', msg_lower))
             has_invoice_word = (
-                "invoice" in msg_lower or "bill" in msg_lower or "pdf" in msg_lower
+                "invoice" in msg_lower or _bill_as_word or "pdf" in msg_lower
                 or any(t in msg_lower for t in _INVOICE_TYPOS)
             )
+            # Also guard against aggregate/query phrasing that mentions billing as a metric
+            # e.g. "total billing", "billing amount", "billing for client" → query, not invoice
+            _BILLING_QUERY_SIGNALS = [
+                "total billing", "billing amount", "total bill", "how much billing",
+                "billing history", "billing summary", "earnings", "total earn",
+            ]
+            if any(sig in msg_lower for sig in _BILLING_QUERY_SIGNALS):
+                has_invoice_word = False
             # If the message mentions "invoice"/"bill" (or typo), always route to the
             # invoice flow — the LLM intent parser handles variations.
             is_retrieval = has_invoice_word
