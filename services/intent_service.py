@@ -2629,6 +2629,16 @@ class IntentService:
             sql = re.sub(r"SET\s+paid\s*=\s*'(?:true|1|yes)'",  "SET paid = 'Yes'",  sql, flags=re.IGNORECASE)
             sql = re.sub(r"SET\s+paid\s*=\s*'(?:false|0|no)'",  "SET paid = 'No'",   sql, flags=re.IGNORECASE)
 
+            # Expand AI-generated `client_name ILIKE 'X'` → `(client_name ILIKE '%X%' OR brand_name ILIKE '%X%')`
+            # Users say "Nike" meaning the brand; the actual client_name may be a production company.
+            # Also adds wildcard wrapping so partial names still match.
+            def _expand_client_ilike(m):
+                val = m.group(1)
+                # Strip any existing % wildcards the AI may have added
+                val = val.strip('%')
+                return f"(client_name ILIKE '%{val}%' OR brand_name ILIKE '%{val}%' OR production_house ILIKE '%{val}%')"
+            sql = re.sub(r"\bclient_name\s+ILIKE\s+'([^']*)'", _expand_client_ilike, sql, flags=re.IGNORECASE)
+
             valid, sanitized_sql, err = validate_sql(sql)
             if not valid:
                 logger.warning(f"[QUERY_FAIL] SQL validation failed for user {user_id}: {err} | SQL: {sql[:200]}")
