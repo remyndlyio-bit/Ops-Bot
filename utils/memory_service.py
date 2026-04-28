@@ -2,7 +2,21 @@ import json
 import os
 import threading
 from typing import Dict, Optional, List
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
+import uuid
+
+
+class _SafeEncoder(json.JSONEncoder):
+    """JSON encoder that handles types psycopg2 returns but stdlib json can't encode."""
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, uuid.UUID):
+            return str(obj)
+        return super().default(obj)
 
 class MemoryService:
     def __init__(self, file_path: str = "user_memory.json"):
@@ -31,7 +45,7 @@ class MemoryService:
     def _save_memory(self):
         with self._lock:
             with open(self.file_path, 'w') as f:
-                json.dump(self.memory, f, indent=2)
+                json.dump(self.memory, f, indent=2, cls=_SafeEncoder)
 
     def get_user_memory(self, user_id: str) -> Dict:
         lock = self._get_user_lock(user_id)
