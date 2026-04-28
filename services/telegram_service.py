@@ -29,7 +29,7 @@ class TelegramService:
         }
         async with httpx.AsyncClient() as client:
             try:
-                logger.info(f"[TELEGRAM] Sending text -> ChatID={chat_id}, Text={safe_text}")
+                logger.debug(f"[TELEGRAM] send_message ChatID={chat_id}")
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 return response.json()

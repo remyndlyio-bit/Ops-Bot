@@ -202,13 +202,22 @@ class IntentService:
             verb = "Send" if "send" in operation.lower() else "Generate"
             reconstructed = f"{verb} invoice for {client_name} for {message.strip()}"
 
-        # Case 2: Bot asked for a client name and user replied with one
+        # Case 2: Bot asked for a client name and user replied with one.
+        # Guard: skip reconstruction if the reply looks like a new query rather than a name.
         elif pending == "client_name" and word_count <= 4:
-            if "invoice" in entity or "invoice" in operation.lower():
-                month_part = f" for {month_val}" if month_val else ""
-                reconstructed = f"Generate invoice for {message.strip()}{month_part}"
-            else:
-                reconstructed = f"Show jobs for {message.strip()}"
+            _QUERY_SIGNALS = {
+                "total", "earning", "earnings", "income", "revenue", "fees",
+                "last month", "this month", "last year", "this year", "last week",
+                "all", "how many", "how much", "show", "list", "what", "when",
+                "unpaid", "paid", "pending", "outstanding",
+            }
+            _is_new_query = any(sig in msg_lower for sig in _QUERY_SIGNALS)
+            if not _is_new_query:
+                if "invoice" in entity or "invoice" in operation.lower():
+                    month_part = f" for {month_val}" if month_val else ""
+                    reconstructed = f"Generate invoice for {message.strip()}{month_part}"
+                else:
+                    reconstructed = f"Show jobs for {message.strip()}"
 
         # Case 3: User says something like "for March" or "for Garnier"
         elif msg_lower.startswith("for ") and word_count <= 4:

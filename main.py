@@ -389,6 +389,9 @@ async def _handle_bot_message(
     tag = platform.upper()
     result = {"operation": "error", "response": None, "trigger_invoice": False, "invoice_data": {}}
 
+    _uid_short = str(user_id)[-6:]  # Last 6 chars for compact log prefix
+    logger.info(f"┌─ [{tag}] IN  uid=…{_uid_short} │ {message[:120]}")
+
     # 1. Typing indicator (Telegram only — WhatsApp/Twilio has no native equivalent)
     stop_typing = None
     typing_task = None
@@ -403,9 +406,9 @@ async def _handle_bot_message(
         result = await loop.run_in_executor(
             None, lambda: intent_service.process_request(user_id=user_id, message=message)
         )
-        logger.info(f"[{tag}] Result operation={result.get('operation')} for {user_id}")
+        logger.info(f"│  [{tag}] op={result.get('operation')} uid=…{_uid_short}")
     except Exception as proc_err:
-        logger.error(f"[{tag}] process_request failed for {user_id}: {proc_err}")
+        logger.error(f"│  [{tag}] ERROR uid=…{_uid_short}: {proc_err}")
         result["response"] = "Something went wrong processing your message. Please try again."
     finally:
         # 3. Stop typing indicator
@@ -420,7 +423,7 @@ async def _handle_bot_message(
 
     # 4. Send response — platform-specific transport only
     if result.get("response"):
-        logger.info(f"[{tag}] Sending text -> To={user_id}, Body={result['response'][:120]}")
+        logger.info(f"└─ [{tag}] OUT uid=…{_uid_short} │ {result['response'][:120]}")
         if platform == "telegram" and chat_id:
             await telegram_service.send_text_message(chat_id, result["response"])
         elif platform == "whatsapp":
@@ -452,7 +455,7 @@ async def whatsapp_webhook(
 ):
     """Twilio WhatsApp Webhook — delegates to unified handler."""
     try:
-        logger.info(f"Received WhatsApp message from {From}: {Body}")
+        logger.info(f"[WHATSAPP] Received from {From}: {Body[:120]}")
         await _handle_bot_message(
             user_id=From, message=Body, platform="whatsapp",
             background_tasks=background_tasks,
@@ -679,7 +682,7 @@ async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
 
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
-        logger.info(f"Received Telegram message from {chat_id}: {text}")
+        logger.info(f"[TELEGRAM] Received from {chat_id}: {text[:120]}")
 
         await _handle_bot_message(
             user_id=str(chat_id), message=text, platform="telegram",
