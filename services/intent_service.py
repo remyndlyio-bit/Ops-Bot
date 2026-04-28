@@ -694,12 +694,43 @@ class IntentService:
 
     def _handle_form_step(self, user_id: str, message: str) -> Dict:
         """Handle smart capture confirmation, missing fields, or edit flow."""
+        from datetime import datetime, timedelta
         form = self.memory.get_form_state(user_id)
         if not form:
             return None
 
-        # Cancel if user says cancel/stop
-        if message.strip().lower() in ("cancel", "stop", "nevermind", "abort", "exit"):
+        # ── Staleness check: auto-cancel forms older than 30 minutes ──────────
+        created_at_str = form.get("created_at")
+        if created_at_str:
+            try:
+                age = datetime.now() - datetime.fromisoformat(created_at_str)
+                if age > timedelta(minutes=30):
+                    self.memory.cancel_form(user_id)
+                    logger.info(f"[FORM] Auto-cancelled stale form for {user_id} (age={int(age.total_seconds()//60)} min)")
+                    return None  # Let the message be processed normally
+            except (ValueError, TypeError):
+                pass  # Malformed timestamp — treat as fresh
+
+        # ── Escape: new job entry (+...) should cancel the old form ───────────
+        if message.strip().startswith("+") and len(message.strip()) > 2:
+            self.memory.cancel_form(user_id)
+            logger.info(f"[FORM] Cancelled stale form — new job entry received for {user_id}")
+            return None  # Fall through to smart capture
+
+        # ── Escape: obvious new intent (question words, commands) ─────────────
+        _msg_lower = message.strip().lower()
+        _new_intent_starts = (
+            "show ", "list ", "what ", "how ", "when ", "which ", "who ",
+            "mark ", "set ", "update ", "delete ", "send ", "generate ",
+            "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+        )
+        if any(_msg_lower == w.rstrip() or _msg_lower.startswith(w) for w in _new_intent_starts):
+            self.memory.cancel_form(user_id)
+            logger.info(f"[FORM] Cancelled stale form — new intent detected for {user_id}: '{message[:50]}'")
+            return None
+
+        # ── Cancel if user explicitly says cancel/stop ────────────────────────
+        if _msg_lower in ("cancel", "stop", "nevermind", "abort", "exit"):
             self.memory.cancel_form(user_id)
             response = "No problem, cancelled. Let me know if you need anything else."
             self._store_conversation(user_id, message, response)
@@ -744,6 +775,15 @@ class IntentService:
             return {"operation": "smart_capture_edit", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         else:
+            # Track retries — auto-cancel after 2 unrecognised replies
+            retry_count = form.get("retry_count", 0) + 1
+            form["retry_count"] = retry_count
+            self.memory.start_form(user_id, [], form_override=form)
+            if retry_count >= 2:
+                self.memory.cancel_form(user_id)
+                response = "I'll cancel that for now. Let me know if you'd like to try again."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "form_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
             response = "Please reply 'Yes' to save or 'Edit' to make changes."
             self._store_conversation(user_id, message, response)
             return {"operation": "smart_capture_confirm_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}

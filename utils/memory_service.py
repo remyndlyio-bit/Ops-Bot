@@ -103,6 +103,8 @@ class MemoryService:
                 self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads"}
             if form_override:
                 form_override["active"] = True
+                form_override.setdefault("created_at", datetime.now().isoformat())
+                form_override["retry_count"] = 0
                 self.memory[user_id]["form"] = form_override
             else:
                 self.memory[user_id]["form"] = {
@@ -110,6 +112,8 @@ class MemoryService:
                     "fields": fields,
                     "step": 0,
                     "values": {},
+                    "created_at": datetime.now().isoformat(),
+                    "retry_count": 0,
                 }
             self._save_memory()
 
