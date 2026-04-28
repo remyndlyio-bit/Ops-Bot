@@ -2682,7 +2682,70 @@ class IntentService:
                     if not response or not response.strip():
                         response = f"Done! Updated {rowcount} record{'s' if rowcount != 1 else ''}."
                 else:
-                    response = f"Done! Updated {rowcount} record{'s' if rowcount != 1 else ''}."
+                    # 0 rows updated — the planner may have injected a stale date filter from
+                    # memory context even though the user's message contained no explicit date.
+                    # Retry by stripping the hallucinated job_date equality filter.
+                    _msg_has_date = bool(re.search(
+                        r'\b\d{4}-\d{2}-\d{2}\b'
+                        r'|\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?'
+                        r'|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b',
+                        message.lower()
+                    ))
+                    _retry_sql = re.sub(
+                        r"\s+AND\s+job_date\s*=\s*'[^']*'", "", sanitized_sql, flags=re.IGNORECASE
+                    )
+                    if not _msg_has_date and _retry_sql != sanitized_sql:
+                        logger.info(f"[UPDATE_RETRY] Stripping stale date filter (0 rows). Retry SQL: {_retry_sql[:200]}")
+                        _where_m2 = re.search(r'WHERE\s+(.+?)(?=\s+RETURNING\b|$)', _retry_sql, re.IGNORECASE | re.DOTALL)
+                        if _where_m2:
+                            _pre2_sql = (
+                                "SELECT id, client_name, job_date, job_description_details, fees "
+                                f"FROM public.job_entries WHERE {_where_m2.group(1).strip()}"
+                            )
+                            _pre2 = self.supabase.execute_sql(_pre2_sql)
+                            if _pre2.get("ok"):
+                                _pre2_rows = _pre2.get("rows", [])
+                                if len(_pre2_rows) > 1:
+                                    # Multiple candidates — ask the user to pick
+                                    self.memory.update_user_memory(user_id, {
+                                        "pending_disambiguation": {
+                                            "sql": _retry_sql,
+                                            "rows": _pre2_rows,
+                                            "data_user_id": data_user_id,
+                                        }
+                                    })
+                                    _opts = [f"I found {len(_pre2_rows)} matching records. Which one did you mean?\n"]
+                                    for _i, _r in enumerate(_pre2_rows[:10], 1):
+                                        _parts = [f"{_i}."]
+                                        _c = (_r.get("client_name") or "").strip()
+                                        _d = str(_r.get("job_date") or "")[:10]
+                                        _desc = str(_r.get("job_description_details") or "")[:40].strip()
+                                        _f = _r.get("fees")
+                                        if _c: _parts.append(_c)
+                                        if _d: _parts.append(_d)
+                                        if _desc: _parts.append(_desc)
+                                        if isinstance(_f, (int, float)): _parts.append(f"₹{int(_f):,}")
+                                        _opts.append(" | ".join(_parts))
+                                    _opts.append("\nReply with a number to pick, or 'cancel' to abort.")
+                                    response = "\n".join(_opts)
+                                    self._store_conversation(user_id, message, response)
+                                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                                elif len(_pre2_rows) == 1:
+                                    # Exactly one match — execute the retry UPDATE
+                                    _retry_exec = self.supabase.execute_sql(_retry_sql)
+                                    if _retry_exec.get("ok") and _retry_exec.get("rowcount", 0) > 0:
+                                        _retry_rows = _retry_exec.get("rows", [])
+                                        if _retry_rows:
+                                            self._update_sql_context(user_id, _retry_rows)
+                                        payload = build_clean_payload(_retry_rows or _pre2_rows, "select")
+                                        response = self.gemini.synthesize_response(payload, message)
+                                        if not response or not response.strip():
+                                            response = f"Done! Updated {_retry_exec.get('rowcount', 1)} record."
+                                        self._store_conversation(user_id, message, response)
+                                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                    # Genuine no-match after retry
+                    logger.warning(f"[UPDATE_FAIL] 0 rows updated after retry. SQL: {sanitized_sql[:200]}")
+                    response = "I couldn't find a matching record to update. Could you be more specific (e.g. include the date or job description)?"
             elif op == "insert":
                 if rows:
                     self._update_sql_context(user_id, rows)
