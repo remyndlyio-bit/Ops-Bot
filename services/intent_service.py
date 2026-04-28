@@ -2505,11 +2505,34 @@ class IntentService:
 
             # Handle clarification from planner
             if plan_result.get("clarification"):
-                # Save intent context so follow-up can fill in the gap
                 plan_data = plan_result.get("plan", {}) if isinstance(plan_result.get("plan"), dict) else {}
+                _clar_client = plan_data.get("filters", {}).get("client_name", "") if isinstance(plan_data.get("filters"), dict) else ""
+
+                # If the planner is asking about invoice generation (it leaked into query pipeline),
+                # redirect to the proper invoice month-selection flow instead of showing a confusing
+                # AI-generated clarification (which may suggest unsupported options like "all outstanding").
+                _clar_text = plan_result["clarification"].lower()
+                _msg_has_invoice = any(t in msg_lower for t in ["invoice", "invoce", "invoic", "bill", "pdf"])
+                if _clar_client and _msg_has_invoice:
+                    months_result = self.supabase.get_available_months_for_client(_clar_client, user_id=data_user_id)
+                    if months_result.get("ok") and months_result.get("months"):
+                        month_options = "\n".join(f"• {m['label']}" for m in months_result["months"])
+                        response = f"I see you want an invoice for {_clar_client}. Which month?\n\n{month_options}\n\nReply with the month."
+                    else:
+                        response = f"I see you want an invoice for {_clar_client}. Which month? For example: 'Invoice for {_clar_client} for March'."
+                    self._save_last_intent(user_id, operation="invoice", client_name=_clar_client, entity="invoice", pending_clarification="month")
+                    self.memory.update_user_memory(user_id, {
+                        "awaiting_invoice_month": True,
+                        "pending_invoice_client": _clar_client,
+                        "pending_invoice_send_email": False,
+                    })
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                # Normal clarification for non-invoice queries
                 self._save_last_intent(
                     user_id, operation=plan_data.get("operation", "query"),
-                    client_name=plan_data.get("filters", {}).get("client_name", "") if isinstance(plan_data.get("filters"), dict) else "",
+                    client_name=_clar_client,
                     entity="query",
                     pending_clarification="details",
                 )
