@@ -2788,6 +2788,24 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # INSERT (create): always show confirmation card before writing to DB.
+            # The planner may have correctly parsed a Hinglish/typo job entry — but the user
+            # must confirm before any row is inserted.  Route through _show_smart_capture_confirmation
+            # which stores a form_state and waits for "Yes"/"Edit".
+            if sanitized_sql.upper().lstrip().startswith("INSERT"):
+                _plan_values = plan_result.get("plan", {})
+                if isinstance(_plan_values, dict):
+                    _plan_values = _plan_values.get("values") or {}
+                # Parse field values out of the INSERT SQL if the plan didn't surface them
+                if not _plan_values:
+                    _col_m = re.search(r'INSERT INTO[^(]+\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)', sanitized_sql, re.IGNORECASE)
+                    if _col_m:
+                        _cols = [c.strip() for c in _col_m.group(1).split(",")]
+                        _vals_raw = [v.strip().strip("'") for v in _col_m.group(2).split(",")]
+                        _plan_values = {c: v for c, v in zip(_cols, _vals_raw) if c != "user_id"}
+                logger.info(f"[CREATE_CONFIRM] Routing INSERT to confirmation flow: {_plan_values}")
+                return self._show_smart_capture_confirmation(user_id, _plan_values)
+
             # Disambiguation: if an UPDATE matches multiple rows, show real options before executing.
             # This covers soft-deletes (SET "isDeleted" = TRUE) and any other UPDATE.
             if sanitized_sql.upper().lstrip().startswith("UPDATE"):
