@@ -2704,27 +2704,27 @@ class IntentService:
         base = f"SELECT * FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}"
 
         # "last job" / "latest job" / "most recent job" / "recent job"
-        if re.search(r'\b(last|latest|most\s+recent|recent)\b.*\b(job|entry|work|project|gig)\b', msg):
+        if re.search(r'\b(last|latest|most\s+recent|recent)\b.*\b(jobs?|entr(?:y|ies)?|work|project|gig)\b', msg):
             return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 1"
 
         # "how many jobs" / "count" / "total jobs"
-        if re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of)\b.*\b(job|entr|record|work)\b', msg):
+        if re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of)\b.*\b(jobs?|entr(?:y|ies)?|records?|work)\b', msg):
             return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
 
         # "total fees" / "total earnings" / "sum of fees"
-        if re.search(r'\b(total|sum|overall)\b.*\b(fees|earning|income|revenue|billing)\b', msg):
+        if re.search(r'\b(total|sum|overall)\b.*\b(fees?|earnings?|income|revenue|billing)\b', msg):
             return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
 
         # "show all jobs" / "list jobs" / "my jobs"
-        if re.search(r'\b(show|list|all|my)\b.*\b(job|entr|record|work)\b', msg):
+        if re.search(r'\b(show|list|all|my)\b.*\b(jobs?|entr(?:y|ies)?|records?|work)\b', msg):
             return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 25"
 
         # "unpaid" / "pending payments"
         if re.search(r'\b(unpaid|pending|not\s+paid|outstanding)\b', msg):
             return f"{base} AND (paid IS NULL OR paid = '' OR paid = 'false' OR LOWER(paid) != 'true') ORDER BY job_date DESC NULLS LAST LIMIT 25"
 
-        # Generic fallback for any question with "job" — show recent jobs
-        if re.search(r'\bjob\b', msg):
+        # Generic fallback for any question with "job" or "jobs"
+        if re.search(r'\bjobs?\b', msg):
             return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 5"
 
         return None
