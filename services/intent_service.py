@@ -61,6 +61,16 @@ class IntentService:
         "that's all", "thats all", "that's it", "thats it",
         "no need", "not needed", "never mind", "nevermind", "nvm",
         "i'm ok", "im ok", "i'm okay", "im okay",
+        # Hindi / Hinglish greetings & small talk
+        "namaste", "namaskar", "jai hind",
+        "kya haal hai", "kya hal hai", "kya haal h", "kya hal h",
+        "kaise ho", "kaisa chal raha hai", "kya chal raha hai", "kya scene hai",
+        "sab theek", "sab thik", "theek hoon", "thik hoon", "mast hoon",
+        "shukriya", "dhanyavaad", "shukran",
+        "haan", "haan ji", "nahi", "nahi ji",
+        "alvida", "bye bye", "phir milenge",
+        "kal milte hain", "baad mein baat karte hain",
+        "bas karo", "rehne do", "chhoddo",
     }
 
     _SMALL_TALK_RESPONSES = {
@@ -1435,13 +1445,18 @@ class IntentService:
         msg = message.strip().lower()
         user_name = self._get_user_name(user_id)
         
-        bye_words = {"bye", "goodbye", "good bye", "see you", "see ya", "cya", "ttyl"}
-        thanks_words = {"thanks", "thank you", "thx", "ty", "cheers"}
+        bye_words = {"bye", "goodbye", "good bye", "see you", "see ya", "cya", "ttyl",
+                     "alvida", "phir milenge", "kal milte hain", "baad mein baat karte hain"}
+        thanks_words = {"thanks", "thank you", "thx", "ty", "cheers",
+                        "shukriya", "dhanyavaad", "shukran"}
         how_words = {"how are you", "how r u", "how are u", "how are you doing",
-                     "how\'s it going", "hows it going", "what\'s up", "whats up", "wassup"}
+                     "how\'s it going", "hows it going", "what\'s up", "whats up", "wassup",
+                     "kya haal hai", "kya hal hai", "kya haal h", "kya hal h",
+                     "kaise ho", "kaisa chal raha hai", "kya chal raha hai", "kya scene hai"}
         time_words = {"good morning", "good afternoon", "good evening", "good night",
                       "morning", "afternoon", "evening"}
-        affirmation_words = {"ok", "okay", "cool", "got it", "great", "nice", "awesome"}
+        affirmation_words = {"ok", "okay", "cool", "got it", "great", "nice", "awesome",
+                             "haan", "haan ji"}
         dismissal_words = {
             "nothing", "nothing thanks", "nothing thank you", "nothing, thanks",
             "no thanks", "no thank you", "nope thanks", "nah thanks",
@@ -1449,6 +1464,8 @@ class IntentService:
             "that's all", "thats all", "that's it", "thats it",
             "no need", "not needed", "never mind", "nevermind", "nvm",
             "i'm ok", "im ok", "i'm okay", "im okay",
+            "nahi", "nahi ji", "bas karo", "rehne do", "chhoddo",
+            "sab theek", "sab thik", "theek hoon", "thik hoon", "mast hoon",
         }
 
         # Get base response
