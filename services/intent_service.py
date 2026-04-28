@@ -92,6 +92,22 @@ class IntentService:
             "Good to hear from you! What do you need?",
             "Hope your day\'s going well! What can I help with?",
         ],
+        "good_morning": [
+            "Good morning! What can I help you with today?",
+            "Morning! Ready when you are — what do you need?",
+        ],
+        "good_afternoon": [
+            "Good afternoon! What can I help you with?",
+            "Afternoon! What do you need?",
+        ],
+        "good_evening": [
+            "Good evening! What can I help you with?",
+            "Evening! What do you need?",
+        ],
+        "good_night": [
+            "Good night! Take care.",
+            "Good night! Rest well.",
+        ],
     }
 
     def __init__(self):
@@ -1445,7 +1461,14 @@ class IntentService:
         elif any(hw in msg for hw in how_words):
             response = _pick(self._SMALL_TALK_RESPONSES["how_are_you"])
         elif msg in time_words:
-            response = _pick(self._SMALL_TALK_RESPONSES["time_of_day"])
+            if any(w in msg for w in ("good night", "night")):
+                response = _pick(self._SMALL_TALK_RESPONSES["good_night"])
+            elif any(w in msg for w in ("good evening", "evening")):
+                response = _pick(self._SMALL_TALK_RESPONSES["good_evening"])
+            elif any(w in msg for w in ("good afternoon", "afternoon")):
+                response = _pick(self._SMALL_TALK_RESPONSES["good_afternoon"])
+            else:
+                response = _pick(self._SMALL_TALK_RESPONSES["good_morning"])
         elif msg in affirmation_words:
             response = _pick(self._SMALL_TALK_RESPONSES["affirmation"])
         else:
