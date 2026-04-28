@@ -661,3 +661,28 @@ JSON:"""
         except Exception as e:
             logger.error(f"Response Generation failed: {e}")
             return backend_result or fallback
+
+    def extract_name(self, raw_message: str) -> Optional[str]:
+        """
+        Extract a person's first name (or full name) from a raw onboarding message.
+        Works across languages — English, Hindi, Hinglish, etc.
+        Returns the extracted name string, or None if extraction fails.
+        """
+        prompt = (
+            "Extract the person's name from the following message. "
+            "The message may be in any language (English, Hindi, Hinglish, etc.). "
+            "Return ONLY the name — nothing else, no punctuation, no explanation. "
+            "If you cannot identify a name, return the single word: UNKNOWN\n\n"
+            f"Message: {raw_message}"
+        )
+        try:
+            result = self._call_api(prompt, generation_config={"maxOutputTokens": 20, "temperature": 0.0})
+            if not result:
+                return None
+            name = result.strip().strip('"').strip("'").strip()
+            if not name or name.upper() == "UNKNOWN" or len(name) > 50:
+                return None
+            return name
+        except Exception as e:
+            logger.error(f"[GEMINI] extract_name failed: {e}")
+            return None
