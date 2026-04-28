@@ -2718,6 +2718,25 @@ class IntentService:
                         )
                     else:
                         logger.warning(f"[QUERY_FAIL] 0 rows but user HAS data. SQL returned nothing for: {sanitized_sql[:200]}")
+                        # Try deterministic keyword fallback before giving up — the planner may have
+                        # injected stale context filters (e.g. a remembered client/date) that
+                        # don't match the user's actual intent (e.g. "what was my last job").
+                        kw_sql = self._keyword_sql_fallback(message, data_user_id)
+                        if kw_sql:
+                            logger.info(f"[PIPELINE] Keyword retry after 0-row planner result: {kw_sql[:200]}")
+                            kw_exec = self.supabase.execute_sql(kw_sql)
+                            kw_rows = kw_exec.get("rows", []) if kw_exec.get("ok") else []
+                            if kw_rows:
+                                self._update_sql_context(user_id, kw_rows)
+                                ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+                                ctx["last_sql"] = kw_sql
+                                self.memory.update_user_memory(user_id, {"uscf_context": ctx})
+                                payload = build_clean_payload(kw_rows, "select")
+                                response = self.gemini.synthesize_response(payload, message)
+                                if not response or not response.strip():
+                                    response = self._format_sql_result(kw_rows)
+                                self._store_conversation(user_id, message, response)
+                                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                         response = format_response(ERROR_MODE)
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
