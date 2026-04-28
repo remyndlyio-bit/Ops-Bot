@@ -2729,6 +2729,111 @@ class IntentService:
 
         return None
 
+    def _handle_soft_delete(self, user_id: str, message: str, data_user_id: str, conversation_history: list) -> Dict:
+        """
+        Soft-delete a job entry by setting "isDeleted" = true.
+        For 'delete my last job': finds the most recent job and deletes it.
+        For 'delete this job': uses the last shown row from context.
+        Shows what was deleted, or asks to disambiguate if multiple rows match.
+        """
+        msg_lower = message.strip().lower()
+        uid = data_user_id.replace("'", "''")
+        _not_deleted = "(\"isDeleted\" IS NOT TRUE)"
+
+        # Determine which job to delete
+        # Case 1: "last job" / "latest job" → most recent by job_date
+        is_last = re.search(r'\b(last|latest|most\s+recent|recent)\b', msg_lower)
+        # Case 2: "this job" / "it" / "that" → use last shown row from context
+        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+        last_row = ctx.get("last_row_data")
+
+        if not is_last and last_row and any(w in msg_lower for w in ["this", "it", "that"]):
+            # Delete the job that was most recently shown
+            row_id = last_row.get("id", "")
+            if not row_id:
+                response = "I'm not sure which job you want to delete. Try 'delete my last job'."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            candidate_rows = [last_row]
+        else:
+            # Fetch the most recent job(s) to determine what to delete
+            fetch_sql = (
+                f"SELECT id, client_name, brand_name, job_date, job_description_details, fees "
+                f"FROM public.job_entries "
+                f"WHERE user_id = '{uid}' AND {_not_deleted} "
+                f"ORDER BY job_date DESC NULLS LAST LIMIT 5"
+            )
+            fetch_result = self.supabase.execute_sql(fetch_sql)
+            if not fetch_result.get("ok") or not fetch_result.get("rows"):
+                response = "You don't have any jobs to delete."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            candidate_rows = fetch_result["rows"]
+
+        # If "last job" and multiple rows returned, take only the very last one
+        if is_last:
+            candidate_rows = candidate_rows[:1]
+
+        if len(candidate_rows) > 1:
+            # Disambiguate — reuse the existing disambiguation flow
+            update_sql = (
+                f"UPDATE public.job_entries SET \"isDeleted\" = true "
+                f"WHERE user_id = '{uid}' AND {_not_deleted} RETURNING *"
+            )
+            self.memory.update_user_memory(user_id, {
+                "pending_disambiguation": {
+                    "sql": update_sql,
+                    "rows": candidate_rows,
+                    "data_user_id": data_user_id,
+                }
+            })
+            opts = [f"I found {len(candidate_rows)} jobs. Which one do you want to delete?\n"]
+            for i, r in enumerate(candidate_rows[:10], 1):
+                parts = [f"{i}."]
+                c = (r.get("client_name") or r.get("brand_name") or "").strip()
+                d = str(r.get("job_date") or "")[:10]
+                desc = str(r.get("job_description_details") or "")[:40].strip()
+                if c: parts.append(c)
+                if d: parts.append(d)
+                if desc: parts.append(f"— {desc}")
+                opts.append(" ".join(parts))
+            opts.append("\nReply with a number, or 'cancel' to abort.")
+            response = "\n".join(opts)
+            self._store_conversation(user_id, message, response)
+            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Single row — soft-delete it
+        target = candidate_rows[0]
+        row_id = target.get("id", "")
+        if not row_id:
+            response = "Couldn't find that job. Please try again."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        delete_sql = (
+            f"UPDATE public.job_entries SET \"isDeleted\" = true "
+            f"WHERE id = '{row_id}' AND user_id = '{uid}' RETURNING id"
+        )
+        del_result = self.supabase.execute_sql(delete_sql)
+        if not del_result.get("ok"):
+            response = "Something went wrong deleting that job. Please try again."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Build a human-readable description of what was deleted
+        client = (target.get("client_name") or target.get("brand_name") or "").strip()
+        date_str = str(target.get("job_date") or "")[:10]
+        desc = str(target.get("job_description_details") or "")[:60].strip()
+        detail_parts = []
+        if client: detail_parts.append(client)
+        if date_str: detail_parts.append(date_str)
+        if desc: detail_parts.append(f"— {desc}")
+        detail = " | ".join(detail_parts) if detail_parts else "the job"
+
+        response = f"Done — deleted: {detail}.\n\nLet me know if you need anything else."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
     def _handle_disambiguation_reply(self, user_id: str, message: str, pending: Dict) -> Dict:
         """User is replying with a number to pick one row from a disambiguation list."""
         msg = message.strip().lower()
