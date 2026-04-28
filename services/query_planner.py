@@ -477,6 +477,15 @@ def _build_filter_clause(col: str, val, use_ilike: bool = True) -> str:
     if isinstance(val, list):
         quoted = ", ".join(_sql_quote(v) for v in val)
         return f"{col} IN ({quoted})"
+
+    # Special case: paid column uses NULL/empty for unpaid, 'true' for paid
+    if col == "paid":
+        val_str = str(val).lower().strip()
+        if val_str in ("false", "no", "n", "0", "unpaid", "pending", "outstanding"):
+            return f"(paid IS NULL OR TRIM(COALESCE(paid, '')) = '' OR LOWER(paid) NOT IN ('true', 't', 'yes', '1', 'paid'))"
+        else:
+            return f"LOWER(COALESCE(paid, '')) IN ('true', 't', 'yes', '1', 'paid')"
+
     if _is_numeric(val):
         return f"{col} = {val}"
     if _is_date(val):

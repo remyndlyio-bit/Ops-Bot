@@ -2004,9 +2004,17 @@ class IntentService:
                               "generate", "create", "make", "prepare", "need", "want", "share",
                               "regenerate", "redo", "rebuild"]
             has_verb = any(w in msg_lower for w in _INVOICE_VERBS)
-            has_invoice_word = "invoice" in msg_lower or "bill" in msg_lower
-            # If the message mentions "invoice" or "bill", always route to the
-            # invoice flow — the LLM intent parser handles typos and variations.
+            # Also catch common verb typos
+            _VERB_TYPOS = ["genrate", "generat", "crete", "creat", "mke", "prepre", "prepar"]
+            has_verb = has_verb or any(t in msg_lower for t in _VERB_TYPOS)
+            # Catch common invoice/bill typos: invoce, invoic, invoise, incoice, bll, bil
+            _INVOICE_TYPOS = ["invoce", "invoic", "invoise", "incoice", "invioce", "invocice"]
+            has_invoice_word = (
+                "invoice" in msg_lower or "bill" in msg_lower or "pdf" in msg_lower
+                or any(t in msg_lower for t in _INVOICE_TYPOS)
+            )
+            # If the message mentions "invoice"/"bill" (or typo), always route to the
+            # invoice flow — the LLM intent parser handles variations.
             is_retrieval = has_invoice_word
             logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
             if is_retrieval:
