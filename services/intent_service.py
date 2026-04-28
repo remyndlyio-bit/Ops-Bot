@@ -54,6 +54,13 @@ class IntentService:
         "ok", "okay", "cool", "got it", "great", "nice", "awesome",
         "good morning", "good afternoon", "good evening", "good night",
         "morning", "afternoon", "evening",
+        # dismissal / "nothing needed" replies
+        "nothing", "nothing thanks", "nothing thank you", "nothing, thanks",
+        "no thanks", "no thank you", "nope thanks", "nah thanks",
+        "all good", "all good thanks", "i'm good", "im good", "i'm fine", "im fine",
+        "that's all", "thats all", "that's it", "thats it",
+        "no need", "not needed", "never mind", "nevermind", "nvm",
+        "i'm ok", "im ok", "i'm okay", "im okay",
     }
 
     _SMALL_TALK_RESPONSES = {
@@ -1419,12 +1426,22 @@ class IntentService:
         time_words = {"good morning", "good afternoon", "good evening", "good night",
                       "morning", "afternoon", "evening"}
         affirmation_words = {"ok", "okay", "cool", "got it", "great", "nice", "awesome"}
+        dismissal_words = {
+            "nothing", "nothing thanks", "nothing thank you", "nothing, thanks",
+            "no thanks", "no thank you", "nope thanks", "nah thanks",
+            "all good", "all good thanks", "i'm good", "im good", "i'm fine", "im fine",
+            "that's all", "thats all", "that's it", "thats it",
+            "no need", "not needed", "never mind", "nevermind", "nvm",
+            "i'm ok", "im ok", "i'm okay", "im okay",
+        }
 
         # Get base response
         if msg in bye_words:
             response = _pick(self._SMALL_TALK_RESPONSES["bye"])
-        elif msg in thanks_words:
+        elif msg in thanks_words or any(tw in msg for tw in thanks_words):
             response = _pick(self._SMALL_TALK_RESPONSES["thanks"])
+        elif msg in dismissal_words or any(d in msg for d in dismissal_words):
+            response = _pick(self._SMALL_TALK_RESPONSES["affirmation"])
         elif any(hw in msg for hw in how_words):
             response = _pick(self._SMALL_TALK_RESPONSES["how_are_you"])
         elif msg in time_words:
