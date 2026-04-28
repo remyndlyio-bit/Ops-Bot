@@ -2594,7 +2594,89 @@ class IntentService:
                     self._store_conversation(user_id, message, response)
                     return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-                # Normal clarification for non-invoice queries
+                # For UPDATE clarifications the planner often hallucinates "multiple records found"
+                # without ever hitting the DB. Do a real pre-check and handle it properly.
+                _plan_op = plan_data.get("operation", "")
+                _plan_updates = plan_data.get("updates") if isinstance(plan_data.get("updates"), dict) else {}
+                if _plan_op == "update" and _clar_client and _plan_updates:
+                    _safe_clar_client = _clar_client.replace("'", "''")
+                    _uid_safe = data_user_id.replace("'", "''")
+                    _not_del = '("isDeleted" IS NOT TRUE)'
+                    _pre_check_sql = (
+                        f"SELECT id, client_name, brand_name, job_date, job_description_details, fees "
+                        f"FROM public.job_entries "
+                        f"WHERE user_id = '{_uid_safe}' AND {_not_del} "
+                        f"AND (client_name ILIKE '%{_safe_clar_client}%' "
+                        f"  OR brand_name ILIKE '%{_safe_clar_client}%' "
+                        f"  OR production_house ILIKE '%{_safe_clar_client}%')"
+                    )
+                    _pre_check = self.supabase.execute_sql(_pre_check_sql)
+                    _pre_rows = _pre_check.get("rows", []) if _pre_check.get("ok") else []
+                    logger.info(f"[UPDATE_CLARIFY] Real DB pre-check for '{_clar_client}': {len(_pre_rows)} rows")
+
+                    if len(_pre_rows) == 1:
+                        # Exactly one — skip the AI clarification entirely, build and run UPDATE directly
+                        _target_id = _pre_rows[0]["id"]
+                        _set_clauses = ", ".join(
+                            f"{col} = '{val}'" for col, val in _plan_updates.items()
+                        )
+                        # Normalise paid value
+                        _set_clauses = re.sub(r"\bpaid\s*=\s*'(?:true|1|yes)'",  "paid = 'Yes'", _set_clauses, flags=re.IGNORECASE)
+                        _set_clauses = re.sub(r"\bpaid\s*=\s*'(?:false|0|no)'",  "paid = 'No'",  _set_clauses, flags=re.IGNORECASE)
+                        _direct_sql = (
+                            f"UPDATE public.job_entries SET {_set_clauses} "
+                            f"WHERE id = '{_target_id}' RETURNING *"
+                        )
+                        _direct_exec = self.supabase.execute_sql(_direct_sql)
+                        if _direct_exec.get("ok") and _direct_exec.get("rowcount", 0) > 0:
+                            _direct_rows = _direct_exec.get("rows", [])
+                            if _direct_rows:
+                                self._update_sql_context(user_id, _direct_rows)
+                            _payload = build_clean_payload(_direct_rows or _pre_rows, "select")
+                            response = self.gemini.synthesize_response(_payload, message)
+                            if not response or not response.strip():
+                                response = f"Done! Updated {_direct_exec.get('rowcount', 1)} record."
+                            self._store_conversation(user_id, message, response)
+                            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                    elif len(_pre_rows) > 1:
+                        # Genuinely multiple — show real numbered list
+                        self.memory.update_user_memory(user_id, {
+                            "pending_disambiguation": {
+                                "sql": (
+                                    f"UPDATE public.job_entries "
+                                    f"SET {', '.join(f'{c} = %s' for c in _plan_updates)} "
+                                    f"WHERE id = '{{id}}' RETURNING *"
+                                ),
+                                "rows": _pre_rows,
+                                "data_user_id": data_user_id,
+                                "updates": _plan_updates,
+                            }
+                        })
+                        _opts = [f"I found {len(_pre_rows)} matching records. Which one did you mean?\n"]
+                        for _i, _r in enumerate(_pre_rows[:10], 1):
+                            _parts = [f"{_i}."]
+                            _c = (_r.get("client_name") or _r.get("brand_name") or "").strip()
+                            _d = str(_r.get("job_date") or "")[:10]
+                            _desc = str(_r.get("job_description_details") or "")[:40].strip()
+                            _f = _r.get("fees")
+                            if _c: _parts.append(_c)
+                            if _d: _parts.append(_d)
+                            if _desc: _parts.append(_desc)
+                            if isinstance(_f, (int, float)): _parts.append(f"₹{int(_f):,}")
+                            _opts.append(" | ".join(_parts))
+                        _opts.append("\nReply with a number to pick, or 'cancel' to abort.")
+                        response = "\n".join(_opts)
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                    else:
+                        # 0 rows — genuine not found
+                        response = f"I couldn't find any job matching '{_clar_client}'. Could you double-check the name?"
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                # Normal clarification for non-invoice / non-update queries
                 self._save_last_intent(
                     user_id, operation=plan_data.get("operation", "query"),
                     client_name=_clar_client,
