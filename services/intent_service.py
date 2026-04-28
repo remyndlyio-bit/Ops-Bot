@@ -3298,7 +3298,18 @@ class IntentService:
                 name = "there"  # Generic greeting instead of user_id
             else:
                 # Extract just the name part from common patterns
+                # Ordered longest-first so longer patterns match before shorter prefixes
                 name_patterns = [
+                    # Hindi / Devanagari
+                    "मेरा नाम ",        # "mera naam X (hai)"
+                    "मैं ",             # "main X hoon"
+                    # Hinglish romanised
+                    "mera naam ",
+                    "mera name ",
+                    "main hoon ",
+                    "mera naam hai ",
+                    "mera name hai ",
+                    # English
                     "my name is ",
                     "i'm ",
                     "i am ",
@@ -3307,18 +3318,26 @@ class IntentService:
                     "it's ",
                     "its ",
                 ]
+                # Trailing filler words to strip after extracting the name
+                _trailing_filler = [
+                    " है", " हैं", " हूँ", " हूं", " हु",   # Devanagari "is/am"
+                    " hai", " he", " hoon", " hun", " hu",    # Hinglish romanised
+                ]
                 name = raw_name
                 for pattern in name_patterns:
                     if pattern.lower() in raw_name.lower():
-                        # Extract text after the pattern
                         idx = raw_name.lower().find(pattern.lower())
                         name = raw_name[idx + len(pattern):].strip()
                         break
-                # If name is too long, it might still include extra words
+                # Strip trailing filler words (e.g. "दर्श है" → "दर्श")
+                for filler in _trailing_filler:
+                    if name.lower().endswith(filler.lower()):
+                        name = name[: len(name) - len(filler)].strip()
+                        break
+                # If name is still too long, it might include extra words — take first 2
                 if len(name.split()) > 3:
-                    # Take first 2-3 words as name
                     name = " ".join(name.split()[:2])
-                # Capitalize properly
+                # Capitalize properly (title() is a no-op on Devanagari, which is correct)
                 if name:
                     name = name.title()
             
