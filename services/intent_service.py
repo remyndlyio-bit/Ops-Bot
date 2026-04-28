@@ -496,7 +496,15 @@ class IntentService:
         Returns the requested field keyword if detected, None otherwise.
         """
         msg_lower = message.lower().strip()
-        
+
+        # Mutation phrases are never field-read follow-ups — they must reach the UPDATE pipeline
+        _mutation_verbs = (
+            "mark ", "set ", "update ", "change ", "edit ", "modify ",
+            "mark as", "set as", "change to", "update to",
+        )
+        if any(msg_lower.startswith(v) or f" {v}" in f" {msg_lower}" for v in _mutation_verbs):
+            return None
+
         # Common follow-up patterns that indicate user wants info from previous result
         followup_patterns = [
             "and the", "what about", "what's the", "what is the", "how about",
@@ -2615,6 +2623,11 @@ class IntentService:
                     logger.info(f"[PIPELINE] Keyword fallback generated SQL: {sql[:200]}")
                 else:
                     sql = sql_result.get("sql")
+
+            # Normalise `paid` values to 'Yes'/'No' regardless of what the AI wrote
+            # (the column is text; existing rows use 'Yes'/'No', not 'true'/'false'/booleans)
+            sql = re.sub(r"SET\s+paid\s*=\s*'(?:true|1|yes)'",  "SET paid = 'Yes'",  sql, flags=re.IGNORECASE)
+            sql = re.sub(r"SET\s+paid\s*=\s*'(?:false|0|no)'",  "SET paid = 'No'",   sql, flags=re.IGNORECASE)
 
             valid, sanitized_sql, err = validate_sql(sql)
             if not valid:
