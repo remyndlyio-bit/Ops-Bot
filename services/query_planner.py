@@ -572,7 +572,14 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
         sql += f" GROUP BY {group_by}"
 
     if order:
-        order_col = "result" if (metric and metric not in ("value",)) else (column or dc)
+        # For metric=value (returning a column), ordering should be by date for
+        # recency ("last job", "latest"), NOT alphabetical on the displayed column.
+        if metric and metric not in ("value",):
+            order_col = "result"
+        elif metric == "value":
+            order_col = dc
+        else:
+            order_col = column or dc
         sql += f" ORDER BY {order_col} {order.upper()}"
     elif not group_by and (metric == "value" or not metric):
         sql += f" ORDER BY {dc} DESC"
