@@ -50,7 +50,19 @@ def _clean_row(row: Dict) -> Dict:
             continue
         v_clean = _clean_value(v)
         if v_clean is None:
+            # Special case: keep payment status semantically — null paid means unpaid.
+            # Without this, "who hasn't paid" returns rows with no payment_status,
+            # and the synthesizer says "I can't see payment statuses".
+            if k_lower == "paid":
+                out[FIELD_ALIASES.get("paid", "paid")] = "unpaid"
             continue
+        # Normalize paid values for clarity
+        if k_lower == "paid":
+            sv = str(v_clean).strip().lower()
+            if sv in ("yes", "true", "1", "y", "paid"):
+                v_clean = "paid"
+            elif sv in ("no", "false", "0", "n", "unpaid", ""):
+                v_clean = "unpaid"
         alias = FIELD_ALIASES.get(k_lower, k)
         out[alias] = v_clean
     return out
