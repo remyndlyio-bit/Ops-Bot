@@ -239,7 +239,17 @@ class IntentService:
 
         # Case 5: "this month", "last month", "this year" relative time with prior client
         elif client_name and any(t in msg_lower for t in ["this month", "last month", "this year", "last year"]):
-            if "invoice" in entity or "invoice" in operation.lower():
+            # If the last assistant turn was a query result (showing jobs/details),
+            # the user is refining that query — NOT requesting a new invoice.
+            # last_intent.entity may still say "invoice" from a much earlier flow,
+            # so we trust the immediate conversation over stale stored intent.
+            _query_result_signals = (
+                "here are", "here's", "details for", "your jobs", "i found",
+                "showing", "your last job", "most recent", "•",
+            )
+            just_answered_query = any(s in last_assistant_msg for s in _query_result_signals)
+            invoice_context = ("invoice" in entity or "invoice" in operation.lower())
+            if invoice_context and not just_answered_query:
                 reconstructed = f"Generate invoice for {client_name} for {message.strip()}"
             else:
                 reconstructed = f"Show jobs for {client_name} for {message.strip()}"
