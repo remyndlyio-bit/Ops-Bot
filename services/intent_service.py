@@ -1415,6 +1415,82 @@ class IntentService:
         self._store_conversation(user_id, message, response)
         return {"operation": "billing_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+    def _handle_poc_name_response(self, user_id: str, message: str) -> Dict:
+        """Handle user providing POC name before invoice generation."""
+        user_mem = self.memory.get_user_memory(user_id)
+        pending_invoice = user_mem.get("pending_invoice", {})
+        client_name = user_mem.get("pending_poc_client", "")
+        data_user_id = user_mem.get("pending_poc_user_id", user_id)
+        row_ids = user_mem.get("pending_poc_row_ids", []) or []
+
+        # Clear awaiting state
+        self.memory.update_user_memory(user_id, {
+            "awaiting_poc_name": False,
+            "pending_poc_client": None,
+            "pending_poc_user_id": None,
+            "pending_poc_row_ids": None,
+        })
+
+        # Allow skip
+        if message.strip().lower() in ("skip", "cancel", "no", "none"):
+            self.memory.update_user_memory(user_id, {"skip_poc_prompt": True})
+            if pending_invoice:
+                response = f"No problem, generating the invoice for {client_name} using the brand/client name."
+                self._store_conversation(user_id, message, response)
+                return {
+                    "operation": "poc_skipped",
+                    "response": response,
+                    "trigger_invoice": True,
+                    "invoice_data": pending_invoice,
+                }
+            response = "Got it, skipped."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "poc_skipped", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        poc_name = message.strip()
+        # Save to the specific rows queried for this invoice (or all matching client rows
+        # if row_ids is empty as a fallback).
+        if poc_name:
+            safe_poc = poc_name.replace("'", "''")
+            safe_uid = data_user_id.replace("'", "''")
+            if row_ids:
+                id_list = ", ".join(f"'{str(r).replace(chr(39), chr(39)+chr(39))}'" for r in row_ids)
+                update_sql = (
+                    f"UPDATE public.job_entries SET poc_name = '{safe_poc}' "
+                    f"WHERE user_id = '{safe_uid}' AND id IN ({id_list}) "
+                    f"AND (\"isDeleted\" IS NOT TRUE)"
+                )
+            elif client_name:
+                safe_client = client_name.replace("'", "''")
+                update_sql = (
+                    f"UPDATE public.job_entries SET poc_name = '{safe_poc}' "
+                    f"WHERE user_id = '{safe_uid}' "
+                    f"AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
+                    f"AND (\"isDeleted\" IS NOT TRUE)"
+                )
+            else:
+                update_sql = None
+            if update_sql:
+                result = self.supabase.execute_sql(update_sql)
+                if result.get("ok"):
+                    logger.info(f"[POC] Saved poc_name='{poc_name}' for {client_name}")
+                else:
+                    logger.warning(f"[POC] Failed to save poc_name: {result.get('error')}")
+
+        if pending_invoice:
+            response = f"Got it. Invoice will be addressed to {poc_name}. Generating now."
+            self._store_conversation(user_id, message, response)
+            return {
+                "operation": "poc_saved",
+                "response": response,
+                "trigger_invoice": True,
+                "invoice_data": pending_invoice,
+            }
+
+        response = f"POC name saved as {poc_name}."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "poc_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
     def _prompt_bank_details_format(self, user_id: str, message: str) -> Dict:
         """Ask the user to send all bank details in a single structured message."""
         self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
@@ -1932,6 +2008,10 @@ class IntentService:
             # 0b1.7. Check if user is providing client billing details
             if user_mem.get("awaiting_client_billing"):
                 return self._handle_client_billing_response(user_id, message)
+
+            # 0b1.8. Check if user is providing POC name for an invoice
+            if user_mem.get("awaiting_poc_name"):
+                return self._handle_poc_name_response(user_id, message)
 
             # 0b2. Check if user is responding with bank details (awaiting state)
             if user_mem.get("awaiting_bank_details"):
@@ -2603,6 +2683,33 @@ class IntentService:
                         else:
                             # Clear skip flag for next time
                             self.memory.update_user_memory(user_id, {"skip_billing_prompt": False})
+
+                    # Check if any row has a POC name — invoice should be addressed to a
+                    # person, not the brand. Prompt the user once if missing.
+                    _has_poc_name = any(
+                        (str(r.get("poc_name") or "")).strip()
+                        and (str(r.get("poc_name") or "")).strip().lower() != "none"
+                        for r in rows
+                    )
+                    if not _has_poc_name:
+                        _skip_poc = self.memory.get_user_memory(user_id).get("skip_poc_prompt")
+                        if not _skip_poc:
+                            self.memory.update_user_memory(user_id, {
+                                "awaiting_poc_name": True,
+                                "pending_invoice": invoice_data,
+                                "pending_poc_client": display_client,
+                                "pending_poc_user_id": data_user_id,
+                                "pending_poc_row_ids": [r["id"] for r in rows if r.get("id")],
+                            })
+                            response = (
+                                f"I have the records for {display_client}, but no point-of-contact name is on file.\n\n"
+                                f"Who should the invoice be addressed to? "
+                                f"(Send the POC name, or type 'skip' to use the client/brand name.)"
+                            )
+                            self._store_conversation(user_id, message, response)
+                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                        else:
+                            self.memory.update_user_memory(user_id, {"skip_poc_prompt": False})
 
                     # Check if bank details exist before generating invoice
                     bank_result = self.supabase.get_user_bank_details(data_user_id)

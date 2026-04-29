@@ -115,7 +115,8 @@ class InvoiceGenerationService:
 
             pdf.ln(10)
 
-            # Client Info — use client_billing_details, poc_name, production_house from data rows
+            # Client Info — use client_billing_details, poc_name, production_house from data rows.
+            # Walk the FULL list so poc_name is found even if billing details came first.
             client_billing = ""
             production_house = ""
             poc_name = ""
@@ -125,14 +126,17 @@ class InvoiceGenerationService:
                 if not production_house:
                     production_house = (str(row.get("production_house") or "")).strip()
                 if not poc_name:
-                    poc_name = (str(row.get("poc_name") or "")).strip()
-                if client_billing:
-                    break
+                    _pn = (str(row.get("poc_name") or "")).strip()
+                    if _pn and _pn.lower() != "none":
+                        poc_name = _pn
 
             pdf.set_font(font_family, "B", 12)
             pdf.cell(0, 7, sanitize_pdf_text("Invoice To:"), ln=1)
             pdf.set_font(font_family, "", 11)
             client_display = sanitize_pdf_text(summary.get("client", "Client Name"))
+            # Always lead with POC name when available (the actual person to invoice)
+            if poc_name:
+                pdf.cell(0, 6, sanitize_pdf_text(poc_name), ln=1)
             if client_billing:
                 # client_billing_details may contain multi-line info (name, address, GST, etc.)
                 for line in client_billing.split("\n"):
@@ -140,13 +144,10 @@ class InvoiceGenerationService:
                     if line:
                         pdf.cell(0, 6, sanitize_pdf_text(line), ln=1)
             else:
-                # Show POC name as primary, then production house / client name
-                if poc_name and poc_name.lower() not in ("none", ""):
-                    pdf.cell(0, 6, sanitize_pdf_text(poc_name), ln=1)
                 if production_house and production_house.lower() not in ("none", ""):
                     pdf.cell(0, 6, sanitize_pdf_text(production_house), ln=1)
-                elif not poc_name or poc_name.lower() in ("none", ""):
-                    # Fallback to client/brand name if no POC or production house
+                elif not poc_name:
+                    # Fallback to client/brand name only if we have nothing else
                     pdf.cell(0, 6, client_display, ln=1)
 
             pdf.ln(10)
