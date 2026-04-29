@@ -549,6 +549,21 @@ class IntentService:
         if any(ind in msg_lower for ind in standalone_indicators):
             return None
 
+        # Month names anywhere in the message indicate a time-scoped query, not a field read
+        _MONTH_TOKENS = {
+            "january", "february", "march", "april", "may", "june", "july",
+            "august", "september", "october", "november", "december",
+            "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+        }
+        msg_tokens = set(re.findall(r"[a-z]+", msg_lower))
+        if msg_tokens & _MONTH_TOKENS:
+            return None
+
+        # Plural "jobs"/"invoices"/"clients" with a scope word means a multi-record query
+        if re.search(r"\b(jobs|invoices|clients|brands|payments|records|entries)\b", msg_lower) and \
+           re.search(r"\b(in|for|from|of|on|with|by)\b", msg_lower):
+            return None
+
         # Check if message matches follow-up pattern or is a short question
         is_followup = (
             any(msg_lower.startswith(p) for p in followup_patterns) or
