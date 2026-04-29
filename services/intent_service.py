@@ -524,6 +524,12 @@ class IntentService:
         if any(msg_lower.startswith(v) or f" {v}" in f" {msg_lower}" for v in _mutation_verbs):
             return None
 
+        # Explicit list/show queries with a "for <client>" scope are new queries,
+        # not follow-up field reads (e.g. "show jobs for nike", "list jobs for X").
+        _query_verbs = ("show ", "list ", "get ", "find ", "search ", "fetch ", "give me ", "display ")
+        if any(msg_lower.startswith(v) for v in _query_verbs) and " for " in msg_lower:
+            return None
+
         # Common follow-up patterns that indicate user wants info from previous result
         followup_patterns = [
             "and the", "what about", "what's the", "what is the", "how about",
