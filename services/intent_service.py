@@ -561,7 +561,11 @@ class IntentService:
 
         # Plural "jobs"/"invoices"/"clients" with a scope word means a multi-record query
         if re.search(r"\b(jobs|invoices|clients|brands|payments|records|entries)\b", msg_lower) and \
-           re.search(r"\b(in|for|from|of|on|with|by)\b", msg_lower):
+           re.search(r"\b(in|for|from|of|on|with|by|my|all)\b", msg_lower):
+            return None
+
+        # Explicit "all <entity>" / "list/show all" phrasing → multi-record listing
+        if re.search(r"\ball\b.*\b(jobs|invoices|clients|brands|payments|records|entries)\b", msg_lower):
             return None
 
         # Check if message matches follow-up pattern or is a short question
