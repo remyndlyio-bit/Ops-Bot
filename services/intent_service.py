@@ -192,6 +192,18 @@ class IntentService:
 
         reconstructed = None
 
+        # Case 0: Bot suggested an alternate month and user confirms ("okay", "yes",
+        # "okay generate", "sure", "go ahead", "proceed"). Persisted last_intent has
+        # pending_clarification == 'confirm_alt_month' with client + month + year.
+        _AFFIRM_TOKENS = {"okay", "ok", "yes", "yep", "yeah", "sure", "go", "ahead",
+                          "proceed", "fine", "alright", "yup", "haan", "thik", "theek",
+                          "generate", "create", "send"}
+        _msg_words = set(re.findall(r"[a-z]+", msg_lower))
+        if pending == "confirm_alt_month" and client_name and month_val and (_msg_words & _AFFIRM_TOKENS) and word_count <= 4:
+            year_part = f" {last_intent.get('year')}" if last_intent.get("year") else ""
+            verb = "Send" if "send" in operation.lower() else "Generate"
+            reconstructed = f"{verb} invoice for {client_name} for {month_val}{year_part}"
+
         # Case 1: Bot asked "Which month?" and user replied with a month name
         _MONTH_NAMES = {"january", "february", "march", "april", "may", "june",
                         "july", "august", "september", "october", "november", "december",
@@ -2394,6 +2406,26 @@ class IntentService:
                             response = f"I found no jobs for {client_name} in {month_name or month_num} {year_val}.{hint}"
                         else:
                             response = f"I don't see any records for {client_name or 'that bill'} in my records.{hint}"
+                        # If exactly one alternate month is available, persist it so a short
+                        # confirmation ("okay generate", "yes", "sure") can act on it.
+                        if client_name and periods and len(periods) == 1:
+                            try:
+                                _alt = periods[0]  # e.g. "February  2026"
+                                _parts = _alt.split()
+                                _alt_month = _parts[0] if _parts else None
+                                _alt_year = int(_parts[-1]) if _parts and _parts[-1].isdigit() else year_val
+                                if _alt_month:
+                                    self._save_last_intent(
+                                        user_id,
+                                        operation="generate_invoice",
+                                        client_name=client_name,
+                                        month=_alt_month,
+                                        year=_alt_year,
+                                        entity="invoice",
+                                        pending_clarification="confirm_alt_month",
+                                    )
+                            except Exception as _e:
+                                logger.warning(f"[INVOICE] Could not persist alt-month context: {_e}")
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
                     display_client = (rows[0].get("client_name") or client_name or "Client").strip()
