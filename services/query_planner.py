@@ -258,7 +258,7 @@ def _build_planner_prompt(
         f"- Date column: '{dc}'\n"
         f"{precomputed_ranges}"
         "- 'all time', 'overall', no period → time_range: null.\n"
-        "- 'latest', 'most recent', 'last job' → no time_range; use limit:1, order:'desc'.\n\n"
+        "- 'latest', 'most recent', 'last job' → no time_range; metric:null, column:null, limit:1, order:'desc' (return full record, not a single field).\n\n"
         "CONTEXT RESOLUTION:\n"
         "- 'this job', 'that client', 'these' → resolve from recent conversation.\n"
         "- 'sum of these', 'total of those' → extract items from assistant's last message.\n"
@@ -553,7 +553,14 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     elif metric in ("sum", "avg", "min", "max") and column:
         select = f"{metric.upper()}({column}) AS result"
     elif metric == "value" and column:
-        select = column
+        # When asking for a single record (limit=1, e.g. "last job"), return the
+        # full row so the synthesizer has date/client/fees context — not just one
+        # column. Without this, a single-column payload reads as "I don't have
+        # full details" even though the row exists.
+        if limit == 1 and not group_by:
+            select = "*"
+        else:
+            select = column
     else:
         select = "*"
 
