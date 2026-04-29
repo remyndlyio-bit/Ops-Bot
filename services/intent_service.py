@@ -2361,26 +2361,39 @@ class IntentService:
                         # Check if user explicitly asked to send via email
                         send_email = "email" in msg_lower or "e-mail" in msg_lower
                         months_result = self.supabase.get_available_months_for_client(client_name, user_id=data_user_id)
-                        if months_result.get("ok") and months_result.get("months"):
-                            month_options = "\n".join(f"• {m['label']}" for m in months_result["months"])
+                        _months = months_result.get("months") or []
+                        # If only one month exists for this client, auto-proceed without prompting.
+                        if months_result.get("ok") and len(_months) == 1:
+                            try:
+                                month_num = int(_months[0]["month"])
+                                year_val = int(_months[0]["year"])
+                                month_name = number_to_month_name(month_num)
+                                logger.info(f"[INVOICE] Single available month — auto-using {month_name} {year_val} for {client_name}")
+                            except (KeyError, ValueError, TypeError) as _e:
+                                logger.warning(f"[INVOICE] Could not auto-pick single month: {_e}")
+                        if months_result.get("ok") and _months and not month_num:
+                            month_options = "\n".join(f"• {m['label']}" for m in _months)
                             response = f"I see you want an invoice for {client_name}. Which month?\n\n{month_options}\n\nReply with the month, e.g. 'Send invoice for {client_name} for March 2025'."
-                        else:
+                        elif not month_num:
                             response = f"I see you want an invoice for {client_name}. Which month? For example: 'Send invoice for {client_name} for March'."
-                        # Save intent so follow-up "March" reconstructs to full query
-                        # Do NOT store inferred year — only store confirmed fields.
-                        # Year will come from the user's follow-up reply (e.g. "April 2025").
-                        op_name = "SEND_EMAIL" if send_email else intent_result.get("operation", "invoice")
-                        self._save_last_intent(user_id, operation=op_name, client_name=client_name,
-                                               entity="invoice",
-                                               pending_clarification="month")
-                        # Set awaiting state so the next reply routes to invoice month handler
-                        self.memory.update_user_memory(user_id, {
-                            "awaiting_invoice_month": True,
-                            "pending_invoice_client": client_name,
-                            "pending_invoice_send_email": send_email,
-                        })
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                        # Only prompt the user when month is still unresolved.
+                        # If we auto-picked the single available month above, fall through
+                        # to invoice generation.
+                        if not month_num:
+                            # Save intent so follow-up "March" reconstructs to full query
+                            # Do NOT store inferred year — only store confirmed fields.
+                            op_name = "SEND_EMAIL" if send_email else intent_result.get("operation", "invoice")
+                            self._save_last_intent(user_id, operation=op_name, client_name=client_name,
+                                                   entity="invoice",
+                                                   pending_clarification="month")
+                            # Set awaiting state so the next reply routes to invoice month handler
+                            self.memory.update_user_memory(user_id, {
+                                "awaiting_invoice_month": True,
+                                "pending_invoice_client": client_name,
+                                "pending_invoice_send_email": send_email,
+                            })
+                            self._store_conversation(user_id, message, response)
+                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                     if bill_number:
                         result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=data_user_id)
