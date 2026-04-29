@@ -608,6 +608,8 @@ Return ONLY valid JSON with these keys:
 - "client_name": The production house, agency, or client entity (e.g. "The Good Take", "Leo Burnett") or null
 - "job_description_details": What was done — film type, deliverables, role, duration (e.g. "Master film 30 sec + 4 cutdowns") or null
 - "fees": Numeric amount in integer (e.g. "25k" = 25000, "1.5L" = 150000, "2000" = 2000) or null
+- "poc_name": The point-of-contact person's name at the client (e.g. "Rohan Mehta") or null
+- "poc_email": The point-of-contact email address (e.g. "rohan@studio.com") or null
 - "notes": Any additional info that doesn't fit above, or null
 
 Rules:

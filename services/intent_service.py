@@ -811,6 +811,27 @@ class IntentService:
         msg = message.strip().lower()
         extracted = form.get("values", {})
 
+        # If user reply contains an email or looks like POC info (and POC fields are
+        # missing), try to extract those before/instead of treating as Yes/Edit.
+        _has_email = bool(re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", message))
+        _missing_poc = not extracted.get("poc_name") or not extracted.get("poc_email")
+        if _has_email and _missing_poc:
+            new_data = self.gemini.extract_job_fields(message) or {}
+            updated = False
+            for k in ("poc_name", "poc_email"):
+                if not extracted.get(k) and new_data.get(k):
+                    extracted[k] = new_data[k]
+                    updated = True
+            # Fallback: regex-extract email if Gemini missed it
+            if not extracted.get("poc_email"):
+                _m = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", message)
+                if _m:
+                    extracted["poc_email"] = _m.group(0)
+                    updated = True
+            if updated:
+                # Show the updated card and let the user re-confirm
+                return self._show_smart_capture_confirmation(user_id, extracted)
+
         if msg in ("yes", "y", "save", "confirm", "done", "ok", "okay", "sure"):
             # Save to database
             return self._save_smart_capture_job(user_id, extracted)
@@ -884,6 +905,8 @@ class IntentService:
             "client_name": "client_name",
             "job_description_details": "job_description_details",
             "fees": "fees",
+            "poc_name": "poc_name",
+            "poc_email": "poc_email",
             "notes": "notes",
         }
         for src, dst in field_map.items():
@@ -935,6 +958,8 @@ class IntentService:
             ("job_date", "Date"),
             ("job_description_details", "Details"),
             ("fees", "Fees"),
+            ("poc_name", "POC name"),
+            ("poc_email", "POC email"),
             ("notes", "Notes"),
         ]
         for key, label in field_labels:
@@ -943,6 +968,15 @@ class IntentService:
                 if key == "fees":
                     val = f"₹{val:,}" if isinstance(val, (int, float)) else val
                 lines.append(f"{label}: {val}")
+
+        # Hint if POC info missing — user can include them on confirm reply
+        _missing_poc = []
+        if not extracted.get("poc_name"):
+            _missing_poc.append("POC name")
+        if not extracted.get("poc_email"):
+            _missing_poc.append("POC email")
+        if _missing_poc:
+            lines.append(f"\n(Missing: {', '.join(_missing_poc)} — reply with the details to add, or 'Yes' to save without.)")
 
         lines.append("\nSave this job? (Yes / Edit)")
         response = "\n".join(lines)
