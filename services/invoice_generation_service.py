@@ -7,14 +7,30 @@ from utils.logger import logger
 
 
 def sanitize_pdf_text(text):
+    """Return PDF-safe text.
+
+    1. Replace common Unicode punctuation with ASCII equivalents.
+    2. If the result still contains characters outside the Latin-1 range
+       (e.g. Devanagari, Arabic, CJK), transliterate to ASCII via unidecode
+       so the text remains readable in the PDF rather than showing blank boxes.
+    """
     if text is None:
         return ""
     text = str(text)
     text = text.replace("—", "-")
     text = text.replace("–", "-")
     text = text.replace("₹", "Rs ")
-    text = text.replace("“", '"')
-    text = text.replace("”", '"')
+    text = text.replace("\u201c", '"')
+    text = text.replace("\u201d", '"')
+    # Final guard: transliterate any remaining non-Latin-1 characters
+    try:
+        text.encode("latin-1")          # fast check — raises if outside range
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        try:
+            from unidecode import unidecode
+            text = unidecode(text)
+        except ImportError:
+            text = text.encode("latin-1", errors="replace").decode("latin-1")
     return text
 
 
@@ -38,13 +54,21 @@ class InvoiceGenerationService:
             pdf.add_page()
             pdf.set_auto_page_break(auto=True, margin=15)
 
-            # Optional Unicode font (DejaVu). Place DejaVuSans.ttf in a /fonts directory.
+            # Unicode font (DejaVu) — required for non-Latin names (Hindi, etc.).
+            # fpdf2 >= 2.5 dropped the uni=True kwarg; bold variant registered separately.
             font_family = "Helvetica"
             try:
                 fonts_dir = os.path.join(os.path.dirname(__file__), "..", "fonts")
-                font_path = os.path.join(fonts_dir, "DejaVuSans.ttf")
-                pdf.add_font("DejaVu", "", font_path, uni=True)
+                font_path      = os.path.join(fonts_dir, "DejaVuSans.ttf")
+                font_path_bold = os.path.join(fonts_dir, "DejaVuSans-Bold.ttf")
+                if not os.path.exists(font_path):
+                    raise FileNotFoundError(f"TTF Font file not found: {font_path}")
+                font_path_italic = os.path.join(fonts_dir, "DejaVuSans-Oblique.ttf")
+                pdf.add_font("DejaVu", "",  font_path)
+                pdf.add_font("DejaVu", "B", font_path_bold   if os.path.exists(font_path_bold)   else font_path)
+                pdf.add_font("DejaVu", "I", font_path_italic if os.path.exists(font_path_italic) else font_path)
                 font_family = "DejaVu"
+                logger.info("[INVOICE] Loaded DejaVu Unicode font")
             except Exception as e:
                 logger.warning(f"Could not load DejaVu font, falling back to Helvetica: {e}")
 
