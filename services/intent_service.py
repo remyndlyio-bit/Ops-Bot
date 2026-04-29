@@ -2194,10 +2194,18 @@ class IntentService:
                 intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
                 params = intent_result.get("parameters", {})
                 # If the intent parser asked for clarification, surface that question
-                # instead of falling through and regenerating an invoice with stale params.
+                # — but only when the existing flow can't handle it. Missing month or
+                # client name is handled downstream with richer context (lists available
+                # months, fuzzy-matches typos like 'Samsun' → 'Samsung'), so we let
+                # those fall through. Other clarifications (e.g. "which items to keep")
+                # are surfaced directly to avoid silent invoice regeneration.
                 if intent_result.get("operation") == "NEED_CLARIFICATION":
                     clar_q = (intent_result.get("clarification_question") or "").strip()
-                    if clar_q:
+                    clar_q_lower = clar_q.lower()
+                    _handled_downstream = any(
+                        kw in clar_q_lower for kw in ("month", "year", "client name", "client?", "which client")
+                    )
+                    if clar_q and not _handled_downstream:
                         self._store_conversation(user_id, message, clar_q)
                         return {"operation": "ACTION_TRIGGER", "response": clar_q, "trigger_invoice": False, "invoice_data": {}}
 
