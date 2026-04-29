@@ -2193,6 +2193,14 @@ class IntentService:
                 schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
                 intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
                 params = intent_result.get("parameters", {})
+                # If the intent parser asked for clarification, surface that question
+                # instead of falling through and regenerating an invoice with stale params.
+                if intent_result.get("operation") == "NEED_CLARIFICATION":
+                    clar_q = (intent_result.get("clarification_question") or "").strip()
+                    if clar_q:
+                        self._store_conversation(user_id, message, clar_q)
+                        return {"operation": "ACTION_TRIGGER", "response": clar_q, "trigger_invoice": False, "invoice_data": {}}
+
                 if intent_result.get("operation") != "GEMINI_ERROR":
                     # Email-specific override: if user explicitly mentions sending over email,
                     # treat this as SEND_EMAIL instead of a generic ACTION_TRIGGER.
