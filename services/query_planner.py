@@ -569,6 +569,10 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     for col, val in filters.items():
         if col.startswith("_"):
             continue
+        # isDeleted is already enforced via ("isDeleted" IS NOT TRUE); skip planner-supplied
+        # duplicates that would generate broken SQL (lowercase isdeleted column).
+        if col.lower() == "isdeleted":
+            continue
         where.append(_build_filter_clause(col, val))
     where.extend(_time_range_conditions(plan, dc))
     where_str = " AND ".join(where)
@@ -617,6 +621,10 @@ def _build_update(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     where = [f"user_id = {_sql_quote(user_id)}", '("isDeleted" IS NOT TRUE)']
     for col, val in filters.items():
         if col.startswith("_"):
+            continue
+        # isDeleted is already enforced via ("isDeleted" IS NOT TRUE); skip planner-supplied
+        # duplicates that would generate broken SQL (lowercase isdeleted column).
+        if col.lower() == "isdeleted":
             continue
         where.append(_build_filter_clause(col, val))
     where.extend(_time_range_conditions(plan, dc))
