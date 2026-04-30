@@ -3756,17 +3756,26 @@ class IntentService:
             # Step 1: Get name
             raw_name = message.strip()
 
-            # Detect greetings / small-talk so we don't save "Hi" as the name
+            # Detect greetings / small-talk so we don't save "Hi" as the name.
+            # Tokenize and check if the message is composed only of greeting/filler
+            # tokens — covers "Hello", "Hi!!", "hey hey", "good morning",
+            # "namaste ji", "yo sup" etc.
             _GREETING_WORDS = {
-                "hi", "hello", "hey", "hii", "hiii", "yo", "sup",
-                "hola", "howdy", "morning", "evening", "afternoon",
-                "good morning", "good evening", "good afternoon",
-                "whats up", "what's up", "wassup", "namaste",
+                "hi", "hello", "helo", "hey", "heyy", "heyyy", "hii", "hiii",
+                "yo", "sup", "hola", "howdy", "morning", "evening", "afternoon",
+                "good", "whats", "what's", "up", "wassup", "namaste", "namaskar",
+                "salaam", "salam", "hai", "haii", "ji", "bhai", "dost", "friend",
+                "there", "everyone", "all",
             }
-            if raw_name.lower().rstrip("!?.,:; ") in _GREETING_WORDS:
-                response = (
-                    "Hey there! 👋 Before we begin, what's your name?"
-                )
+            _stripped = raw_name.lower().strip("!?.,:;'\"() ")
+            _tokens = re.findall(r"[a-z']+", _stripped)
+            _is_greeting_only = bool(_tokens) and all(t in _GREETING_WORDS for t in _tokens)
+            # Also catch the original exact-phrase forms (multi-word lookups)
+            if _stripped in {"good morning", "good evening", "good afternoon",
+                             "whats up", "what's up"}:
+                _is_greeting_only = True
+            if _is_greeting_only:
+                response = "Hey there! 👋 Before we begin, what's your name?"
                 self._store_conversation(user_id, message, response)
                 return {"operation": "onboarding_name_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
