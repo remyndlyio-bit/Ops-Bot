@@ -2823,12 +2823,59 @@ class IntentService:
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-                    # Default path: generate PDF and send via WhatsApp/Telegram (existing behavior)
+                    # Default path: generate PDF, deliver via WhatsApp/Telegram, then
+                    # automatically offer to email it to the POC. Two cases:
+                    #   1) POC email on file  → ask "Should I email it to X?"
+                    #   2) No POC email       → ask the user to provide one
                     trigger_invoice = True
                     self._save_last_intent(user_id, operation="generate_invoice",
                                            client_name=display_client, month=month_display,
                                            year=year_val, entity="invoice")
-                    response = f"Confirmed. I've found the record for {display_client}. Generating the invoice now."
+
+                    _row_ids = [r["id"] for r in rows if r.get("id")]
+                    _auto_poc_email = ""
+                    for _r in rows:
+                        _e = (str(_r.get("poc_email") or "")).strip()
+                        if _e and self._is_valid_email(_e):
+                            _auto_poc_email = _e
+                            break
+
+                    if _auto_poc_email:
+                        self.memory.update_user_memory(user_id, {
+                            "awaiting_send_confirmation": True,
+                            "pending_send_invoice": {
+                                "client_name": display_client,
+                                "month": month_display,
+                                "year": year_val,
+                                "poc_email": _auto_poc_email,
+                                "row_ids": _row_ids,
+                                "poc_name": _inv_poc_name,
+                                "invoicer_name": _inv_invoicer_name,
+                            },
+                        })
+                        response = (
+                            f"I've generated the invoice for {display_client} ({month_display}).\n\n"
+                            f"Should I email it to {_auto_poc_email}?\n"
+                            f"Reply 'Yes' to send or 'No' to skip."
+                        )
+                    else:
+                        self.memory.update_user_memory(user_id, {
+                            "awaiting_poc_email": True,
+                            "pending_send_invoice": {
+                                "client_name": display_client,
+                                "month": month_display,
+                                "year": year_val,
+                                "row_ids": _row_ids,
+                                "poc_name": _inv_poc_name,
+                                "invoicer_name": _inv_invoicer_name,
+                            },
+                        })
+                        response = (
+                            f"I've generated the invoice for {display_client} ({month_display}).\n\n"
+                            f"There's no contact email on file. Send the client's email and I'll deliver the invoice "
+                            f"(e.g. client@agency.com), or type 'skip' to keep it offline."
+                        )
+
                     self._store_conversation(user_id, message, response)
                     return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
 
