@@ -3074,12 +3074,26 @@ class IntentService:
                             return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                     elif len(_pre_rows) > 1:
-                        # Genuinely multiple — show real numbered list
+                        # Genuinely multiple — show real numbered list.
+                        # Inline values into SET (no %s placeholders) — execute_sql
+                        # doesn't bind params here, so unbound %s breaks Postgres.
+                        _set_clauses_disambig = ", ".join(
+                            f"{col} = '{str(val).replace(chr(39), chr(39)*2)}'"
+                            for col, val in _plan_updates.items()
+                        )
+                        _set_clauses_disambig = re.sub(
+                            r"\bpaid\s*=\s*'(?:true|1|yes)'", "paid = 'Yes'",
+                            _set_clauses_disambig, flags=re.IGNORECASE,
+                        )
+                        _set_clauses_disambig = re.sub(
+                            r"\bpaid\s*=\s*'(?:false|0|no)'", "paid = 'No'",
+                            _set_clauses_disambig, flags=re.IGNORECASE,
+                        )
                         self.memory.update_user_memory(user_id, {
                             "pending_disambiguation": {
                                 "sql": (
                                     f"UPDATE public.job_entries "
-                                    f"SET {', '.join(f'{c} = %s' for c in _plan_updates)} "
+                                    f"SET {_set_clauses_disambig} "
                                     f"WHERE id = '{{id}}' RETURNING *"
                                 ),
                                 "rows": _pre_rows,
