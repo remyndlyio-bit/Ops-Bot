@@ -600,6 +600,25 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     where.extend(_time_range_conditions(plan, dc))
     where_str = " AND ".join(where)
 
+    # When filters carry semantic meaning the synthesizer needs (e.g. paid='Yes',
+    # invoice_date IS NOT NULL), and the SELECT projection drops those columns,
+    # the AI sees a bare list and contradicts itself ("I can only see names, I
+    # don't know which paid"). Append filter columns to the projection so the
+    # payload preserves the filter's meaning. Skips SELECT * (already has all
+    # columns) and aggregate selects (would break GROUP BY semantics).
+    _CONTEXT_FILTER_COLS = {"paid", "invoice_date", "first_reminder_sent",
+                            "second_reminder_sent", "third_reminder_sent"}
+    _is_aggregate_select = (
+        "COUNT(" in select.upper() or "SUM(" in select.upper()
+        or "AVG(" in select.upper() or "MIN(" in select.upper()
+        or "MAX(" in select.upper()
+    )
+    if select.strip() != "*" and not _is_aggregate_select and not group_by:
+        _existing_lower = select.lower()
+        for _fc in filters:
+            if _fc in _CONTEXT_FILTER_COLS and _fc.lower() not in _existing_lower:
+                select = f"{select}, {_fc}"
+
     sql = f"SELECT {select} FROM public.job_entries WHERE {where_str}"
 
     if group_by:
