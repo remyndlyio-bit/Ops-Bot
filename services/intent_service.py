@@ -2433,7 +2433,7 @@ class IntentService:
                         safe_uid = data_user_id.replace("'", "''")
                         safe_cn = client_name.replace("'", "''")
                         check_sql = (
-                            f"SELECT DISTINCT client_name FROM public.job_entries "
+                            f"SELECT DISTINCT client_name, brand_name, production_house FROM public.job_entries "
                             f"WHERE user_id = '{safe_uid}' "
                             f"AND (client_name ILIKE '%{safe_cn}%' OR brand_name ILIKE '%{safe_cn}%' OR production_house ILIKE '%{safe_cn}%') "
                             f"AND (\"isDeleted\" IS NOT TRUE)"
@@ -2442,12 +2442,21 @@ class IntentService:
                         # Fallback if production_house column doesn't exist
                         if not check_result.get("ok") and "production_house" in str(check_result.get("error", "")):
                             check_sql = (
-                                f"SELECT DISTINCT client_name FROM public.job_entries "
+                                f"SELECT DISTINCT client_name, brand_name FROM public.job_entries "
                                 f"WHERE user_id = '{safe_uid}' AND (client_name ILIKE '%{safe_cn}%' OR brand_name ILIKE '%{safe_cn}%') "
                                 f"AND (\"isDeleted\" IS NOT TRUE)"
                             )
                             check_result = self.supabase.execute_sql(check_sql)
-                        matching_clients = [r["client_name"] for r in (check_result.get("rows") or []) if r.get("client_name")]
+                        # A row matches if ANY of client_name / brand_name / production_house
+                        # is non-null — jobs added with only a brand (e.g. '+Sunrich ...')
+                        # have client_name=NULL but brand_name='Sunrich' and must still be found.
+                        matching_clients = []
+                        for r in (check_result.get("rows") or []):
+                            for _f in ("client_name", "brand_name", "production_house"):
+                                _v = (r.get(_f) or "").strip() if r.get(_f) else ""
+                                if _v:
+                                    matching_clients.append(_v)
+                                    break
                         if not matching_clients:
                             # No matching client — show available clients and stop
                             all_clients_sql = (
