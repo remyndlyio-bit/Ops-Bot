@@ -1029,7 +1029,9 @@ class IntentService:
                 "Date: 10 Feb\n"
                 "Job: Master film 30 sec + 4 cutdowns\n"
                 "Client: The Good Take\n"
-                "Fees: 25k"
+                "Fees: 25k\n"
+                "POC: Rohan Mehta\n"
+                "POC Email: rohan@thegoodtake.com (optional)"
             )
             self._store_conversation(user_id, message, response)
             return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -1059,24 +1061,33 @@ class IntentService:
                 "Date: 10 Feb\n"
                 "Job: Master film 30 sec + 4 cutdowns\n"
                 "Client: The Good Take\n"
-                "Fees: 25k"
+                "Fees: 25k\n"
+                "POC: Rohan Mehta\n"
+                "POC Email: rohan@thegoodtake.com (optional)"
             )
             self._store_conversation(user_id, content, response)
             return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Check required fields
-        required = ["brand_name", "job_date", "job_description_details"]
+        # Check required fields — POC name is now mandatory so invoices are always
+        # addressed to a person, not a brand.
+        required = ["brand_name", "job_date", "job_description_details", "poc_name"]
         missing = [f for f in required if not extracted.get(f)]
 
         if missing:
-            field_labels = {"brand_name": "Brand", "job_date": "Date", "job_description_details": "Job details"}
+            field_labels = {
+                "brand_name": "Brand",
+                "job_date": "Date",
+                "job_description_details": "Job details",
+                "poc_name": "POC name",
+            }
             missing_str = ", ".join(field_labels.get(f, f) for f in missing)
 
             # Show what we got so far + ask for missing
             lines = ["I got some of the details:\n"]
             field_display = [
                 ("brand_name", "Brand"), ("client_name", "Client"), ("job_date", "Date"),
-                ("job_description_details", "Details"), ("fees", "Fees"), ("notes", "Notes"),
+                ("job_description_details", "Details"), ("fees", "Fees"),
+                ("poc_name", "POC name"), ("poc_email", "POC email"), ("notes", "Notes"),
             ]
             for key, label in field_display:
                 val = extracted.get(key)
