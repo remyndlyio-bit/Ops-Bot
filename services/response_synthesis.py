@@ -84,9 +84,21 @@ def build_clean_payload(rows: List[Dict], operation: str = "select") -> Dict[str
     if len(cleaned) == 1:
         row = cleaned[0]
         keys = [str(k).lower() for k in row.keys()]
-        # Count/aggregate result
-        if len(row) == 1 or (len(row) <= 2 and any(c in keys for c in ("count", "sum", "total"))):
+        # Aggregate result — only when the column actually looks like an aggregate.
+        # A bare single-field row (e.g. {"job_description": "dubbing"}) is a field
+        # answer, NOT an aggregate; classifying it as aggregate confuses the
+        # synthesizer into treating the value as a count/total.
+        _AGG_KEYS = ("count", "sum", "total", "avg", "average", "min", "max")
+        if any(c in keys for c in _AGG_KEYS):
             return {"type": "aggregate", "data": row}
+        if len(row) == 1:
+            field_name = list(row.keys())[0]
+            return {
+                "type": "field_answer",
+                "field_name": field_name,
+                "value": row[field_name],
+                "related_context": {},
+            }
         return {"type": "job_summary", "data": row}
 
     return {"type": "multi_record", "data": cleaned[:20], "total_count": len(rows)}
