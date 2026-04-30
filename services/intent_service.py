@@ -3169,6 +3169,52 @@ class IntentService:
                 return f"(client_name ILIKE '%{val}%' OR brand_name ILIKE '%{val}%' OR production_house ILIKE '%{val}%')"
             sql = re.sub(r"\bclient_name\s+ILIKE\s+'([^']*)'", _expand_client_ilike, sql, flags=re.IGNORECASE)
 
+            # Preserve filter context columns in the projection.
+            # When SQL filters by a semantic column (paid, invoice_date, *_reminder_sent)
+            # but the SELECT drops it, the synthesizer sees a bare list and contradicts
+            # itself ("I don't know which paid"). Append the filter column to SELECT
+            # so the payload carries the meaning. This catches both planner SQL and
+            # the direct generate_sql fallback (planner didn't catch the latter).
+            try:
+                _CONTEXT_COLS = ["paid", "invoice_date",
+                                 "first_reminder_sent", "second_reminder_sent",
+                                 "third_reminder_sent"]
+                _select_match = re.match(
+                    r"^\s*SELECT\s+(.+?)\s+FROM\s+",
+                    sql, flags=re.IGNORECASE | re.DOTALL,
+                )
+                _where_match = re.search(
+                    r"\bWHERE\s+(.+?)(?=\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b|\bHAVING\b|$)",
+                    sql, flags=re.IGNORECASE | re.DOTALL,
+                )
+                if _select_match and _where_match:
+                    _proj = _select_match.group(1)
+                    _where_clause = _where_match.group(1)
+                    _proj_lower = _proj.lower()
+                    _is_star = _proj.strip() == "*"
+                    _is_agg = bool(re.search(r"\b(COUNT|SUM|AVG|MIN|MAX)\s*\(", _proj, re.IGNORECASE))
+                    _has_group_by = bool(re.search(r"\bGROUP\s+BY\b", sql, re.IGNORECASE))
+                    if not _is_star and not _is_agg:
+                        _to_add = []
+                        for _col in _CONTEXT_COLS:
+                            if re.search(rf"\b{_col}\b", _where_clause, re.IGNORECASE) \
+                               and not re.search(rf"\b{_col}\b", _proj, re.IGNORECASE):
+                                # In GROUP BY queries, wrap with MAX() so the column
+                                # is aggregate-safe. Since the WHERE already filters
+                                # to a single semantic state (e.g. paid='Yes'),
+                                # MAX(paid) returns that state per group.
+                                if _has_group_by:
+                                    _to_add.append(f"MAX({_col}) AS {_col}")
+                                else:
+                                    _to_add.append(_col)
+                        if _to_add:
+                            _new_proj = _proj.rstrip() + ", " + ", ".join(_to_add)
+                            sql = sql.replace(_select_match.group(0),
+                                              f"SELECT {_new_proj} FROM ", 1)
+                            logger.info(f"[CONTEXT_COLS] Appended {_to_add} to SELECT for synthesizer context")
+            except Exception as _e:
+                logger.warning(f"[CONTEXT_COLS] Rewrite failed (non-fatal): {_e}")
+
             valid, sanitized_sql, err = validate_sql(sql)
             if not valid:
                 logger.warning(f"[QUERY_FAIL] SQL validation failed for user {user_id}: {err} | SQL: {sql[:200]}")
