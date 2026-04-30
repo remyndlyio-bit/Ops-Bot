@@ -3694,9 +3694,33 @@ class IntentService:
         return self._apply_name_change(user_id, message, new_name.title())
 
     def _apply_name_change(self, user_id: str, message: str, new_name: str) -> Dict:
-        """Apply the name change to user_profiles."""
+        """Apply the name change to user_profiles.
+
+        Also syncs preferences.invoice_name so the new name flows through to
+        the invoice header (the PDF reads invoice_name first, falling back to
+        name — without this sync, a stale invoice_name silently overrides the
+        update).
+        """
         platform = "telegram" if user_id.isdigit() else "whatsapp"
-        result = self.supabase.upsert_user_profile(user_id, platform, {"name": new_name})
+
+        # Merge new_name into preferences so invoice header picks it up too
+        prefs = {}
+        existing = self.supabase.get_user_profile(user_id)
+        if existing.get("ok") and existing.get("data"):
+            _p = existing["data"].get("preferences") or {}
+            if isinstance(_p, str):
+                try:
+                    prefs = json.loads(_p)
+                except (json.JSONDecodeError, TypeError):
+                    prefs = {}
+            elif isinstance(_p, dict):
+                prefs = _p
+        prefs["invoice_name"] = new_name
+
+        result = self.supabase.upsert_user_profile(
+            user_id, platform,
+            {"name": new_name, "preferences": json.dumps(prefs)},
+        )
         if result.get("ok"):
             response = f"Done! Your name has been updated to '{new_name}'. ✅"
         else:
