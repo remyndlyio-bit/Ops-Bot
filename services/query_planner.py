@@ -542,12 +542,33 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     dc = date_column or "job_date"
     filters = plan.get("filters") or {}
 
+    # When the user groups/selects by "client_name", many rows in this DB are
+    # brand-only entries (client_name NULL, brand_name set). Coalesce so they
+    # surface as their own client identity instead of vanishing into a NULL
+    # group.
+    _CLIENT_IDENTITY_EXPR = (
+        "COALESCE(NULLIF(client_name, ''), "
+        "NULLIF(brand_name, ''), "
+        "NULLIF(production_house, ''))"
+    )
+
+    def _client_expr(col: str) -> str:
+        return _CLIENT_IDENTITY_EXPR if col == "client_name" else col
+
+    group_by_expr = _client_expr(group_by) if group_by else None
+    group_by_alias = "client_name" if group_by == "client_name" else group_by
+
     # SELECT clause
     if group_by:
+        _gb_select = (
+            f"{group_by_expr} AS {group_by_alias}"
+            if group_by_expr != group_by_alias
+            else group_by
+        )
         if metric and metric not in ("value", "count") and column:
-            select = f"{group_by}, {metric.upper()}({column}) AS result"
+            select = f"{_gb_select}, {metric.upper()}({column}) AS result"
         else:
-            select = f"{group_by}, COUNT(*) AS result"
+            select = f"{_gb_select}, COUNT(*) AS result"
     elif metric == "count":
         select = "COUNT(*) AS result"
     elif metric in ("sum", "avg", "min", "max") and column:
@@ -559,6 +580,8 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
         # full details" even though the row exists.
         if limit == 1 and not group_by:
             select = "*"
+        elif column == "client_name":
+            select = f"{_CLIENT_IDENTITY_EXPR} AS client_name"
         else:
             select = column
     else:
@@ -580,7 +603,10 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
     sql = f"SELECT {select} FROM public.job_entries WHERE {where_str}"
 
     if group_by:
-        sql += f" GROUP BY {group_by}"
+        sql += f" GROUP BY {group_by_expr}"
+        # Drop NULL identity groups (rows with no client/brand/production house)
+        if group_by == "client_name":
+            sql += f" HAVING {_CLIENT_IDENTITY_EXPR} IS NOT NULL"
 
     if order:
         # For metric=value (returning a column), ordering should be by date for
