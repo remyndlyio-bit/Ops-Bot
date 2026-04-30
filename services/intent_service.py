@@ -2425,19 +2425,39 @@ class IntentService:
                     if client_name:
                         safe_uid = data_user_id.replace("'", "''")
                         clients_sql = (
-                            f"SELECT DISTINCT client_name FROM public.job_entries "
-                            f"WHERE user_id = '{safe_uid}' AND client_name IS NOT NULL AND (\"isDeleted\" IS NOT TRUE)"
+                            f"SELECT DISTINCT client_name, brand_name, production_house FROM public.job_entries "
+                            f"WHERE user_id = '{safe_uid}' AND (\"isDeleted\" IS NOT TRUE)"
                         )
                         clients_result = self.supabase.execute_sql(clients_sql)
                         if clients_result.get("ok"):
-                            db_clients = [r["client_name"] for r in (clients_result.get("rows") or []) if r.get("client_name")]
+                            db_clients = []
+                            for r in (clients_result.get("rows") or []):
+                                for _f in ("client_name", "brand_name", "production_house"):
+                                    _v = (r.get(_f) or "").strip() if r.get(_f) else ""
+                                    if _v and _v.lower() != "none":
+                                        db_clients.append(_v)
+                            # De-duplicate (case-insensitive)
+                            _seen = set()
+                            db_clients = [x for x in db_clients if not (x.lower() in _seen or _seen.add(x.lower()))]
+
+                            cn_lower = client_name.lower()
                             # Exact match first
-                            exact = [c for c in db_clients if c.lower() == client_name.lower()]
+                            exact = [c for c in db_clients if c.lower() == cn_lower]
                             if exact:
                                 client_name = exact[0]
                             else:
-                                # Partial match: DB client contains extracted name or vice versa
-                                partial = [c for c in db_clients if client_name.lower() in c.lower() or c.lower() in client_name.lower()]
+                                # SAFETY: short queries (<= 3 chars like "MS", "AB") must
+                                # NOT do raw substring matching — "ms" appears inside
+                                # "samsung", which is dangerous. Require a word-boundary
+                                # match against DB candidates for short queries.
+                                if len(cn_lower) <= 3:
+                                    _pat = re.compile(rf"\b{re.escape(cn_lower)}\b")
+                                    partial = [c for c in db_clients if _pat.search(c.lower())]
+                                else:
+                                    partial = [
+                                        c for c in db_clients
+                                        if cn_lower in c.lower() or c.lower() in cn_lower
+                                    ]
                                 if len(partial) == 1:
                                     logger.info(f"[INVOICE] Fuzzy matched '{client_name}' → '{partial[0]}'")
                                     client_name = partial[0]
