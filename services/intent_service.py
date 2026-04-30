@@ -120,6 +120,13 @@ class IntentService:
         ],
     }
 
+    @staticmethod
+    def _is_valid_email(email: str) -> bool:
+        """Strict email format check (single token, local@domain.tld, no spaces)."""
+        if not email:
+            return False
+        return bool(re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', str(email).strip()))
+
     def __init__(self):
         self.gemini = GeminiService()
         self.email = ResendEmailService()
@@ -813,21 +820,38 @@ class IntentService:
 
         # If user reply contains an email or looks like POC info (and POC fields are
         # missing), try to extract those before/instead of treating as Yes/Edit.
-        _has_email = bool(re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", message))
+        _has_at = "@" in message
         _missing_poc = not extracted.get("poc_name") or not extracted.get("poc_email")
-        if _has_email and _missing_poc:
+        if _has_at and _missing_poc:
             new_data = self.gemini.extract_job_fields(message) or {}
+            # Validate any email Gemini extracted
+            if new_data.get("poc_email") and not self._is_valid_email(new_data.get("poc_email")):
+                new_data["poc_email"] = None
             updated = False
             for k in ("poc_name", "poc_email"):
                 if not extracted.get(k) and new_data.get(k):
                     extracted[k] = new_data[k]
                     updated = True
-            # Fallback: regex-extract email if Gemini missed it
+            # Fallback: regex-extract email if Gemini missed it — but only accept if valid
             if not extracted.get("poc_email"):
                 _m = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", message)
-                if _m:
+                if _m and self._is_valid_email(_m.group(0)):
                     extracted["poc_email"] = _m.group(0)
                     updated = True
+
+            # If user clearly tried to send an email but it's malformed, ask again
+            if not extracted.get("poc_email"):
+                _candidate = re.search(r"\S*@\S*", message)
+                _bad = _candidate.group(0) if _candidate else message.strip()
+                response = (
+                    f"'{_bad}' doesn't look like a valid email. "
+                    f"Please send a valid email (e.g. name@company.com) or reply 'Yes' to save without one."
+                )
+                form["values"] = extracted
+                self.memory.start_form(user_id, [], form_override=form)
+                self._store_conversation(user_id, message, response)
+                return {"operation": "smart_capture_invalid_email", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             if updated:
                 # Show the updated card and let the user re-confirm
                 return self._show_smart_capture_confirmation(user_id, extracted)
@@ -872,10 +896,31 @@ class IntentService:
 
         # Try to extract fields from the user's response
         new_data = self.gemini.extract_job_fields(message)
+        invalid_email_attempt = None
         if new_data:
+            # Validate poc_email before accepting
+            if new_data.get("poc_email") and not self._is_valid_email(new_data.get("poc_email")):
+                invalid_email_attempt = new_data.get("poc_email")
+                new_data["poc_email"] = None
             for k, v in new_data.items():
                 if v is not None:
                     extracted[k] = v
+
+        # Also catch a bare email-looking token the user typed even if Gemini missed it
+        if not invalid_email_attempt:
+            _bare = message.strip()
+            if "@" in _bare and " " not in _bare and not self._is_valid_email(_bare):
+                invalid_email_attempt = _bare
+
+        if invalid_email_attempt:
+            response = (
+                f"'{invalid_email_attempt}' doesn't look like a valid email. "
+                f"Please send a valid email (e.g. name@company.com) or skip it for now."
+            )
+            form["values"] = extracted
+            self.memory.start_form(user_id, [], form_override=form)
+            self._store_conversation(user_id, message, response)
+            return {"operation": "smart_capture_invalid_email", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         # Check if still missing required fields
         still_missing = [f for f in missing if not extracted.get(f)]
@@ -1045,6 +1090,11 @@ class IntentService:
         logger.info(f"[SMART_CAPTURE] Extracting fields from: '{content[:200]}'")
         extracted = self.gemini.extract_job_fields(content)
         logger.info(f"[SMART_CAPTURE] Result: {extracted}")
+
+        # Validate poc_email format — drop if malformed so we re-prompt.
+        if extracted and extracted.get("poc_email") and not self._is_valid_email(extracted.get("poc_email")):
+            logger.info(f"[SMART_CAPTURE] Dropping invalid poc_email: {extracted.get('poc_email')!r}")
+            extracted["poc_email"] = None
 
         # Treat all-null extraction as failure
         if extracted and all(v is None for v in extracted.values()):
