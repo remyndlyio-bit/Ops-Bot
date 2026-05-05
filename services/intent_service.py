@@ -2034,7 +2034,11 @@ class IntentService:
             msg_stripped = message.strip()
             add_job_triggers = ["add job", "add a job", "add new job", "add a new job",
                                "new job", "log a job", "log job", "record job", "record a job",
-                               "create job", "create a job", "create a new job"]
+                               "create job", "create a job", "create a new job",
+                               "add client", "add a client", "add new client", "add a new client",
+                               "new client", "log a client", "log client", "record client", "record a client",
+                               "create client", "create a client", "create a new client",
+                               "add entry", "add an entry", "add a new entry", "new entry"]
             is_add_job = any(t in msg_stripped.lower() for t in add_job_triggers)
             is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
             if is_add_job or is_plus:
