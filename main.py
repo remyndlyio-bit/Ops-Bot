@@ -451,11 +451,14 @@ async def _handle_bot_message(
 async def whatsapp_webhook(
     background_tasks: BackgroundTasks,
     Body: str = Form(...),
-    From: str = Form(...)
+    From: str = Form(...),
+    MessageSid: str = Form(None),
 ):
     """Twilio WhatsApp Webhook — delegates to unified handler."""
     try:
         logger.info(f"[WHATSAPP] Received from {From}: {Body[:120]}")
+        if MessageSid:
+            background_tasks.add_task(whatsapp_service.send_typing_indicator, MessageSid)
         await _handle_bot_message(
             user_id=From, message=Body, platform="whatsapp",
             background_tasks=background_tasks,

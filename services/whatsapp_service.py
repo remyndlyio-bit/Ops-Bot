@@ -1,5 +1,7 @@
 from twilio.rest import Client
 import os
+import requests
+from requests.auth import HTTPBasicAuth
 from utils.logger import logger
 
 class WhatsAppService:
@@ -38,6 +40,24 @@ class WhatsAppService:
         except Exception as e:
             logger.error(f"Failed to send WhatsApp message: {e}")
             return None
+
+    def send_typing_indicator(self, inbound_message_sid: str):
+        """
+        Trigger a 'typing…' indicator in the user's WhatsApp client.
+        Twilio also marks the inbound message as read. Indicator clears on next
+        outbound message or after 25s. Beta endpoint, not in Twilio Python SDK.
+        """
+        if not (self.account_sid and self.auth_token and inbound_message_sid):
+            return
+        try:
+            requests.post(
+                "https://messaging.twilio.com/v2/Indicators/Typing.json",
+                auth=HTTPBasicAuth(self.account_sid, self.auth_token),
+                data={"messageId": inbound_message_sid, "channel": "whatsapp"},
+                timeout=3,
+            )
+        except Exception as e:
+            logger.warning(f"[WHATSAPP] typing indicator failed: {e}")
 
     def send_media_message(self, to_number: str, body: str, media_url: str):
         """
