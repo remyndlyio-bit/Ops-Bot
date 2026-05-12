@@ -503,6 +503,154 @@ class IntentService:
             lines.append(f"... and {len(rows) - 20} more.")
         return "\n".join(lines)
 
+    # Whitelist of columns the modify flow is allowed to touch.
+    _MODIFY_ALLOWED_FIELDS = {
+        "fees", "paid", "client_name", "brand_name",
+        "job_description_details", "invoice_date", "poc_email",
+        "poc_name", "deadline_date", "job_date", "production_house",
+    }
+    _MODIFY_FIELD_ALIASES = {
+        "fee": "fees", "amount": "fees", "price": "fees", "cost": "fees",
+        "payment_status": "paid", "payment": "paid", "status": "paid",
+        "client": "client_name", "brand": "brand_name",
+        "description": "job_description_details", "details": "job_description_details",
+        "job_description": "job_description_details",
+        "billing_date": "invoice_date", "bill_date": "invoice_date",
+        "email": "poc_email", "contact_email": "poc_email",
+        "poc": "poc_name", "contact": "poc_name", "contact_person": "poc_name",
+        "deadline": "deadline_date", "due_date": "deadline_date",
+        "date": "job_date",
+    }
+
+    def _normalize_modify_field(self, raw: str) -> Optional[str]:
+        if not raw:
+            return None
+        k = str(raw).strip().lower().replace(" ", "_")
+        k = self._MODIFY_FIELD_ALIASES.get(k, k)
+        return k if k in self._MODIFY_ALLOWED_FIELDS else None
+
+    def _handle_modify_intent(self, user_id: str, message: str, user_mem: Dict) -> Optional[Dict]:
+        """
+        B → A modify flow. Extract field+value via Gemini; if either is missing,
+        ask a clarifying question. Apply via update_job_entry_field with whitelist.
+        Returns response dict on success, or None to fall through.
+        """
+        import re as _re
+        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+        last_row = ctx.get("last_row_data") or {}
+
+        awaiting = user_mem.get("awaiting_modify_field")
+        # Carry forward a pinned row_id if we already asked which row to change.
+        pinned_row_id = user_mem.get("modify_row_id") or last_row.get("id")
+
+        parsed = self.gemini.extract_modify_intent(message, last_row if last_row else None)
+        if not parsed:
+            parsed = {}
+
+        field = self._normalize_modify_field(parsed.get("field"))
+        value = parsed.get("value")
+        client_filter = parsed.get("client_filter") or ""
+        bill_filter = parsed.get("bill_no_filter") or ""
+
+        # No field/value parsed — ask
+        if not field or value is None or str(value).strip() == "":
+            # If we have a row in context, ask scoped to it.
+            if pinned_row_id:
+                _client = last_row.get("client_name") or last_row.get("brand_name") or "this job"
+                resp = (
+                    f"What would you like to change about {_client}? "
+                    "Reply like: `fee: 25000`, `paid: yes`, `contact email: x@y.com`."
+                )
+                self.memory.update_user_memory(user_id, {
+                    "awaiting_modify_field": True,
+                    "modify_row_id": pinned_row_id,
+                })
+                self._store_conversation(user_id, message, resp)
+                return {"operation": "modify_prompt", "response": resp, "trigger_invoice": False, "invoice_data": {}}
+            # No context — let the normal pipeline have a go
+            return None
+
+        # Resolve target row id
+        target_id = None
+        if not client_filter and not bill_filter and pinned_row_id:
+            target_id = pinned_row_id
+        else:
+            # Look up by filter
+            where = []
+            _profile = self.supabase.get_user_profile(user_id) or {}
+            data_user_id = self._resolve_data_user_id(user_id, _profile.get("data", {}))
+            params_user = str(data_user_id).replace("'", "''")
+            if bill_filter:
+                where.append(f"bill_no ILIKE '{str(bill_filter).replace(chr(39), chr(39)*2)}'")
+            if client_filter:
+                cf = str(client_filter).replace("'", "''")
+                where.append(f"(client_name ILIKE '%{cf}%' OR brand_name ILIKE '%{cf}%' OR production_house ILIKE '%{cf}%')")
+            where_clause = " AND ".join(where) if where else "TRUE"
+            sql = (
+                f"SELECT id, client_name, brand_name, bill_no, fees FROM public.job_entries "
+                f"WHERE user_id = '{params_user}' AND ({where_clause}) "
+                f"ORDER BY created_at DESC LIMIT 5"
+            )
+            res = self.supabase.execute_sql(sql)
+            rows = res.get("rows", []) if res.get("ok") else []
+            if len(rows) == 0:
+                resp = f"I couldn't find a job matching that. Tell me the client name or bill number."
+                self._store_conversation(user_id, message, resp)
+                return {"operation": "modify_no_match", "response": resp, "trigger_invoice": False, "invoice_data": {}}
+            if len(rows) > 1:
+                lines = ["Multiple matches — which one?"]
+                for i, r in enumerate(rows, 1):
+                    lines.append(f"{i}. {r.get('client_name') or r.get('brand_name') or '—'} · bill {r.get('bill_no') or '—'} · ₹{r.get('fees') or '—'}")
+                resp = "\n".join(lines)
+                # Store pending disambiguation so user can reply with a number
+                self.memory.update_user_memory(user_id, {
+                    "pending_disambiguation": {
+                        "type": "modify",
+                        "rows": rows,
+                        "field": field,
+                        "value": value,
+                    },
+                    "awaiting_modify_field": False,
+                })
+                self._store_conversation(user_id, message, resp)
+                return {"operation": "modify_disambiguate", "response": resp, "trigger_invoice": False, "invoke_data": {}}
+            target_id = rows[0]["id"]
+
+        # Normalize value
+        if field == "paid":
+            sv = str(value).strip().lower()
+            value = "Yes" if sv in ("yes", "true", "1", "paid", "y") else "No"
+        elif field == "fees":
+            try:
+                value = int(float(str(value).replace(",", "").replace("₹", "").strip()))
+            except (ValueError, TypeError):
+                resp = f"I couldn't parse '{value}' as a fee amount. Try a number like 25000."
+                self._store_conversation(user_id, message, resp)
+                return {"operation": "modify_bad_value", "response": resp, "trigger_invoice": False, "invoice_data": {}}
+
+        # Apply
+        result = self.supabase.update_job_entry_field(target_id, field, value)
+        # Clear awaiting state regardless
+        self.memory.update_user_memory(user_id, {
+            "awaiting_modify_field": False,
+            "modify_row_id": None,
+        })
+        if not result.get("ok"):
+            resp = f"Update failed: {result.get('error', 'unknown error')}"
+            self._store_conversation(user_id, message, resp)
+            return {"operation": "modify_failed", "response": resp, "trigger_invoice": False, "invoice_data": {}}
+
+        # Refresh context with the updated row
+        updated_row = result.get("row") or {}
+        if updated_row:
+            self._update_sql_context(user_id, [updated_row])
+
+        _label = self._MODIFY_FIELD_ALIASES.get(field, field).replace("_", " ")
+        _disp_val = f"₹{value:,}" if field == "fees" else str(value)
+        resp = f"✅ Updated {_label} to {_disp_val}."
+        self._store_conversation(user_id, message, resp)
+        return {"operation": "modify_success", "response": resp, "trigger_invoice": False, "invoice_data": {}}
+
     def _update_sql_context(self, user_id: str, rows: List[Dict]):
         """Store first result row for follow-up questions (same shape as USCF context)."""
         if not rows:
@@ -2039,6 +2187,24 @@ class IntentService:
                     self._store_conversation(user_id, message, response)
                     return {"operation": "compound_declined", "response": response, "trigger_invoice": False, "invoice_data": {}}
                 # else: user said something unrelated — fall through to normal processing
+
+            # 0a2. Modify / update / change a job — AI-extracted update intent
+            #      Triggers: explicit modify verb in the message, OR the user is
+            #      currently in a "what field do you want to change?" follow-up.
+            _MODIFY_TRIGGERS = (
+                "modify ", "modify\n", "update ", "update\n", "change ", "change\n",
+                "edit ", "edit\n", "set ", "mark ",
+            )
+            _MODIFY_EQUALS = ("modify", "update", "change", "edit")
+            _msg_l = message.strip().lower()
+            _has_modify_verb = any(_msg_l.startswith(t) for t in _MODIFY_TRIGGERS) or _msg_l in _MODIFY_EQUALS
+            _awaiting_modify = bool(user_mem.get("awaiting_modify_field"))
+            if _has_modify_verb or _awaiting_modify:
+                _resp = self._handle_modify_intent(user_id, message, user_mem)
+                if _resp is not None:
+                    return _resp
+                # else: fall through (extraction failed AND no row context — let
+                # normal pipeline handle it; better than dead-ending here).
 
             # 0b. Check for "add job" / "+" trigger → AI Smart Capture
             msg_stripped = message.strip()

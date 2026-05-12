@@ -664,6 +664,64 @@ JSON:"""
             logger.error(f"Response Generation failed: {e}")
             return backend_result or fallback
 
+    def extract_modify_intent(self, message: str, last_row: Optional[Dict] = None) -> Optional[Dict]:
+        """
+        Extract update intent from a free-form message like "change Spotify fee to 25000"
+        or "mark Garnier as paid". Returns dict with keys:
+          - field:  one of [fees, paid, client_name, brand_name, job_description_details,
+                            invoice_date, poc_email, poc_name, deadline_date, job_date,
+                            production_house]  (or null)
+          - value:  the new value (string or number) or null
+          - client_filter:  client/brand identifier to locate the row, or null
+          - bill_no_filter: bill_no to locate the row, or null
+        Returns None on failure.
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key:
+            return None
+
+        ctx_hint = ""
+        if last_row:
+            _client = last_row.get("client_name") or last_row.get("brand_name") or ""
+            _bill = last_row.get("bill_no") or ""
+            ctx_hint = f"\nContext: the user was just shown a job for client='{_client}' bill_no='{_bill}'. If they don't specify a different row, assume they mean this one."
+
+        prompt = f"""Extract an update/modify intent from the user's message into JSON.
+
+Return ONLY valid JSON with these keys:
+- "field": one of ["fees","paid","client_name","brand_name","job_description_details","invoice_date","poc_email","poc_name","deadline_date","job_date","production_house"] or null
+- "value": the new value (number for fees; "Yes"/"No" for paid; ISO date "YYYY-MM-DD" for date fields; string otherwise) or null
+- "client_filter": client/brand name to find the row, or null
+- "bill_no_filter": bill number, or null
+
+Rules:
+- "fee", "amount", "price" → field "fees"; convert "25k"=25000, "1.5L"=150000
+- "paid", "payment status", "mark as paid/unpaid" → field "paid"; value "Yes" or "No"
+- "description", "details", "what was done" → field "job_description_details"
+- "invoice date", "billing date" → field "invoice_date"
+- "email", "contact email" → field "poc_email"
+- "contact", "poc", "person" → field "poc_name"
+- If the user does NOT name a different client/brand/bill, leave client_filter and bill_no_filter null (use context row).
+- If you cannot identify both a field and a value, return all nulls.
+{ctx_hint}
+
+User message: "{message}"
+
+Output:"""
+        try:
+            raw = self._call_api(prompt, generation_config={"maxOutputTokens": 200, "temperature": 0.0})
+            if not raw:
+                return None
+            import re as _re, json as _json
+            m = _re.search(r"\{[\s\S]*\}", raw)
+            if not m:
+                return None
+            parsed = _json.loads(m.group(0))
+            return parsed if isinstance(parsed, dict) else None
+        except Exception as e:
+            logger.error(f"extract_modify_intent failed: {e}")
+            return None
+
     def extract_name(self, raw_message: str) -> Optional[str]:
         """
         Extract a person's first name (or full name) from a raw onboarding message.
