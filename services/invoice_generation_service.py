@@ -97,8 +97,19 @@ class InvoiceGenerationService:
                 pdf.cell(100, 5, sanitize_pdf_text(invoicer_title), ln=0)
             else:
                 pdf.cell(100, 5, "", ln=0)
-            client_prefix = sanitize_pdf_text(summary.get("client", "")[:3].upper())
-            invoice_no = sanitize_pdf_text(f"Invoice #: {datetime.now().strftime('%y%m%d')}-{client_prefix}")
+            # Use the DB bill_no if present (assigned by trigger on insert);
+            # fall back to date+client prefix only for legacy rows missing bill_no.
+            _db_bill_no = ""
+            for _r in data:
+                _bn = str(_r.get("bill_no") or "").strip()
+                if _bn:
+                    _db_bill_no = _bn
+                    break
+            if _db_bill_no:
+                invoice_no = sanitize_pdf_text(f"Invoice #: {_db_bill_no}")
+            else:
+                client_prefix = sanitize_pdf_text(summary.get("client", "")[:3].upper())
+                invoice_no = sanitize_pdf_text(f"Invoice #: {datetime.now().strftime('%y%m%d')}-{client_prefix}")
             pdf.cell(90, 5, invoice_no, ln=1, align="R")
 
             if invoicer_address:
