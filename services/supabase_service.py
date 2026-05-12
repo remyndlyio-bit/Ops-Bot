@@ -9,9 +9,43 @@ Dashboard → Project Settings → Database → Connection string → "Transacti
 
 import os
 import json
+import re
 from datetime import date, datetime
 from typing import List, Dict, Any, Optional
 from utils.logger import logger
+
+
+def _compute_bill_no(cur, user_id: str, client_name: Any, brand_name: Any, production_house: Any) -> str:
+    """
+    Compute next bill_no in format {CLIENT3}-{DDMMYY}-{NN}.
+    CLIENT3: first 3 alphanumeric chars of client_name (fallback brand → production_house → INV).
+    DDMMYY: today's date.
+    NN: per-user sequence for that prefix+date pair (zero-padded, starts at 01).
+    """
+    raw = ""
+    for v in (client_name, brand_name, production_house):
+        if v and str(v).strip():
+            raw = str(v).strip()
+            break
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", raw).upper() or "INV"
+    prefix = cleaned[:3]
+    datepart = datetime.now().strftime("%d%m%y")
+    pattern = f"^{prefix}-{datepart}-\\d+$"
+    cur.execute(
+        """
+        SELECT COALESCE(MAX(
+            CASE WHEN bill_no ~ %s
+                 THEN (regexp_match(bill_no, '-(\\d+)$'))[1]::int
+            END
+        ), 0) + 1 AS next_seq
+        FROM public.job_entries
+        WHERE user_id = %s
+        """,
+        (pattern, user_id),
+    )
+    row = cur.fetchone()
+    next_seq = (row.get("next_seq") if isinstance(row, dict) else row[0]) or 1
+    return f"{prefix}-{datepart}-{int(next_seq):02d}"
 
 
 def _build_schema_description(column_schema: Dict[str, Dict[str, Any]]) -> str:
@@ -284,12 +318,6 @@ class SupabaseService:
             if isinstance(v, (date, datetime)):
                 cleaned[k] = v.isoformat()[:10]
 
-        cols = list(cleaned.keys())
-        placeholders = ", ".join(["%s"] * len(cols))
-        col_list = ", ".join([f'"{c}"' for c in cols])
-        sql = f'INSERT INTO public.job_entries ({col_list}) VALUES ({placeholders}) RETURNING *'
-        values = [cleaned[c] for c in cols]
-
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
@@ -300,6 +328,23 @@ class SupabaseService:
             conn = psycopg2.connect(self.db_url)
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Auto-assign bill_no if missing (UNIQUE constraint on (user_id, bill_no)
+                # protects against race conditions if two inserts hit the same second).
+                if not cleaned.get("bill_no"):
+                    cleaned["bill_no"] = _compute_bill_no(
+                        cur,
+                        cleaned["user_id"],
+                        cleaned.get("client_name"),
+                        cleaned.get("brand_name"),
+                        cleaned.get("production_house"),
+                    )
+
+                cols = list(cleaned.keys())
+                placeholders = ", ".join(["%s"] * len(cols))
+                col_list = ", ".join([f'"{c}"' for c in cols])
+                sql = f'INSERT INTO public.job_entries ({col_list}) VALUES ({placeholders}) RETURNING *'
+                values = [cleaned[c] for c in cols]
+
                 cur.execute(sql, values)
                 row = cur.fetchone()
             conn.close()
