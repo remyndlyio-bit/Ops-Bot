@@ -2022,8 +2022,18 @@ class IntentService:
                 _YES_PREFIXES = ("yes,", "yes ", "yeah,", "yeah ", "sure,", "sure ", "ok,", "ok ", "okay,", "okay ")
                 _is_yes = msg_lower_check in _YES_EXACT or msg_lower_check.startswith(_YES_PREFIXES)
                 if _is_yes and pending_action:
-                    logger.info(f"[COMPOUND] User confirmed next action: '{pending_action}'")
-                    return self.process_request(user_id=user_id, message=pending_action)
+                    # Preserve any qualifier the user added after "yes" (e.g.
+                    # "yes along with bill numbers") so the pending action runs
+                    # WITH that extra context, not in isolation.
+                    remainder = ""
+                    if msg_lower_check not in _YES_EXACT:
+                        for _p in _YES_PREFIXES:
+                            if msg_lower_check.startswith(_p):
+                                remainder = message.strip()[len(_p):].strip(" ,.!")
+                                break
+                    merged = f"{pending_action} {remainder}".strip() if remainder else pending_action
+                    logger.info(f"[COMPOUND] User confirmed next action: '{merged}' (pending='{pending_action}', qualifier='{remainder}')")
+                    return self.process_request(user_id=user_id, message=merged)
                 elif msg_lower_check in {"no", "nah", "nope", "skip", "not now", "later"}:
                     response = "👍 No problem. Let me know if you need anything else."
                     self._store_conversation(user_id, message, response)
