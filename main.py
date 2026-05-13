@@ -457,8 +457,14 @@ async def whatsapp_webhook(
     """Twilio WhatsApp Webhook — delegates to unified handler."""
     try:
         logger.info(f"[WHATSAPP] Received from {From}: {Body[:120]}")
+        # Fire typing indicator IMMEDIATELY (don't wait for processing to finish).
+        # BackgroundTasks runs AFTER the response is returned — too late, the reply
+        # is already out by then. asyncio.to_thread runs the sync requests.post
+        # call in a worker so it doesn't block the event loop.
         if MessageSid:
-            background_tasks.add_task(whatsapp_service.send_typing_indicator, MessageSid)
+            asyncio.create_task(
+                asyncio.to_thread(whatsapp_service.send_typing_indicator, MessageSid)
+            )
         await _handle_bot_message(
             user_id=From, message=Body, platform="whatsapp",
             background_tasks=background_tasks,
