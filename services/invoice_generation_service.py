@@ -100,7 +100,7 @@ class InvoiceGenerationService:
             # Use the DB bill_no if present (assigned by trigger on insert);
             # fall back to date+client prefix only for legacy rows missing bill_no.
             _db_bill_no = ""
-            for _r in data:
+            for _r in (client_data or []):
                 _bn = str(_r.get("bill_no") or "").strip()
                 if _bn:
                     _db_bill_no = _bn
