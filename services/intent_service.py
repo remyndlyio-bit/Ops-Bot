@@ -86,19 +86,18 @@ def _generate_jobs_excel(rows: list, user_id: str) -> str:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
 
-    COLS = [
-        ("job_date", "Date"),
-        ("client_name", "Client"),
-        ("brand_name", "Brand"),
-        ("production_house", "Production House"),
-        ("job_description_details", "Description"),
-        ("poc_name", "POC Name"),
-        ("poc_email", "POC Email"),
-        ("fees", "Amount (₹)"),
-        ("invoice_date", "Invoice Date"),
-        ("bill_no", "Invoice No"),
-        ("paid", "Paid"),
+    # Preferred column order for full job rows; fall back to actual keys for other result sets
+    PREFERRED = [
+        ("job_date", "Date"), ("client_name", "Client"), ("brand_name", "Brand"),
+        ("production_house", "Production House"), ("job_description_details", "Description"),
+        ("poc_name", "POC Name"), ("poc_email", "POC Email"), ("fees", "Amount (₹)"),
+        ("invoice_date", "Invoice Date"), ("bill_no", "Invoice No"), ("paid", "Paid"),
     ]
+    row_keys = list(rows[0].keys()) if rows else []
+    preferred_keys = [k for k, _ in PREFERRED]
+    # Use preferred order for known columns, append any extras
+    COLS = [(k, h) for k, h in PREFERRED if k in row_keys]
+    COLS += [(k, k) for k in row_keys if k not in preferred_keys and k not in ("id", "user_id", "isDeleted")]
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -3712,12 +3711,12 @@ class IntentService:
                                 ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
                                 ctx["last_sql"] = kw_sql
                                 self.memory.update_user_memory(user_id, {"uscf_context": ctx})
-                                if kw_rows and _is_full_job_row(kw_rows[0]):
-                                    if len(kw_rows) > 4:
-                                        excel_path = _generate_jobs_excel(kw_rows, data_user_id)
-                                        response = f"Found {len(kw_rows)} jobs — here's a spreadsheet with all of them."
-                                        self._store_conversation(user_id, message, response)
-                                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
+                                if len(kw_rows) > 4:
+                                    excel_path = _generate_jobs_excel(kw_rows, data_user_id)
+                                    response = f"Found {len(kw_rows)} results — here's a spreadsheet with all of them."
+                                    self._store_conversation(user_id, message, response)
+                                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
+                                if _is_full_job_row(kw_rows[0]):
                                     response = _format_job_cards(kw_rows)
                                 else:
                                     payload = build_clean_payload(kw_rows, "select")
@@ -3734,13 +3733,13 @@ class IntentService:
                 ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
                 ctx["last_sql"] = sanitized_sql
                 self.memory.update_user_memory(user_id, {"uscf_context": ctx})
+                if len(rows) > 4:
+                    excel_path = _generate_jobs_excel(rows, data_user_id)
+                    response = f"Found {len(rows)} results — here's a spreadsheet with all of them."
+                    logger.info(f"[QUERY] Excel generated: {excel_path} ({len(rows)} rows)")
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
                 if _is_full_job_row(rows[0]):
-                    if len(rows) > 4:
-                        excel_path = _generate_jobs_excel(rows, data_user_id)
-                        response = f"Found {len(rows)} jobs — here's a spreadsheet with all of them."
-                        logger.info(f"[QUERY] Excel generated: {excel_path} ({len(rows)} rows)")
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
                     response = _format_job_cards(rows)
                     logger.info(f"[QUERY] Success: {len(rows)} rows (structured card format)")
                 else:
