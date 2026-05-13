@@ -429,7 +429,18 @@ async def _handle_bot_message(
         elif platform == "whatsapp":
             whatsapp_service.send_text_message(user_id, result["response"])
 
-    # 5. Handle invoice generation — SAME for both platforms
+    # 5. Send Excel attachment if query returned >4 job rows
+    if result.get("excel_path"):
+        excel_path = result["excel_path"]
+        if platform == "telegram" and chat_id:
+            await telegram_service.send_document(chat_id, excel_path, caption="")
+        elif platform == "whatsapp":
+            base_url = os.getenv("BASE_URL", "").strip()
+            filename = os.path.basename(excel_path)
+            media_url = f"{base_url}/static/{filename}"
+            whatsapp_service.send_media_message(to_number=user_id, body="", media_url=media_url)
+
+    # 6. Handle invoice generation — SAME for both platforms
     if result.get("trigger_invoice"):
         inv = result["invoice_data"]
         background_tasks.add_task(

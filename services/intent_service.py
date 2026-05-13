@@ -22,6 +22,112 @@ from typing import Dict, List, Optional
 import json
 import os
 import re
+import time
+
+
+def _is_full_job_row(row: dict) -> bool:
+    """True when the row is a SELECT * from job_entries (not an aggregate)."""
+    return "bill_no" in row or "job_date" in row
+
+
+def _format_job_card(row: dict) -> str:
+    client = (row.get("client_name") or row.get("brand_name") or
+              row.get("production_house") or "—").strip()
+    brand = (row.get("brand_name") or "").strip()
+    poc_name = (row.get("poc_name") or "").strip()
+    poc_email = (row.get("poc_email") or "").strip()
+    if poc_name and poc_email:
+        poc = f"{poc_name} ({poc_email})"
+    elif poc_name:
+        poc = poc_name
+    elif poc_email:
+        poc = poc_email
+    else:
+        poc = "—"
+
+    fees = row.get("fees")
+    try:
+        amount = f"₹{int(float(fees)):,}" if fees is not None else "—"
+    except (ValueError, TypeError):
+        amount = str(fees) if fees else "—"
+
+    inv_date_raw = row.get("invoice_date")
+    if inv_date_raw:
+        try:
+            from datetime import datetime as _dt
+            inv_date_str = _dt.strptime(str(inv_date_raw)[:10], "%Y-%m-%d").strftime("%-d %b %Y")
+        except Exception:
+            inv_date_str = str(inv_date_raw)[:10]
+    else:
+        inv_date_str = "Not sent"
+
+    bill_no = (row.get("bill_no") or "—").strip()
+
+    lines = [f"Client: {client}"]
+    if brand and brand.lower() != client.lower():
+        lines.append(f"Brand: {brand}")
+    lines.append(f"POC: {poc}")
+    lines.append(f"Amount: {amount}")
+    lines.append(f"Invoice Date: {inv_date_str}")
+    lines.append(f"Invoice No: {bill_no}")
+    return "\n".join(lines)
+
+
+def _format_job_cards(rows: list) -> str:
+    cards = []
+    for i, row in enumerate(rows, 1):
+        prefix = f"Job {i}\n" if len(rows) > 1 else ""
+        cards.append(prefix + _format_job_card(row))
+    return "\n\n".join(cards)
+
+
+def _generate_jobs_excel(rows: list, user_id: str) -> str:
+    """Write rows to an xlsx file in output/. Returns the file path."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    COLS = [
+        ("job_date", "Date"),
+        ("client_name", "Client"),
+        ("brand_name", "Brand"),
+        ("production_house", "Production House"),
+        ("job_description_details", "Description"),
+        ("poc_name", "POC Name"),
+        ("poc_email", "POC Email"),
+        ("fees", "Amount (₹)"),
+        ("invoice_date", "Invoice Date"),
+        ("bill_no", "Invoice No"),
+        ("paid", "Paid"),
+    ]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Jobs"
+
+    hfont = Font(bold=True)
+    hfill = PatternFill("solid", fgColor="D9E1F2")
+    for ci, (_, header) in enumerate(COLS, 1):
+        cell = ws.cell(row=1, column=ci, value=header)
+        cell.font = hfont
+        cell.fill = hfill
+        cell.alignment = Alignment(horizontal="center")
+
+    for ri, row in enumerate(rows, 2):
+        for ci, (field, _) in enumerate(COLS, 1):
+            val = row.get(field)
+            if val is not None:
+                ws.cell(row=ri, column=ci, value=str(val)[:120] if isinstance(val, str) else val)
+
+    for col in ws.columns:
+        max_len = max((len(str(c.value or "")) for c in col), default=10)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
+
+    safe_uid = re.sub(r'[^a-zA-Z0-9]', '_', str(user_id))[-20:]
+    filename = f"jobs_{safe_uid}_{int(time.time())}.xlsx"
+    path = os.path.join("output", filename)
+    wb.save(path)
+    return path
+
 
 class IntentService:
     # Cache AI-generated schema by column names so we don't call the AI on every message
@@ -3606,10 +3712,18 @@ class IntentService:
                                 ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
                                 ctx["last_sql"] = kw_sql
                                 self.memory.update_user_memory(user_id, {"uscf_context": ctx})
-                                payload = build_clean_payload(kw_rows, "select")
-                                response = self.gemini.synthesize_response(payload, message)
-                                if not response or not response.strip():
-                                    response = self._format_sql_result(kw_rows)
+                                if kw_rows and _is_full_job_row(kw_rows[0]):
+                                    if len(kw_rows) > 4:
+                                        excel_path = _generate_jobs_excel(kw_rows, data_user_id)
+                                        response = f"Found {len(kw_rows)} jobs — here's a spreadsheet with all of them."
+                                        self._store_conversation(user_id, message, response)
+                                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
+                                    response = _format_job_cards(kw_rows)
+                                else:
+                                    payload = build_clean_payload(kw_rows, "select")
+                                    response = self.gemini.synthesize_response(payload, message)
+                                    if not response or not response.strip():
+                                        response = self._format_sql_result(kw_rows)
                                 self._store_conversation(user_id, message, response)
                                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                         response = format_response(ERROR_MODE)
@@ -3620,13 +3734,23 @@ class IntentService:
                 ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
                 ctx["last_sql"] = sanitized_sql
                 self.memory.update_user_memory(user_id, {"uscf_context": ctx})
-                payload = build_clean_payload(rows, "select")
-                response = self.gemini.synthesize_response(payload, message)
-                if not response or not response.strip():
-                    logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
-                    response = "I found matching records but couldn't format the reply. Try asking again?"
+                if _is_full_job_row(rows[0]):
+                    if len(rows) > 4:
+                        excel_path = _generate_jobs_excel(rows, data_user_id)
+                        response = f"Found {len(rows)} jobs — here's a spreadsheet with all of them."
+                        logger.info(f"[QUERY] Excel generated: {excel_path} ({len(rows)} rows)")
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
+                    response = _format_job_cards(rows)
+                    logger.info(f"[QUERY] Success: {len(rows)} rows (structured card format)")
                 else:
-                    logger.info(f"[QUERY] Success: {len(rows)} rows, response length={len(response)}")
+                    payload = build_clean_payload(rows, "select")
+                    response = self.gemini.synthesize_response(payload, message)
+                    if not response or not response.strip():
+                        logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
+                        response = "I found matching records but couldn't format the reply. Try asking again?"
+                    else:
+                        logger.info(f"[QUERY] Success: {len(rows)} rows, response length={len(response)}")
 
         except Exception as e:
             logger.error(f"[QUERY_FAIL] Exception for user {user_id}, msg='{message[:60]}': {e}", exc_info=True)
