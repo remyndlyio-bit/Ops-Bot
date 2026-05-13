@@ -2244,7 +2244,20 @@ class IntentService:
 
             # 0b1.6. Check if user is confirming sending invoice to client email
             if user_mem.get("awaiting_send_confirmation"):
-                return self._handle_send_confirmation(user_id, message)
+                _confirm_yn = {
+                    "yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "send it",
+                    "do it", "confirm", "yes please", "no", "n", "nope", "nah", "skip",
+                    "cancel", "not now", "later", "don't send", "dont send",
+                }
+                _is_yn = msg_lower.strip() in _confirm_yn or len(message.split()) <= 3
+                if not _is_yn:
+                    # Looks like a new query — clear email confirmation state and continue
+                    self.memory.update_user_memory(user_id, {
+                        "awaiting_send_confirmation": False,
+                        "pending_send_invoice": None,
+                    })
+                else:
+                    return self._handle_send_confirmation(user_id, message)
 
             # 0b1.7. Check if user is providing client billing details
             if user_mem.get("awaiting_client_billing"):
@@ -2537,6 +2550,8 @@ class IntentService:
             _BILLING_QUERY_SIGNALS = [
                 "total billing", "billing amount", "total bill", "how much billing",
                 "billing history", "billing summary", "earnings", "total earn",
+                "crossed", "overdue", "past due", "more than", "older than",
+                "over 30", "over 60", "over 90", "days old", "days ago",
             ]
             if any(sig in msg_lower for sig in _BILLING_QUERY_SIGNALS):
                 has_invoice_word = False
@@ -3461,7 +3476,7 @@ class IntentService:
                 logger.error(f"[QUERY_FAIL] SQL execution failed for user {user_id}: {exec_result.get('error')} | SQL: {sanitized_sql[:200]}")
                 response = format_response(
                     ERROR_MODE,
-                    error_detail=exec_result.get("error") or error_calm_phrase(),
+                    error_detail=error_calm_phrase(),
                 )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
