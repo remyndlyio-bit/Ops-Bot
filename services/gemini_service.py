@@ -746,3 +746,25 @@ Output:"""
         except Exception as e:
             logger.error(f"[GEMINI] extract_name failed: {e}")
             return None
+
+    def is_history_question(self, message: str) -> bool:
+        """
+        Returns True if the message is asking about a past/historical value
+        (e.g. previous amount, what it was before an update).
+        Uses a tiny AI call instead of keyword heuristics.
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key:
+            return False
+        prompt = (
+            "Does the following message ask about a previous, earlier, or historical value "
+            "(e.g. what was the old amount, what was it before the update, last fee)? "
+            "Answer only YES or NO.\n\n"
+            f"Message: {message}"
+        )
+        try:
+            result = self._call_api(prompt, generation_config={"maxOutputTokens": 5, "temperature": 0.0})
+            return bool(result and result.strip().upper().startswith("YES"))
+        except Exception as e:
+            logger.error(f"[GEMINI] is_history_question failed: {e}")
+            return False

@@ -967,19 +967,10 @@ class IntentService:
             logger.info("[FOLLOWUP] No last_row_data in context - allowing new query")
             return None
 
-        # For "what was earlier/previous/before/prior" questions we must NOT short-circuit
-        # to the current field value — the answer lives in notes change history.
-        # Let the full-row query path handle it so Gemini sees notes.
-        _HISTORY_KEYWORDS = (
-            "earlier", "previous", "before", "prior", "used to",
-            "old amount", "old fee", "original", "initial",
-            "what was the amount", "what was the fee", "what was it before",
-            "last amount", "last fee", "what was the last", "before the update",
-            "previously", "originally",
-        )
-        _msg_l = message.lower()
-        if any(kw in _msg_l for kw in _HISTORY_KEYWORDS):
-            logger.info("[FOLLOWUP] History/earlier question — skipping short-circuit, using full row")
+        # If the user is asking about a past/historical value, skip the short-circuit
+        # so the full-row query path runs and Gemini can read the notes change history.
+        if self.gemini.is_history_question(message):
+            logger.info("[FOLLOWUP] History question detected by AI — skipping short-circuit, using full row")
             return None
 
         # Check if this is a follow-up field request
@@ -3849,9 +3840,7 @@ class IntentService:
                                     response = f"Found {len(kw_rows)} results — here's a spreadsheet with all of them."
                                     self._store_conversation(user_id, message, response)
                                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
-                                _HISTORY_KW = ("earlier", "previous", "before", "prior", "used to", "old amount", "old fee", "original", "initial", "what was the amount", "what was the fee", "what was it before", "last amount", "last fee", "what was the last", "before the update", "previously", "originally")
-                                _is_history_q = any(kw in message.lower() for kw in _HISTORY_KW)
-                                if _is_full_job_row(kw_rows[0]) and not _is_history_q:
+                                if _is_full_job_row(kw_rows[0]) and not self.gemini.is_history_question(message):
                                     response = _format_job_cards(kw_rows)
                                 else:
                                     payload = build_clean_payload(kw_rows, "select")
@@ -3874,9 +3863,7 @@ class IntentService:
                     logger.info(f"[QUERY] Excel generated: {excel_path} ({len(rows)} rows)")
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
-                _HISTORY_KW = ("earlier", "previous", "before", "prior", "used to", "old amount", "old fee", "original", "initial", "what was the amount", "what was the fee", "what was it before", "last amount", "last fee", "what was the last", "before the update", "previously", "originally")
-                _is_history_q = any(kw in message.lower() for kw in _HISTORY_KW)
-                if _is_full_job_row(rows[0]) and not _is_history_q:
+                if _is_full_job_row(rows[0]) and not self.gemini.is_history_question(message):
                     response = _format_job_cards(rows)
                     logger.info(f"[QUERY] Success: {len(rows)} rows (structured card format)")
                 else:
