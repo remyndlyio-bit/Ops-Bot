@@ -3515,6 +3515,9 @@ class IntentService:
             sql = plan_result.get("sql")
             planner_failed = plan_result.get("_error") or not sql
 
+            # Detect history questions once here; used later for SELECT * rewrite and synthesis hint.
+            _is_history_q = self.gemini.is_history_question(message)
+
             # Fallback to direct SQL generation if planner fails
             if planner_failed:
                 logger.info(f"[PIPELINE] Planner failed ({plan_result.get('_error')}), falling back to direct SQL generation")
@@ -3535,6 +3538,11 @@ class IntentService:
             # (the column is text; existing rows use 'Yes'/'No', not 'true'/'false'/booleans)
             sql = re.sub(r"SET\s+paid\s*=\s*'(?:true|1|yes)'",  "SET paid = 'Yes'",  sql, flags=re.IGNORECASE)
             sql = re.sub(r"SET\s+paid\s*=\s*'(?:false|0|no)'",  "SET paid = 'No'",   sql, flags=re.IGNORECASE)
+
+            # History questions need SELECT * so that the `notes` change-log reaches Gemini.
+            if _is_history_q and sql and sql.upper().lstrip().startswith("SELECT"):
+                sql = re.sub(r"(?i)^\s*SELECT\s+(?!\*).+?\s+FROM\s+", "SELECT * FROM ", sql, count=1)
+                logger.info("[PIPELINE] History question — rewrote SELECT to SELECT *")
 
             # Expand AI-generated `client_name ILIKE 'X'` → `(client_name ILIKE '%X%' OR brand_name ILIKE '%X%')`
             # Users say "Nike" meaning the brand; the actual client_name may be a production company.
@@ -3840,11 +3848,11 @@ class IntentService:
                                     response = f"Found {len(kw_rows)} results — here's a spreadsheet with all of them."
                                     self._store_conversation(user_id, message, response)
                                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
-                                if _is_full_job_row(kw_rows[0]) and not self.gemini.is_history_question(message):
+                                if _is_full_job_row(kw_rows[0]) and not _is_history_q:
                                     response = _format_job_cards(kw_rows)
                                 else:
                                     payload = build_clean_payload(kw_rows, "select")
-                                    response = self.gemini.synthesize_response(payload, message)
+                                    response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q)
                                     if not response or not response.strip():
                                         response = self._format_sql_result(kw_rows)
                                 self._store_conversation(user_id, message, response)
@@ -3863,12 +3871,12 @@ class IntentService:
                     logger.info(f"[QUERY] Excel generated: {excel_path} ({len(rows)} rows)")
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
-                if _is_full_job_row(rows[0]) and not self.gemini.is_history_question(message):
+                if _is_full_job_row(rows[0]) and not _is_history_q:
                     response = _format_job_cards(rows)
                     logger.info(f"[QUERY] Success: {len(rows)} rows (structured card format)")
                 else:
                     payload = build_clean_payload(rows, "select")
-                    response = self.gemini.synthesize_response(payload, message)
+                    response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q)
                     if not response or not response.strip():
                         logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
                         response = "I found matching records but couldn't format the reply. Try asking again?"

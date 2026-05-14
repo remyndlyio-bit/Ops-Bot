@@ -142,7 +142,7 @@ class GeminiService:
             logger.warning(f"AI schema generation failed: {e}")
         return None
 
-    def synthesize_response(self, structured_payload: dict, user_message: str) -> Optional[str]:
+    def synthesize_response(self, structured_payload: dict, user_message: str, history_question: bool = False) -> Optional[str]:
         """
         AI synthesis layer: convert clean structured JSON into natural response.
         Uses ONLY provided data; no hallucination; omits nulls gracefully; concise.
@@ -201,8 +201,14 @@ class GeminiService:
         except (TypeError, ValueError):
             payload_str = str(structured_payload)
 
+        history_note = (
+            "\n\nHISTORY QUESTION: The user is asking about a PREVIOUS or OLD value, not the current one. "
+            "Look at the 'notes' field for change history entries formatted as '[DATE] field: old_value → new_value'. "
+            "The answer is the OLD value (before the arrow →), not the current field value in the data."
+        ) if history_question else ""
+
         full_prompt = (
-            f"{system}\n\n"
+            f"{system}{history_note}\n\n"
             f"DATA:\n{payload_str}\n\n"
             f"USER ASKED: {user_message}\n\n"
             "Your response:"
