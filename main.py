@@ -122,6 +122,27 @@ def _notify_user(platform: str, chat_id, user_id_str: str, msg: str):
         logger.warning(f"Failed to notify {platform} user: {e}")
 
 
+def _get_user_email(user_id: str | None) -> str:
+    """Fetch the user's own invoice email from preferences for CCing on outbound mail."""
+    if not user_id:
+        return ""
+    try:
+        prof = supabase_service.get_user_profile(user_id)
+        if not (prof.get("ok") and prof.get("data")):
+            return ""
+        prefs = prof["data"].get("preferences") or {}
+        if isinstance(prefs, str):
+            import json as _json
+            try:
+                prefs = _json.loads(prefs)
+            except Exception:
+                prefs = {}
+        return (prefs.get("invoice_email") or "").strip()
+    except Exception as e:
+        logger.warning(f"[CC] Failed to fetch user email for {user_id}: {e}")
+        return ""
+
+
 def send_invoice_email(
     client_name: str,
     month: str,
@@ -186,6 +207,7 @@ def send_invoice_email(
             year=year,
             pdf_path=file_path,
             poc_name=poc_name,
+            cc=_get_user_email(user_id_str),
         )
     except Exception as e:
         ok = False
@@ -512,6 +534,7 @@ async def _handle_send_all_reminders(callback_query: dict):
     sender_name = "Team"
     if profile.get("ok") and profile.get("data"):
         sender_name = profile["data"].get("name") or sender_name
+    user_cc = _get_user_email(user_id)
 
     sent = []
     failed = []
@@ -558,10 +581,11 @@ async def _handle_send_all_reminders(callback_query: dict):
             f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
             f"Amount Due: {amount_str}\n\n"
             f"Please let us know if payment has already been processed.\n\n"
-            f"Best regards,\n{sender_name}\n"
+            f"Best regards,\n{sender_name}"
+            f"{email_service.REMINDER_DISCLAIMER}"
         )
 
-        ok = email_service.send_email(to_email=poc_email, subject=subject, body=body)
+        ok = email_service.send_email(to_email=poc_email, subject=subject, body=body, cc=user_cc)
         if ok:
             sent.append(f"{client_name} → {poc_email}")
             flag_col = flag_map.get(level)
@@ -657,11 +681,17 @@ async def _handle_reminder_callback(callback_query: dict):
         f"This is a friendly reminder regarding invoice #{bill_no}.\n\n"
         f"Amount Due: {amount_str}\n\n"
         f"Please let us know if payment has already been processed.\n\n"
-        f"Best regards,\n{sender_name}\n"
+        f"Best regards,\n{sender_name}"
+        f"{email_service.REMINDER_DISCLAIMER}"
     )
 
-    # Send email
-    ok = email_service.send_email(to_email=poc_email, subject=subject, body=body)
+    # Send email — CC the user themselves if we know their email
+    ok = email_service.send_email(
+        to_email=poc_email,
+        subject=subject,
+        body=body,
+        cc=_get_user_email(user_id),
+    )
 
     if not ok:
         await telegram_service.edit_message_text(

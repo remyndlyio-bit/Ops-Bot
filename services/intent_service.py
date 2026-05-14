@@ -1625,6 +1625,7 @@ class IntentService:
                 pdf_path=pdf_path,
                 poc_name=_poc_name or None,
                 invoicer_name=_invoicer_name or None,
+                cc=self._get_user_invoice_email(user_id),
             )
             if ok:
                 # Update invoice_date for affected rows
@@ -1702,6 +1703,7 @@ class IntentService:
                         pdf_path=pdf_path,
                         poc_name=_poc_name or None,
                         invoicer_name=_invoicer_name or None,
+                        cc=self._get_user_invoice_email(user_id),
                     )
                     email_sent = ok
                 except Exception as e:
@@ -4261,6 +4263,26 @@ class IntentService:
         if profile.get("ok") and profile.get("data"):
             return profile["data"].get("name")
         return None
+
+    def _get_user_invoice_email(self, user_id: str) -> str:
+        """Fetch the user's own email from preferences.invoice_email — used for CCing
+        the user on outbound invoice/reminder mail so they have a copy."""
+        if not user_id:
+            return ""
+        try:
+            profile = self.supabase.get_user_profile(user_id)
+            if not (profile.get("ok") and profile.get("data")):
+                return ""
+            prefs = profile["data"].get("preferences") or {}
+            if isinstance(prefs, str):
+                try:
+                    prefs = json.loads(prefs)
+                except Exception:
+                    prefs = {}
+            return (prefs.get("invoice_email") or "").strip()
+        except Exception as e:
+            logger.warning(f"[CC] Failed to fetch invoice_email for {user_id}: {e}")
+            return ""
 
     def _start_onboarding(self, user_id: str, message: str) -> Dict:
         """Start onboarding for a new user."""
