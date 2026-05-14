@@ -974,6 +974,8 @@ class IntentService:
             "earlier", "previous", "before", "prior", "used to",
             "old amount", "old fee", "original", "initial",
             "what was the amount", "what was the fee", "what was it before",
+            "last amount", "last fee", "what was the last", "before the update",
+            "previously", "originally",
         )
         _msg_l = message.lower()
         if any(kw in _msg_l for kw in _HISTORY_KEYWORDS):
@@ -3847,7 +3849,9 @@ class IntentService:
                                     response = f"Found {len(kw_rows)} results — here's a spreadsheet with all of them."
                                     self._store_conversation(user_id, message, response)
                                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
-                                if _is_full_job_row(kw_rows[0]):
+                                _HISTORY_KW = ("earlier", "previous", "before", "prior", "used to", "old amount", "old fee", "original", "initial", "what was the amount", "what was the fee", "what was it before", "last amount", "last fee", "what was the last", "before the update", "previously", "originally")
+                                _is_history_q = any(kw in message.lower() for kw in _HISTORY_KW)
+                                if _is_full_job_row(kw_rows[0]) and not _is_history_q:
                                     response = _format_job_cards(kw_rows)
                                 else:
                                     payload = build_clean_payload(kw_rows, "select")
@@ -3870,7 +3874,9 @@ class IntentService:
                     logger.info(f"[QUERY] Excel generated: {excel_path} ({len(rows)} rows)")
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
-                if _is_full_job_row(rows[0]):
+                _HISTORY_KW = ("earlier", "previous", "before", "prior", "used to", "old amount", "old fee", "original", "initial", "what was the amount", "what was the fee", "what was it before", "last amount", "last fee", "what was the last", "before the update", "previously", "originally")
+                _is_history_q = any(kw in message.lower() for kw in _HISTORY_KW)
+                if _is_full_job_row(rows[0]) and not _is_history_q:
                     response = _format_job_cards(rows)
                     logger.info(f"[QUERY] Success: {len(rows)} rows (structured card format)")
                 else:
