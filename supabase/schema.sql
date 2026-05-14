@@ -63,6 +63,9 @@ create table if not exists public.user_config (
   bank_ifsc text,
   bank_name text,
   upi_id text,
+  mobile_number text,
+  pan_number text,
+  gst_number text,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
