@@ -67,9 +67,23 @@ def clarify_phrase(examples: Optional[List[str]] = None) -> str:
 
 
 def error_calm_phrase(technical: bool = False) -> str:
-    if technical:
-        return "Something went wrong on my side. Please try again in a moment."
-    return "I couldn't complete that. Please try again in a moment."
+    """Friendly, slightly playful fallback when something on our side breaks.
+    Rotates to avoid sounding robotic. Never blames the user — always our fault."""
+    import random
+    _USER_FRIENDLY = [
+        "Oof — my circuits tripped on that one. 🤖 Give me a sec and try again?",
+        "That one slipped through my fingers. Mind giving it another shot?",
+        "I fumbled that one — totally on me. Try again in a moment?",
+        "Hmm, my brain blanked for a second. Ping me again and I'll get it right.",
+        "Yikes, hit a small snag on my end. One more try should do it.",
+        "Caught me daydreaming — try that again and I'll be sharp this time.",
+    ]
+    _TECHNICAL = [
+        "Something tripped on my side — not yours. Give it another go in a moment.",
+        "My backend just sneezed. 🤧 Try that again shortly.",
+        "Small hiccup on my end. Retry in a sec and we're good.",
+    ]
+    return random.choice(_TECHNICAL if technical else _USER_FRIENDLY)
 
 
 def query_invalid_phrase() -> str:
