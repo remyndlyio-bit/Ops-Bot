@@ -753,6 +753,84 @@ Output:"""
             logger.error(f"[GEMINI] extract_name failed: {e}")
             return None
 
+    def is_new_query_not_response(self, message: str, awaiting_context: str) -> bool:
+        """
+        Detects whether the user is starting a new task vs answering a pending prompt.
+        awaiting_context describes what the bot is waiting for (e.g. "yes/no to send invoice",
+        "POC email address", "bank details", "month name", "client billing details").
+        Returns True if the message looks like a NEW query/command (not a response).
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key:
+            return False
+        prompt = (
+            "The bot is currently waiting for the user to answer this:\n"
+            f"  EXPECTED_ANSWER_TYPE: {awaiting_context}\n\n"
+            f"USER MESSAGE: {message}\n\n"
+            "Is the user's message a NEW question or new command (NOT an answer to the expected prompt)?\n"
+            "Reply only YES if it is a new query/command, or NO if it is an answer to the prompt."
+        )
+        try:
+            result = self._call_api(prompt, generation_config={"maxOutputTokens": 5, "temperature": 0.0})
+            return bool(result and result.strip().upper().startswith("YES"))
+        except Exception as e:
+            logger.error(f"[GEMINI] is_new_query_not_response failed: {e}")
+            return False
+
+    def is_invoice_action_request(self, message: str) -> bool:
+        """
+        Classifies whether the user wants to GENERATE/SEND an invoice (an action),
+        vs just QUERY data that happens to mention 'invoice' (e.g. 'jobs with invoice_date older than 60 days').
+        Returns True only when the user is requesting invoice generation/sending.
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key:
+            return False
+        prompt = (
+            "Decide if the user wants to GENERATE or SEND an invoice PDF (an ACTION).\n"
+            "Examples that ARE invoice actions:\n"
+            "  'send invoice for Nike for March', 'generate invoice', 'create bill for Samsung'\n"
+            "Examples that are NOT invoice actions (just queries about invoice data):\n"
+            "  'what jobs have invoice_date older than 60 days', 'show invoices that are unpaid',\n"
+            "  'list jobs without invoice_date', 'how many invoices last month', 'invoice status for Nike'\n\n"
+            f"USER MESSAGE: {message}\n\n"
+            "Reply only YES if the user is asking to generate/send/email an invoice, or NO otherwise."
+        )
+        try:
+            result = self._call_api(prompt, generation_config={"maxOutputTokens": 5, "temperature": 0.0})
+            return bool(result and result.strip().upper().startswith("YES"))
+        except Exception as e:
+            logger.error(f"[GEMINI] is_invoice_action_request failed: {e}")
+            return False
+
+    def suggest_for_empty_result(self, user_message: str, recent_columns: List[str] = None) -> str:
+        """
+        Returns a short helpful suggestion when a query returned 0 rows.
+        Should briefly say nothing matched and offer 1–2 concrete alternative queries.
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key:
+            return ""
+        cols_hint = ""
+        if recent_columns:
+            cols_hint = f"\nAvailable filterable fields: {', '.join(recent_columns[:15])}"
+        prompt = (
+            "The user asked a question against their job/invoice database but the query returned no rows.\n"
+            "Write a short, professional reply (max 3 sentences, plain text, no markdown):\n"
+            "1. Tell them nothing matched their specific filter.\n"
+            "2. Suggest 1 or 2 concrete looser queries they could try (e.g. broaden a date range, drop a filter, check spelling of a client name).\n"
+            "Use '•' for bullets if needed. Be confident and helpful, not apologetic.\n"
+            f"{cols_hint}\n\n"
+            f"USER ASKED: {user_message}\n\n"
+            "Your reply:"
+        )
+        try:
+            out = self._call_api(prompt, generation_config={"maxOutputTokens": 120, "temperature": 0.3})
+            return (out or "").strip()
+        except Exception as e:
+            logger.error(f"[GEMINI] suggest_for_empty_result failed: {e}")
+            return ""
+
     def is_history_question(self, message: str) -> bool:
         """
         Returns True if the message is asking about a past/historical value

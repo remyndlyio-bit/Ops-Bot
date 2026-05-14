@@ -2416,6 +2416,33 @@ class IntentService:
             if user_mem.get("awaiting_job_input"):
                 return self._extract_and_confirm(user_id, message)
 
+            # Universal intent-shift guard: if the bot is in any single-question awaiting state
+            # and the user's message looks like a brand-new query, clear the pending state and
+            # continue with the new request instead of silently treating it as a (wrong) answer.
+            _PENDING_STATES = {
+                "awaiting_invoice_month": "the month name for a pending invoice (e.g. 'March')",
+                "awaiting_poc_email":     "a client POC email address",
+                "awaiting_send_confirmation": "a yes/no confirmation to send the invoice over email",
+                "awaiting_client_billing":   "client billing details (name, address, GST)",
+                "awaiting_poc_name":         "a POC name to address the invoice to",
+                "awaiting_bank_details":     "the user's own bank details",
+                "awaiting_name_change":      "the user's new display name",
+            }
+            _active_pending = [k for k in _PENDING_STATES if user_mem.get(k)]
+            if _active_pending:
+                ctx_desc = "; ".join(_PENDING_STATES[k] for k in _active_pending)
+                if self.gemini.is_new_query_not_response(message, ctx_desc):
+                    logger.info(f"[INTENT_SHIFT] Clearing pending states {_active_pending} — user typed a new query")
+                    _clear_patch = {k: False for k in _active_pending}
+                    _clear_patch.update({
+                        "pending_send_invoice": None,
+                        "pending_invoice_client": None,
+                        "pending_poc_email_client": None,
+                        "pending_poc_name_client": None,
+                    })
+                    self.memory.update_user_memory(user_id, _clear_patch)
+                    user_mem = self.memory.get_user_memory(user_id)  # refresh after clear
+
             # 0b1.4. Check if user is providing the month for a pending invoice
             if user_mem.get("awaiting_invoice_month"):
                 return self._handle_invoice_month_reply(user_id, message, user_mem, data_user_id, conversation_history)
@@ -2426,20 +2453,7 @@ class IntentService:
 
             # 0b1.6. Check if user is confirming sending invoice to client email
             if user_mem.get("awaiting_send_confirmation"):
-                _confirm_yn = {
-                    "yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "send it",
-                    "do it", "confirm", "yes please", "no", "n", "nope", "nah", "skip",
-                    "cancel", "not now", "later", "don't send", "dont send",
-                }
-                _is_yn = msg_lower.strip() in _confirm_yn or len(message.split()) <= 3
-                if not _is_yn:
-                    # Looks like a new query — clear email confirmation state and continue
-                    self.memory.update_user_memory(user_id, {
-                        "awaiting_send_confirmation": False,
-                        "pending_send_invoice": None,
-                    })
-                else:
-                    return self._handle_send_confirmation(user_id, message)
+                return self._handle_send_confirmation(user_id, message)
 
             # 0b1.7. Check if user is providing client billing details
             if user_mem.get("awaiting_client_billing"):
@@ -2727,19 +2741,16 @@ class IntentService:
                 "invoice" in msg_lower or _bill_as_word or "pdf" in msg_lower
                 or any(t in msg_lower for t in _INVOICE_TYPOS)
             )
-            # Also guard against aggregate/query phrasing that mentions billing as a metric
-            # e.g. "total billing", "billing amount", "billing for client" → query, not invoice
-            _BILLING_QUERY_SIGNALS = [
-                "total billing", "billing amount", "total bill", "how much billing",
-                "billing history", "billing summary", "earnings", "total earn",
-                "crossed", "overdue", "past due", "more than", "older than",
-                "over 30", "over 60", "over 90", "days old", "days ago",
-            ]
-            if any(sig in msg_lower for sig in _BILLING_QUERY_SIGNALS):
-                has_invoice_word = False
-            # If the message mentions "invoice"/"bill" (or typo), always route to the
-            # invoice flow — the LLM intent parser handles variations.
+            # If a keyword match suggests this might be an invoice request, confirm with AI
+            # — many queries mention "invoice"/"bill" without actually asking to generate one
+            # (e.g. "jobs with invoice_date older than 60 days", "show unpaid invoices",
+            # "how many invoices last month"). AI is far more reliable than keyword lists.
             is_retrieval = has_invoice_word
+            if is_retrieval:
+                if not self.gemini.is_invoice_action_request(message):
+                    logger.info(f"[INVOICE_CHECK] AI rejected invoice routing for msg='{message[:80]}' — routing to query pipeline")
+                    is_retrieval = False
+                    has_invoice_word = False
             logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
             if is_retrieval:
                 schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
@@ -3857,7 +3868,13 @@ class IntentService:
                                         response = self._format_sql_result(kw_rows)
                                 self._store_conversation(user_id, message, response)
                                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                        response = format_response(ERROR_MODE)
+                        # AI-driven helpful suggestion when SQL returned 0 rows but user has data.
+                        try:
+                            _cols = self._get_user_columns(data_user_id) if hasattr(self, "_get_user_columns") else []
+                        except Exception:
+                            _cols = []
+                        _suggest = self.gemini.suggest_for_empty_result(message, recent_columns=_cols)
+                        response = _suggest or "Nothing matched that exact filter. Try broadening your query — for example, drop a date range or check the client spelling."
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                 self._update_sql_context(user_id, rows)
