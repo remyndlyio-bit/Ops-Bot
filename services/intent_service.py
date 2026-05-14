@@ -776,8 +776,37 @@ class IntentService:
                 self._store_conversation(user_id, message, resp)
                 return {"operation": "modify_bad_value", "response": resp, "trigger_invoice": False, "invoice_data": {}}
 
-        # Apply
-        result = self.supabase.update_job_entry_field(target_id, field, value)
+        # Fetch old value + existing notes before overwriting
+        _safe_id = str(target_id).replace("'", "''")
+        _safe_field = field.replace('"', '')
+        pre = self.supabase.execute_sql(
+            f'SELECT "{_safe_field}", notes FROM public.job_entries WHERE id = \'{_safe_id}\''
+        )
+        old_value = None
+        existing_notes = ""
+        if pre.get("ok") and pre.get("rows"):
+            old_value = pre["rows"][0].get(field)
+            existing_notes = pre["rows"][0].get("notes") or ""
+
+        # Build change-history entry to append to notes
+        from datetime import date as _date
+        _label = self._MODIFY_FIELD_ALIASES.get(field, field).replace("_", " ")
+        _old_disp = (f"₹{int(float(old_value)):,}" if field == "fees" and old_value is not None
+                     else str(old_value) if old_value is not None else "—")
+        _new_disp = f"₹{value:,}" if field == "fees" else str(value)
+        history_entry = f"[{_date.today().strftime('%d %b %Y')}] {_label}: {_old_disp} → {_new_disp}"
+        new_notes = (existing_notes + "\n" + history_entry).strip() if existing_notes else history_entry
+
+        # Apply field update + notes append + RETURNING * in one shot
+        _val_param = value if not isinstance(value, str) else value.replace("'", "''")
+        _notes_param = new_notes.replace("'", "''")
+        update_sql = (
+            f'UPDATE public.job_entries SET "{field}" = \'{_val_param}\', '
+            f'notes = \'{_notes_param}\' '
+            f'WHERE id = \'{_safe_id}\' RETURNING *'
+        )
+        result = self.supabase.execute_sql(update_sql)
+
         # Clear awaiting state regardless
         self.memory.update_user_memory(user_id, {
             "awaiting_modify_field": False,
@@ -788,14 +817,12 @@ class IntentService:
             self._store_conversation(user_id, message, resp)
             return {"operation": "modify_failed", "response": resp, "trigger_invoice": False, "invoice_data": {}}
 
-        # Refresh context with the updated row
-        updated_row = result.get("row") or {}
-        if updated_row:
-            self._update_sql_context(user_id, [updated_row])
+        # Refresh context with full updated row (includes new notes with history)
+        updated_rows = result.get("rows") or []
+        if updated_rows:
+            self._update_sql_context(user_id, updated_rows)
 
-        _label = self._MODIFY_FIELD_ALIASES.get(field, field).replace("_", " ")
-        _disp_val = f"₹{value:,}" if field == "fees" else str(value)
-        resp = f"✅ Updated {_label} to {_disp_val}."
+        resp = f"✅ Updated {_label} to {_new_disp}."
         self._store_conversation(user_id, message, resp)
         return {"operation": "modify_success", "response": resp, "trigger_invoice": False, "invoice_data": {}}
 
@@ -3619,6 +3646,24 @@ class IntentService:
                         self._store_conversation(user_id, message, response)
                         return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # For UPDATE queries: snapshot old values before overwriting so we can
+            # append change history to the notes column.
+            _pre_update_rows = {}  # {row_id: {field: old_value, ...}}
+            if sanitized_sql.upper().lstrip().startswith("UPDATE"):
+                _set_match = re.search(r'\bSET\b\s+(.+?)\s+\bWHERE\b', sanitized_sql, re.IGNORECASE | re.DOTALL)
+                _where_match = re.search(r'\bWHERE\b\s+(.+?)(?:\bRETURNING\b|$)', sanitized_sql, re.IGNORECASE | re.DOTALL)
+                if _set_match and _where_match:
+                    _set_clause = _set_match.group(1)
+                    _fields_being_set = re.findall(r'"?(\w+)"?\s*=', _set_clause)
+                    _fields_being_set = [f for f in _fields_being_set if f not in ("notes",)]
+                    if _fields_being_set:
+                        _cols = ", ".join(f'"{f}"' for f in _fields_being_set) + ", id, notes"
+                        _pre_sql = f"SELECT {_cols} FROM public.job_entries WHERE {_where_match.group(1).strip()}"
+                        _pre_res = self.supabase.execute_sql(_pre_sql)
+                        if _pre_res.get("ok"):
+                            for _pr in (_pre_res.get("rows") or []):
+                                _pre_update_rows[str(_pr.get("id"))] = _pr
+
             exec_result = self.supabase.execute_sql(sanitized_sql)
             if not exec_result.get("ok"):
                 logger.error(f"[QUERY_FAIL] SQL execution failed for user {user_id}: {exec_result.get('error')} | SQL: {sanitized_sql[:200]}")
@@ -3634,6 +3679,35 @@ class IntentService:
             logger.info(f"[QUERY] op={op}, rows={len(rows)}, user={user_id}, msg='{message[:60]}'")
 
             if op == "update":
+                # Append change history to notes for each updated row
+                if _pre_update_rows and rows:
+                    from datetime import date as _date
+                    _today = _date.today().strftime('%d %b %Y')
+                    for _updated_row in rows:
+                        _rid = str(_updated_row.get("id"))
+                        _old_snap = _pre_update_rows.get(_rid, {})
+                        if not _old_snap:
+                            continue
+                        _history_parts = []
+                        for _f, _old_v in _old_snap.items():
+                            if _f in ("id", "notes"):
+                                continue
+                            _new_v = _updated_row.get(_f)
+                            if str(_old_v) != str(_new_v):
+                                _lbl = _f.replace("_", " ")
+                                _old_d = f"₹{int(float(_old_v)):,}" if _f == "fees" and _old_v is not None else str(_old_v) if _old_v is not None else "—"
+                                _new_d = f"₹{int(float(_new_v)):,}" if _f == "fees" and _new_v is not None else str(_new_v) if _new_v is not None else "—"
+                                _history_parts.append(f"{_lbl}: {_old_d} → {_new_d}")
+                        if _history_parts:
+                            _entry = f"[{_today}] " + "; ".join(_history_parts)
+                            _existing = (_old_snap.get("notes") or "").strip()
+                            _new_notes = (_existing + "\n" + _entry).strip() if _existing else _entry
+                            _safe_rid = _rid.replace("'", "''")
+                            _safe_notes = _new_notes.replace("'", "''")
+                            self.supabase.execute_sql(
+                                f"UPDATE public.job_entries SET notes = '{_safe_notes}' WHERE id = '{_safe_rid}'"
+                            )
+
                 rowcount = exec_result.get("rowcount", 0)
                 if rows:
                     self._update_sql_context(user_id, rows)
