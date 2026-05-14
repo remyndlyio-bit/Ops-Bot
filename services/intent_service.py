@@ -13,6 +13,7 @@ from services.response_formatter import (
     clarify_phrase,
     error_calm_phrase,
     query_invalid_phrase,
+    unsupported_feature_phrase,
 )
 from services.response_synthesis import build_clean_payload, build_field_answer_payload
 from utils.memory_service import MemoryService
@@ -2776,6 +2777,13 @@ class IntentService:
                     if clar_q and not _handled_downstream:
                         self._store_conversation(user_id, message, clar_q)
                         return {"operation": "ACTION_TRIGGER", "response": clar_q, "trigger_invoice": False, "invoice_data": {}}
+
+                # AI confirmed the request is out of scope (not query/invoice/action) →
+                # respond with a friendly "not yet" message instead of falling through to SQL.
+                if intent_result.get("operation") == "UNKNOWN":
+                    response = unsupported_feature_phrase(message[:80])
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "unsupported", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                 if intent_result.get("operation") != "GEMINI_ERROR":
                     # Email-specific override: if user explicitly mentions sending over email,
