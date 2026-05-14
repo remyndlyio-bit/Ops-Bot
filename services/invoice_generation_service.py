@@ -218,20 +218,14 @@ class InvoiceGenerationService:
             pdf.ln(4)
 
             # ══════════════════════════════════════════════════════════════
-            # SECTION 3 — Job table
+            # SECTION 3 — Jobs (one line per job)
+            # Format: Job N: Client | Brand | POC | Amount | Date | Bill No
             # ══════════════════════════════════════════════════════════════
-            col_sr   = 12
-            col_date = 28
-            col_desc = page_w - col_sr - col_date - 38
-            col_fee  = 38
-
             pdf.set_fill_color(*_GRAY_BAR)
             pdf.set_text_color(*_DARK)
             pdf.set_font(font_family, "B", 9)
-            pdf.cell(col_sr,   8, "Sr. No.",    1, 0, "C", True)
-            pdf.cell(col_date, 8, "Date",        1, 0, "C", True)
-            pdf.cell(col_desc, 8, "Particulars", 1, 0, "L", True)
-            pdf.cell(col_fee,  8, "Fees",         1, 1, "R", True)
+            pdf.cell(0, 7, "  Jobs", ln=1, fill=True)
+            pdf.ln(2)
 
             pdf.set_font(font_family, "", 9)
             total = 0
@@ -241,40 +235,37 @@ class InvoiceGenerationService:
                 pdf.set_text_color(*_DARK)
 
                 date_val = sanitize_pdf_text(str(row.get("job_date", "")).strip())
-                # Format date as DD/MM/YY if it's YYYY-MM-DD
                 try:
                     _d = datetime.strptime(date_val[:10], "%Y-%m-%d")
-                    date_val = _d.strftime("%d/%m/%y")
+                    date_val = _d.strftime("%d %b %y")
                 except Exception:
                     pass
 
-                job_val = sanitize_pdf_text(str(row.get("job_description_details", "")).strip())
-                brand_val = sanitize_pdf_text(str(row.get("brand_name", "") or "")).strip()
-                if brand_val and brand_val.lower() not in ("none", ""):
-                    job_val = f"{brand_val} {job_val}" if job_val else brand_val
-
-                fees_val = self._parse_fees(row.get("fees", "0"))
+                client_val = sanitize_pdf_text(str(row.get("client_name", "") or "").strip()) or "-"
+                brand_val  = sanitize_pdf_text(str(row.get("brand_name", "") or "").strip())
+                if not brand_val or brand_val.lower() == "none":
+                    brand_val = "-"
+                poc_val    = sanitize_pdf_text(str(row.get("poc_name", "") or "").strip())
+                if not poc_val or poc_val.lower() == "none":
+                    poc_val = "-"
+                bill_val   = sanitize_pdf_text(str(row.get("bill_no", "") or "").strip()) or "-"
+                fees_val   = self._parse_fees(row.get("fees", "0"))
                 total += fees_val
 
-                pdf.cell(col_sr,   8, str(idx),                           1, 0, "C", True)
-                pdf.cell(col_date, 8, date_val,                            1, 0, "C", True)
-                pdf.cell(col_desc, 8, job_val,                             1, 0, "L", True)
-                pdf.cell(col_fee,  8, f"Rs {fees_val:,.0f}",               1, 1, "R", True)
+                line = (
+                    f"Job {idx} : {client_val} | {brand_val} | {poc_val} | "
+                    f"Rs {fees_val:,.0f} | {date_val or '-'} | {bill_val}"
+                )
+                pdf.cell(0, 7, line, border=0, ln=1, align="L", fill=True)
 
-            # Empty filler rows (min 5 rows shown like reference)
-            filled = len(client_data or [])
-            for _ in range(max(0, 5 - filled)):
-                pdf.set_fill_color(*_WHITE)
-                pdf.cell(col_sr,   8, "", 1, 0, "C")
-                pdf.cell(col_date, 8, "", 1, 0, "C")
-                pdf.cell(col_desc, 8, "", 1, 0, "L")
-                pdf.cell(col_fee,  8, "", 1, 1, "R")
+            pdf.ln(2)
 
             # Total row
+            _fee_w = 40
             pdf.set_fill_color(*_GRAY_BAR)
             pdf.set_font(font_family, "B", 10)
-            pdf.cell(col_sr + col_date + col_desc, 8, "TOTAL", 1, 0, "R", True)
-            pdf.cell(col_fee, 8, sanitize_pdf_text(f"Rs {total:,.0f}"), 1, 1, "R", True)
+            pdf.cell(page_w - _fee_w, 8, "TOTAL", 1, 0, "R", True)
+            pdf.cell(_fee_w, 8, sanitize_pdf_text(f"Rs {total:,.0f}"), 1, 1, "R", True)
 
             pdf.ln(3)
 
