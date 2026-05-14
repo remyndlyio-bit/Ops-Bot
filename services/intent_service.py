@@ -798,6 +798,7 @@ class IntentService:
         new_notes = (existing_notes + "\n" + history_entry).strip() if existing_notes else history_entry
 
         # Apply field update + notes append + RETURNING * in one shot
+        logger.info(f"[MODIFY] Writing history: {history_entry}")
         _val_param = value if not isinstance(value, str) else value.replace("'", "''")
         _notes_param = new_notes.replace("'", "''")
         update_sql = (
@@ -965,7 +966,20 @@ class IntentService:
         if not last_row_data:
             logger.info("[FOLLOWUP] No last_row_data in context - allowing new query")
             return None
-        
+
+        # For "what was earlier/previous/before/prior" questions we must NOT short-circuit
+        # to the current field value — the answer lives in notes change history.
+        # Let the full-row query path handle it so Gemini sees notes.
+        _HISTORY_KEYWORDS = (
+            "earlier", "previous", "before", "prior", "used to",
+            "old amount", "old fee", "original", "initial",
+            "what was the amount", "what was the fee", "what was it before",
+        )
+        _msg_l = message.lower()
+        if any(kw in _msg_l for kw in _HISTORY_KEYWORDS):
+            logger.info("[FOLLOWUP] History/earlier question — skipping short-circuit, using full row")
+            return None
+
         # Check if this is a follow-up field request
         requested_field = self._is_followup_field_request(message, columns)
         if not requested_field:
