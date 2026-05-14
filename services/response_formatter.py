@@ -60,10 +60,22 @@ def format_response(
 
 
 def clarify_phrase(examples: Optional[List[str]] = None) -> str:
+    """Friendly, rotating clarification prompt when intent is ambiguous."""
+    import random
     if examples:
         ex = ", ".join(f"'{e}'" for e in examples[:3])
-        return f"I'm not quite sure what you're asking. Could you give a bit more detail? For example: {ex}."
-    return "Could you rephrase or narrow that down? For example, try a date range or a specific client name."
+        openers = [
+            f"Almost got it — give me a bit more to work with? Like: {ex}.",
+            f"Two ways I could read that. 🤔 Try something like: {ex}.",
+            f"Need a nudge here — could you phrase it more like: {ex}?",
+        ]
+        return random.choice(openers)
+    fallback = [
+        "Could you narrow that down? A date range or a specific client name usually does the trick.",
+        "Help me out with a bit more detail — a client, a month, or a specific field would unlock this.",
+        "I want to help but need a sharper aim. Try adding a client, a date, or what exactly you want to see.",
+    ]
+    return random.choice(fallback)
 
 
 def error_calm_phrase(technical: bool = False) -> str:
@@ -87,7 +99,30 @@ def error_calm_phrase(technical: bool = False) -> str:
 
 
 def query_invalid_phrase() -> str:
-    return (
-        "I couldn't turn that into a safe query. "
-        "Try rephrasing, e.g. 'Total billing last month' or 'Jobs for client X'."
-    )
+    """Friendly, rotating fallback when input can't be parsed into a safe query."""
+    import random
+    options = [
+        "That one lost me a little. Try 'Total billing last month' or 'Jobs for client X' — I'm great with those.",
+        "Hmm, couldn't decode that into a query. 🤔 Maybe try something like 'Unpaid invoices' or 'Jobs for Nike in March'.",
+        "Brain bandwidth exceeded on that phrasing. Give me a clearer angle, like 'How many jobs this month?' or 'Total earnings for Samsung'.",
+        "I want to help but that one's a puzzle. Try 'Jobs older than 30 days' or 'Last job for [client]' — those I can crunch fast.",
+    ]
+    return random.choice(options)
+
+
+def unsupported_feature_phrase(feature_hint: str = "") -> str:
+    """Friendly response when the user asks for something the bot can't do yet
+    (charts, predictions, integrations, voice, etc.). Owns the limitation,
+    redirects to what IS supported, never sounds defeated."""
+    import random
+    base = [
+        "Not in my skill tree yet 🪄 — but I'm great at logging jobs, sending invoices, chasing payments, and answering data questions.",
+        "Plot twist: I can't do that one *yet*. What I CAN do: track jobs, generate invoices, send reminders, pull billing data. Want a hand with any of those?",
+        "That's outside my wingspan for now. Stick to jobs / invoices / payments / data queries and I'll move mountains. ⛰️",
+        "Coming soon to a bot near you — but not today. For now I can handle jobs, invoices, reminders, and anything data-related. Try me?",
+        "I haven't learned that trick yet. 🎩 But ask me about your jobs, fees, unpaid invoices, or send-an-invoice flow — that's my zone.",
+    ]
+    msg = random.choice(base)
+    if feature_hint:
+        msg = msg + f"\n\n(You asked about: {feature_hint.strip()})"
+    return msg
