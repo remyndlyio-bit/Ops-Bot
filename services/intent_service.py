@@ -160,9 +160,12 @@ def _generate_jobs_excel(rows: list, user_id: str) -> str:
         ws.row_dimensions[ri].height = 16
 
     # ── Column widths ────────────────────────────────────────────────
+    # Row 1 is the merged Remyndly banner — its non-anchor cells are MergedCell
+    # instances that don't expose .column_letter. Use get_column_letter(idx) instead.
+    from openpyxl.utils import get_column_letter
     WIDTHS = [22, 22, 32, 14, 16, 18]
     for ci, w in enumerate(WIDTHS, 1):
-        ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+        ws.column_dimensions[get_column_letter(ci)].width = w
 
     safe_uid = re.sub(r'[^a-zA-Z0-9]', '_', str(user_id))[-20:]
     filename = f"jobs_{safe_uid}_{int(time.time())}.xlsx"
