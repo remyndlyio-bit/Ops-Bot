@@ -478,6 +478,24 @@ def _build_filter_clause(col: str, val, use_ilike: bool = True) -> str:
         quoted = ", ".join(_sql_quote(v) for v in val)
         return f"{col} IN ({quoted})"
 
+    # Handle operator dict: {"operator": "<", "value": "2026-03-14"}
+    if isinstance(val, dict) and "operator" in val and "value" in val:
+        op = val["operator"]
+        v = val["value"]
+        if op not in ("<", ">", "<=", ">=", "=", "!="):
+            op = "="
+        return f"{col} {op} {_sql_quote(v)}"
+
+    # Handle operator-prefixed string: "< 2026-03-14", ">= 50000", etc.
+    if isinstance(val, str):
+        import re as _re
+        _op_m = _re.match(r'^(<=|>=|!=|<|>|=)\s*(.+)$', val.strip())
+        if _op_m:
+            op, v = _op_m.group(1), _op_m.group(2).strip()
+            if _is_numeric(v):
+                return f"{col} {op} {v}"
+            return f"{col} {op} {_sql_quote(v)}"
+
     # Special case: paid column uses NULL/empty for unpaid, 'true' for paid
     if col == "paid":
         val_str = str(val).lower().strip()

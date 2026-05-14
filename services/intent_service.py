@@ -22,6 +22,154 @@ from typing import Dict, List, Optional
 import json
 import os
 import re
+import time
+
+
+def _is_full_job_row(row: dict) -> bool:
+    """True when the row is a SELECT * from job_entries (not an aggregate)."""
+    return "bill_no" in row or "job_date" in row
+
+
+def _format_job_card(row: dict) -> str:
+    client = (row.get("client_name") or row.get("brand_name") or
+              row.get("production_house") or "—").strip()
+    brand = (row.get("brand_name") or "").strip()
+    poc_name = (row.get("poc_name") or "").strip()
+    poc_email = (row.get("poc_email") or "").strip()
+    if poc_name and poc_email:
+        poc = f"{poc_name} ({poc_email})"
+    elif poc_name:
+        poc = poc_name
+    elif poc_email:
+        poc = poc_email
+    else:
+        poc = "—"
+
+    fees = row.get("fees")
+    try:
+        amount = f"₹{int(float(fees)):,}" if fees is not None else "—"
+    except (ValueError, TypeError):
+        amount = str(fees) if fees else "—"
+
+    inv_date_raw = row.get("invoice_date")
+    if inv_date_raw:
+        try:
+            from datetime import datetime as _dt
+            inv_date_str = _dt.strptime(str(inv_date_raw)[:10], "%Y-%m-%d").strftime("%-d %b %Y")
+        except Exception:
+            inv_date_str = str(inv_date_raw)[:10]
+    else:
+        inv_date_str = "Not sent"
+
+    bill_no = (row.get("bill_no") or "—").strip()
+
+    lines = [f"Client: {client}"]
+    if brand and brand.lower() != client.lower():
+        lines.append(f"Brand: {brand}")
+    lines.append(f"POC: {poc}")
+    lines.append(f"Amount: {amount}")
+    lines.append(f"Invoice Date: {inv_date_str}")
+    lines.append(f"Invoice No: {bill_no}")
+    return "\n".join(lines)
+
+
+def _format_job_cards(rows: list) -> str:
+    cards = []
+    for i, row in enumerate(rows, 1):
+        prefix = f"Job {i}\n" if len(rows) > 1 else ""
+        cards.append(prefix + _format_job_card(row))
+    return "\n\n".join(cards)
+
+
+def _generate_jobs_excel(rows: list, user_id: str) -> str:
+    """Generate a branded Remyndly xlsx. Returns the file path."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    # Fixed columns — exactly the discussed job format, no extras
+    COLS = [
+        ("client_name",  "Client Name"),
+        ("brand_name",   "Brand Name"),
+        ("_poc",         "POC"),           # computed: poc_name (poc_email)
+        ("fees",         "Amount"),
+        ("invoice_date", "Invoice Date"),
+        ("bill_no",      "Invoice No"),
+    ]
+    NUM_COLS = len(COLS)
+
+    BRAND_COLOR  = "1A1A2E"   # dark navy — Remyndly brand
+    HEADER_COLOR = "2D6BE4"   # blue column headers
+    ALT_COLOR    = "EEF3FC"   # alternating row tint
+    WHITE        = "FFFFFF"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Jobs"
+
+    # ── Row 1: Remyndly branding banner ─────────────────────────────
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
+    brand_cell = ws.cell(row=1, column=1, value="Remyndly")
+    brand_cell.font      = Font(name="Calibri", bold=True, size=16, color=WHITE)
+    brand_cell.fill      = PatternFill("solid", fgColor=BRAND_COLOR)
+    brand_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
+
+    # ── Row 2: column headers ────────────────────────────────────────
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(bottom=thin)
+    for ci, (_, header) in enumerate(COLS, 1):
+        cell = ws.cell(row=2, column=ci, value=header)
+        cell.font      = Font(name="Calibri", bold=True, color=WHITE)
+        cell.fill      = PatternFill("solid", fgColor=HEADER_COLOR)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border    = border
+    ws.row_dimensions[2].height = 20
+
+    # ── Rows 3+: data ────────────────────────────────────────────────
+    for ri, row in enumerate(rows, 3):
+        fill = PatternFill("solid", fgColor=ALT_COLOR) if ri % 2 == 1 else None
+        for ci, (field, _) in enumerate(COLS, 1):
+            if field == "_poc":
+                poc_name  = (row.get("poc_name")  or "").strip()
+                poc_email = (row.get("poc_email") or "").strip()
+                if poc_name and poc_email:
+                    val = f"{poc_name} ({poc_email})"
+                else:
+                    val = poc_name or poc_email or ""
+            else:
+                raw = row.get(field)
+                if field == "fees" and raw is not None:
+                    try:
+                        val = int(float(raw))
+                    except (ValueError, TypeError):
+                        val = raw
+                elif field == "invoice_date" and raw:
+                    try:
+                        from datetime import datetime as _dt
+                        val = _dt.strptime(str(raw)[:10], "%Y-%m-%d").strftime("%-d %b %Y")
+                    except Exception:
+                        val = str(raw)[:10]
+                else:
+                    val = str(raw).strip() if raw is not None else ""
+
+            cell = ws.cell(row=ri, column=ci, value=val if val != "" else None)
+            cell.alignment = Alignment(vertical="center")
+            if fill:
+                cell.fill = fill
+
+        ws.row_dimensions[ri].height = 16
+
+    # ── Column widths ────────────────────────────────────────────────
+    WIDTHS = [22, 22, 32, 14, 16, 18]
+    for ci, w in enumerate(WIDTHS, 1):
+        ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+
+    safe_uid = re.sub(r'[^a-zA-Z0-9]', '_', str(user_id))[-20:]
+    filename = f"jobs_{safe_uid}_{int(time.time())}.xlsx"
+    path = os.path.join("output", filename)
+    wb.save(path)
+    return path
+
 
 class IntentService:
     # Cache AI-generated schema by column names so we don't call the AI on every message
@@ -628,8 +776,38 @@ class IntentService:
                 self._store_conversation(user_id, message, resp)
                 return {"operation": "modify_bad_value", "response": resp, "trigger_invoice": False, "invoice_data": {}}
 
-        # Apply
-        result = self.supabase.update_job_entry_field(target_id, field, value)
+        # Fetch old value + existing notes before overwriting
+        _safe_id = str(target_id).replace("'", "''")
+        _safe_field = field.replace('"', '')
+        pre = self.supabase.execute_sql(
+            f'SELECT "{_safe_field}", notes FROM public.job_entries WHERE id = \'{_safe_id}\''
+        )
+        old_value = None
+        existing_notes = ""
+        if pre.get("ok") and pre.get("rows"):
+            old_value = pre["rows"][0].get(field)
+            existing_notes = pre["rows"][0].get("notes") or ""
+
+        # Build change-history entry to append to notes
+        from datetime import date as _date
+        _label = self._MODIFY_FIELD_ALIASES.get(field, field).replace("_", " ")
+        _old_disp = (f"₹{int(float(old_value)):,}" if field == "fees" and old_value is not None
+                     else str(old_value) if old_value is not None else "—")
+        _new_disp = f"₹{value:,}" if field == "fees" else str(value)
+        history_entry = f"[{_date.today().strftime('%d %b %Y')}] {_label}: {_old_disp} → {_new_disp}"
+        new_notes = (existing_notes + "\n" + history_entry).strip() if existing_notes else history_entry
+
+        # Apply field update + notes append + RETURNING * in one shot
+        logger.info(f"[MODIFY] Writing history: {history_entry}")
+        _val_param = value if not isinstance(value, str) else value.replace("'", "''")
+        _notes_param = new_notes.replace("'", "''")
+        update_sql = (
+            f'UPDATE public.job_entries SET "{field}" = \'{_val_param}\', '
+            f'notes = \'{_notes_param}\' '
+            f'WHERE id = \'{_safe_id}\' RETURNING *'
+        )
+        result = self.supabase.execute_sql(update_sql)
+
         # Clear awaiting state regardless
         self.memory.update_user_memory(user_id, {
             "awaiting_modify_field": False,
@@ -640,14 +818,12 @@ class IntentService:
             self._store_conversation(user_id, message, resp)
             return {"operation": "modify_failed", "response": resp, "trigger_invoice": False, "invoice_data": {}}
 
-        # Refresh context with the updated row
-        updated_row = result.get("row") or {}
-        if updated_row:
-            self._update_sql_context(user_id, [updated_row])
+        # Refresh context with full updated row (includes new notes with history)
+        updated_rows = result.get("rows") or []
+        if updated_rows:
+            self._update_sql_context(user_id, updated_rows)
 
-        _label = self._MODIFY_FIELD_ALIASES.get(field, field).replace("_", " ")
-        _disp_val = f"₹{value:,}" if field == "fees" else str(value)
-        resp = f"✅ Updated {_label} to {_disp_val}."
+        resp = f"✅ Updated {_label} to {_new_disp}."
         self._store_conversation(user_id, message, resp)
         return {"operation": "modify_success", "response": resp, "trigger_invoice": False, "invoice_data": {}}
 
@@ -790,7 +966,22 @@ class IntentService:
         if not last_row_data:
             logger.info("[FOLLOWUP] No last_row_data in context - allowing new query")
             return None
-        
+
+        # For "what was earlier/previous/before/prior" questions we must NOT short-circuit
+        # to the current field value — the answer lives in notes change history.
+        # Let the full-row query path handle it so Gemini sees notes.
+        _HISTORY_KEYWORDS = (
+            "earlier", "previous", "before", "prior", "used to",
+            "old amount", "old fee", "original", "initial",
+            "what was the amount", "what was the fee", "what was it before",
+            "last amount", "last fee", "what was the last", "before the update",
+            "previously", "originally",
+        )
+        _msg_l = message.lower()
+        if any(kw in _msg_l for kw in _HISTORY_KEYWORDS):
+            logger.info("[FOLLOWUP] History/earlier question — skipping short-circuit, using full row")
+            return None
+
         # Check if this is a follow-up field request
         requested_field = self._is_followup_field_request(message, columns)
         if not requested_field:
@@ -2244,7 +2435,20 @@ class IntentService:
 
             # 0b1.6. Check if user is confirming sending invoice to client email
             if user_mem.get("awaiting_send_confirmation"):
-                return self._handle_send_confirmation(user_id, message)
+                _confirm_yn = {
+                    "yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "send it",
+                    "do it", "confirm", "yes please", "no", "n", "nope", "nah", "skip",
+                    "cancel", "not now", "later", "don't send", "dont send",
+                }
+                _is_yn = msg_lower.strip() in _confirm_yn or len(message.split()) <= 3
+                if not _is_yn:
+                    # Looks like a new query — clear email confirmation state and continue
+                    self.memory.update_user_memory(user_id, {
+                        "awaiting_send_confirmation": False,
+                        "pending_send_invoice": None,
+                    })
+                else:
+                    return self._handle_send_confirmation(user_id, message)
 
             # 0b1.7. Check if user is providing client billing details
             if user_mem.get("awaiting_client_billing"):
@@ -2537,6 +2741,8 @@ class IntentService:
             _BILLING_QUERY_SIGNALS = [
                 "total billing", "billing amount", "total bill", "how much billing",
                 "billing history", "billing summary", "earnings", "total earn",
+                "crossed", "overdue", "past due", "more than", "older than",
+                "over 30", "over 60", "over 90", "days old", "days ago",
             ]
             if any(sig in msg_lower for sig in _BILLING_QUERY_SIGNALS):
                 has_invoice_word = False
@@ -3456,12 +3662,30 @@ class IntentService:
                         self._store_conversation(user_id, message, response)
                         return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # For UPDATE queries: snapshot old values before overwriting so we can
+            # append change history to the notes column.
+            _pre_update_rows = {}  # {row_id: {field: old_value, ...}}
+            if sanitized_sql.upper().lstrip().startswith("UPDATE"):
+                _set_match = re.search(r'\bSET\b\s+(.+?)\s+\bWHERE\b', sanitized_sql, re.IGNORECASE | re.DOTALL)
+                _where_match = re.search(r'\bWHERE\b\s+(.+?)(?:\bRETURNING\b|$)', sanitized_sql, re.IGNORECASE | re.DOTALL)
+                if _set_match and _where_match:
+                    _set_clause = _set_match.group(1)
+                    _fields_being_set = re.findall(r'"?(\w+)"?\s*=', _set_clause)
+                    _fields_being_set = [f for f in _fields_being_set if f not in ("notes",)]
+                    if _fields_being_set:
+                        _cols = ", ".join(f'"{f}"' for f in _fields_being_set) + ", id, notes"
+                        _pre_sql = f"SELECT {_cols} FROM public.job_entries WHERE {_where_match.group(1).strip()}"
+                        _pre_res = self.supabase.execute_sql(_pre_sql)
+                        if _pre_res.get("ok"):
+                            for _pr in (_pre_res.get("rows") or []):
+                                _pre_update_rows[str(_pr.get("id"))] = _pr
+
             exec_result = self.supabase.execute_sql(sanitized_sql)
             if not exec_result.get("ok"):
                 logger.error(f"[QUERY_FAIL] SQL execution failed for user {user_id}: {exec_result.get('error')} | SQL: {sanitized_sql[:200]}")
                 response = format_response(
                     ERROR_MODE,
-                    error_detail=exec_result.get("error") or error_calm_phrase(),
+                    error_detail=error_calm_phrase(),
                 )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -3471,6 +3695,35 @@ class IntentService:
             logger.info(f"[QUERY] op={op}, rows={len(rows)}, user={user_id}, msg='{message[:60]}'")
 
             if op == "update":
+                # Append change history to notes for each updated row
+                if _pre_update_rows and rows:
+                    from datetime import date as _date
+                    _today = _date.today().strftime('%d %b %Y')
+                    for _updated_row in rows:
+                        _rid = str(_updated_row.get("id"))
+                        _old_snap = _pre_update_rows.get(_rid, {})
+                        if not _old_snap:
+                            continue
+                        _history_parts = []
+                        for _f, _old_v in _old_snap.items():
+                            if _f in ("id", "notes"):
+                                continue
+                            _new_v = _updated_row.get(_f)
+                            if str(_old_v) != str(_new_v):
+                                _lbl = _f.replace("_", " ")
+                                _old_d = f"₹{int(float(_old_v)):,}" if _f == "fees" and _old_v is not None else str(_old_v) if _old_v is not None else "—"
+                                _new_d = f"₹{int(float(_new_v)):,}" if _f == "fees" and _new_v is not None else str(_new_v) if _new_v is not None else "—"
+                                _history_parts.append(f"{_lbl}: {_old_d} → {_new_d}")
+                        if _history_parts:
+                            _entry = f"[{_today}] " + "; ".join(_history_parts)
+                            _existing = (_old_snap.get("notes") or "").strip()
+                            _new_notes = (_existing + "\n" + _entry).strip() if _existing else _entry
+                            _safe_rid = _rid.replace("'", "''")
+                            _safe_notes = _new_notes.replace("'", "''")
+                            self.supabase.execute_sql(
+                                f"UPDATE public.job_entries SET notes = '{_safe_notes}' WHERE id = '{_safe_rid}'"
+                            )
+
                 rowcount = exec_result.get("rowcount", 0)
                 if rows:
                     self._update_sql_context(user_id, rows)
@@ -3591,10 +3844,20 @@ class IntentService:
                                 ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
                                 ctx["last_sql"] = kw_sql
                                 self.memory.update_user_memory(user_id, {"uscf_context": ctx})
-                                payload = build_clean_payload(kw_rows, "select")
-                                response = self.gemini.synthesize_response(payload, message)
-                                if not response or not response.strip():
-                                    response = self._format_sql_result(kw_rows)
+                                if len(kw_rows) > 4:
+                                    excel_path = _generate_jobs_excel(kw_rows, data_user_id)
+                                    response = f"Found {len(kw_rows)} results — here's a spreadsheet with all of them."
+                                    self._store_conversation(user_id, message, response)
+                                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
+                                _HISTORY_KW = ("earlier", "previous", "before", "prior", "used to", "old amount", "old fee", "original", "initial", "what was the amount", "what was the fee", "what was it before", "last amount", "last fee", "what was the last", "before the update", "previously", "originally")
+                                _is_history_q = any(kw in message.lower() for kw in _HISTORY_KW)
+                                if _is_full_job_row(kw_rows[0]) and not _is_history_q:
+                                    response = _format_job_cards(kw_rows)
+                                else:
+                                    payload = build_clean_payload(kw_rows, "select")
+                                    response = self.gemini.synthesize_response(payload, message)
+                                    if not response or not response.strip():
+                                        response = self._format_sql_result(kw_rows)
                                 self._store_conversation(user_id, message, response)
                                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                         response = format_response(ERROR_MODE)
@@ -3605,13 +3868,25 @@ class IntentService:
                 ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
                 ctx["last_sql"] = sanitized_sql
                 self.memory.update_user_memory(user_id, {"uscf_context": ctx})
-                payload = build_clean_payload(rows, "select")
-                response = self.gemini.synthesize_response(payload, message)
-                if not response or not response.strip():
-                    logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
-                    response = "I found matching records but couldn't format the reply. Try asking again?"
+                if len(rows) > 4:
+                    excel_path = _generate_jobs_excel(rows, data_user_id)
+                    response = f"Found {len(rows)} results — here's a spreadsheet with all of them."
+                    logger.info(f"[QUERY] Excel generated: {excel_path} ({len(rows)} rows)")
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
+                _HISTORY_KW = ("earlier", "previous", "before", "prior", "used to", "old amount", "old fee", "original", "initial", "what was the amount", "what was the fee", "what was it before", "last amount", "last fee", "what was the last", "before the update", "previously", "originally")
+                _is_history_q = any(kw in message.lower() for kw in _HISTORY_KW)
+                if _is_full_job_row(rows[0]) and not _is_history_q:
+                    response = _format_job_cards(rows)
+                    logger.info(f"[QUERY] Success: {len(rows)} rows (structured card format)")
                 else:
-                    logger.info(f"[QUERY] Success: {len(rows)} rows, response length={len(response)}")
+                    payload = build_clean_payload(rows, "select")
+                    response = self.gemini.synthesize_response(payload, message)
+                    if not response or not response.strip():
+                        logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
+                        response = "I found matching records but couldn't format the reply. Try asking again?"
+                    else:
+                        logger.info(f"[QUERY] Success: {len(rows)} rows, response length={len(response)}")
 
         except Exception as e:
             logger.error(f"[QUERY_FAIL] Exception for user {user_id}, msg='{message[:60]}': {e}", exc_info=True)

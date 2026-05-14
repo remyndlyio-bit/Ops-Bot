@@ -114,9 +114,13 @@ def build_field_answer_payload(
     Used when user asks for a single field from the last result (e.g. "what was the client?")
     related_context gives AI optional context for natural phrasing.
     """
-    # Build related_context from other non-null fields (exclude the asked field)
+    # Build related_context from other non-null fields (exclude the asked field).
+    # Always include notes so Gemini can read change history for "earlier value" questions.
     related = _clean_row({k: v for k, v in full_row.items() if str(k).lower() != str(field_name).lower()})
+    notes_val = related.pop("notes", None)
     related_context = dict(list(related.items())[:6])
+    if notes_val:
+        related_context["notes"] = notes_val
     v_clean = _clean_value(value)
     return {
         "type": "field_answer",
