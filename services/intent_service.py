@@ -4275,18 +4275,21 @@ class IntentService:
         return {"operation": "onboarding_started", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _continue_onboarding(self, user_id: str, message: str, profile: Dict) -> Dict:
-        """Continue onboarding based on what info we already have."""
+        """Continue onboarding. All three fields (name, email, industry) are required."""
         platform = profile.get("platform", "telegram")
-        
-        # Check what step we're on
+
+        # Parse existing preferences (stored as JSONB string)
+        prefs = profile.get("preferences") or {}
+        if isinstance(prefs, str):
+            try:
+                prefs = json.loads(prefs)
+            except Exception:
+                prefs = {}
+
+        # ── Step 1: Name (required) ───────────────────────────────────────
         if not profile.get("name"):
-            # Step 1: Get name
             raw_name = message.strip()
 
-            # Detect greetings / small-talk so we don't save "Hi" as the name.
-            # Tokenize and check if the message is composed only of greeting/filler
-            # tokens — covers "Hello", "Hi!!", "hey hey", "good morning",
-            # "namaste ji", "yo sup" etc.
             _GREETING_WORDS = {
                 "hi", "hello", "helo", "hey", "heyy", "heyyy", "hii", "hiii",
                 "yo", "sup", "hola", "howdy", "morning", "evening", "afternoon",
@@ -4297,73 +4300,100 @@ class IntentService:
             _stripped = raw_name.lower().strip("!?.,:;'\"() ")
             _tokens = re.findall(r"[a-z']+", _stripped)
             _is_greeting_only = bool(_tokens) and all(t in _GREETING_WORDS for t in _tokens)
-            # Also catch the original exact-phrase forms (multi-word lookups)
             if _stripped in {"good morning", "good evening", "good afternoon",
                              "whats up", "what's up"}:
                 _is_greeting_only = True
-            if _is_greeting_only:
-                response = "Hey there! 👋 Before we begin, what's your name?"
+            if _is_greeting_only or raw_name.lower() in ("skip", "no", "n/a", ""):
+                response = "Before we begin, please share your full name — it's required to set up your account."
                 self._store_conversation(user_id, message, response)
                 return {"operation": "onboarding_name_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            if raw_name.lower() in ("skip", "no", "n/a"):
-                name = "there"  # Generic greeting instead of user_id
+            ai_name = self.gemini.extract_name(raw_name)
+            if ai_name:
+                name = ai_name.title()
             else:
-                # Use AI to extract the name — handles any language (English, Hindi, Hinglish, etc.)
-                ai_name = self.gemini.extract_name(raw_name)
-                if ai_name:
-                    name = ai_name.title()
-                else:
-                    # Fallback: pattern matching if AI call fails
-                    name_patterns = [
-                        "मेरा नाम ", "मैं ",
-                        "mera naam ", "mera name ", "main hoon ",
-                        "my name is ", "i'm ", "i am ",
-                        "call me ", "this is ", "it's ", "its ",
-                    ]
-                    _trailing_filler = [
-                        " है", " हैं", " हूँ", " हूं", " हु",
-                        " hai", " he", " hoon", " hun", " hu",
-                    ]
-                    name = raw_name
-                    for pattern in name_patterns:
-                        if pattern.lower() in raw_name.lower():
-                            idx = raw_name.lower().find(pattern.lower())
-                            name = raw_name[idx + len(pattern):].strip()
-                            break
-                    for filler in _trailing_filler:
-                        if name.lower().endswith(filler.lower()):
-                            name = name[: len(name) - len(filler)].strip()
-                            break
-                    if len(name.split()) > 3:
-                        name = " ".join(name.split()[:2])
-                    if name:
-                        name = name.title()
-            
+                # Fallback: pattern matching if AI call fails
+                name_patterns = [
+                    "मेरा नाम ", "मैं ",
+                    "mera naam ", "mera name ", "main hoon ",
+                    "my name is ", "i'm ", "i am ",
+                    "call me ", "this is ", "it's ", "its ",
+                ]
+                _trailing_filler = [
+                    " है", " हैं", " हूँ", " हूं", " हु",
+                    " hai", " he", " hoon", " hun", " hu",
+                ]
+                name = raw_name
+                for pattern in name_patterns:
+                    if pattern.lower() in raw_name.lower():
+                        idx = raw_name.lower().find(pattern.lower())
+                        name = raw_name[idx + len(pattern):].strip()
+                        break
+                for filler in _trailing_filler:
+                    if name.lower().endswith(filler.lower()):
+                        name = name[: len(name) - len(filler)].strip()
+                        break
+                if len(name.split()) > 3:
+                    name = " ".join(name.split()[:2])
+                if name:
+                    name = name.title()
+
+            if not name or len(name.strip()) < 2:
+                response = "I didn't catch your name. Please type your full name (e.g. 'Akshaj Kasliwal')."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "onboarding_name_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             result = self.supabase.upsert_user_profile(user_id, platform, {"name": name})
             if not result.get("ok"):
                 logger.error(f"[ONBOARDING] Failed to save name for {user_id}: {result.get('error')}")
-                # Still respond but log the error
-            
+
             response = (
                 f"Nice to meet you, {name}! 🎉\n\n"
-                "What's your company or business name?\n"
-                "(Type 'skip' to use your name)"
+                "What's your email address? (used on invoices and for communication)"
             )
             self._store_conversation(user_id, message, response)
             return {"operation": "onboarding_name", "response": response, "trigger_invoice": False, "invoice_data": {}}
-        
-        elif not profile.get("company_name"):
-            # Step 2: Get company name, then complete onboarding
-            company = message.strip()
-            if company.lower() in ("skip", "no", "n/a"):
-                company = profile.get("name", "Your Business")
-            
-            # Save company name AND mark as onboarded in one call
+
+        # ── Step 2: Email (required, validated) ───────────────────────────
+        elif not prefs.get("invoice_email"):
+            raw = message.strip()
+            # Try to extract an email if it's embedded in a sentence
+            _m = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", raw)
+            candidate = _m.group(0) if _m else raw
+            if raw.lower() in ("skip", "no", "n/a") or not self._is_valid_email(candidate):
+                response = (
+                    "I need a valid email address to continue (e.g. name@company.com). "
+                    "This appears on your invoices and is required."
+                )
+                self._store_conversation(user_id, message, response)
+                return {"operation": "onboarding_email_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            prefs["invoice_email"] = candidate
+            self.supabase.upsert_user_profile(user_id, platform, {"preferences": prefs})
+
+            response = (
+                f"Got it. Saved {candidate} ✅\n\n"
+                "Last step — what industry are you in?\n"
+                "(e.g. Video Production, Photography, Design, Marketing, Consulting, etc.)"
+            )
+            self._store_conversation(user_id, message, response)
+            return {"operation": "onboarding_email", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # ── Step 3: Industry (required) ───────────────────────────────────
+        elif not prefs.get("industry"):
+            industry = message.strip()
+            if industry.lower() in ("skip", "no", "n/a", "") or len(industry) < 2:
+                response = "Please share your industry — it's required (e.g. Video Production, Photography, Design, Consulting)."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "onboarding_industry_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            if len(industry) > 80:
+                industry = industry[:80]
+            prefs["industry"] = industry
+
             from datetime import datetime
             self.supabase.upsert_user_profile(user_id, platform, {
-                "company_name": company,
-                "onboarded_at": datetime.now().isoformat()
+                "preferences": prefs,
+                "onboarded_at": datetime.now().isoformat(),
             })
             
             user_name = profile.get("name", "there")
