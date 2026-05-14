@@ -82,44 +82,87 @@ def _format_job_cards(rows: list) -> str:
 
 
 def _generate_jobs_excel(rows: list, user_id: str) -> str:
-    """Write rows to an xlsx file in output/. Returns the file path."""
+    """Generate a branded Remyndly xlsx. Returns the file path."""
     import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-    # Preferred column order for full job rows; fall back to actual keys for other result sets
-    PREFERRED = [
-        ("job_date", "Date"), ("client_name", "Client"), ("brand_name", "Brand"),
-        ("production_house", "Production House"), ("job_description_details", "Description"),
-        ("poc_name", "POC Name"), ("poc_email", "POC Email"), ("fees", "Amount (₹)"),
-        ("invoice_date", "Invoice Date"), ("bill_no", "Invoice No"), ("paid", "Paid"),
+    # Fixed columns — exactly the discussed job format, no extras
+    COLS = [
+        ("client_name",  "Client Name"),
+        ("brand_name",   "Brand Name"),
+        ("_poc",         "POC"),           # computed: poc_name (poc_email)
+        ("fees",         "Amount"),
+        ("invoice_date", "Invoice Date"),
+        ("bill_no",      "Invoice No"),
     ]
-    row_keys = list(rows[0].keys()) if rows else []
-    preferred_keys = [k for k, _ in PREFERRED]
-    # Use preferred order for known columns, append any extras
-    COLS = [(k, h) for k, h in PREFERRED if k in row_keys]
-    COLS += [(k, k) for k in row_keys if k not in preferred_keys and k not in ("id", "user_id", "isDeleted")]
+    NUM_COLS = len(COLS)
+
+    BRAND_COLOR  = "1A1A2E"   # dark navy — Remyndly brand
+    HEADER_COLOR = "2D6BE4"   # blue column headers
+    ALT_COLOR    = "EEF3FC"   # alternating row tint
+    WHITE        = "FFFFFF"
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Jobs"
 
-    hfont = Font(bold=True)
-    hfill = PatternFill("solid", fgColor="D9E1F2")
+    # ── Row 1: Remyndly branding banner ─────────────────────────────
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=NUM_COLS)
+    brand_cell = ws.cell(row=1, column=1, value="Remyndly")
+    brand_cell.font      = Font(name="Calibri", bold=True, size=16, color=WHITE)
+    brand_cell.fill      = PatternFill("solid", fgColor=BRAND_COLOR)
+    brand_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
+
+    # ── Row 2: column headers ────────────────────────────────────────
+    thin = Side(style="thin", color="CCCCCC")
+    border = Border(bottom=thin)
     for ci, (_, header) in enumerate(COLS, 1):
-        cell = ws.cell(row=1, column=ci, value=header)
-        cell.font = hfont
-        cell.fill = hfill
-        cell.alignment = Alignment(horizontal="center")
+        cell = ws.cell(row=2, column=ci, value=header)
+        cell.font      = Font(name="Calibri", bold=True, color=WHITE)
+        cell.fill      = PatternFill("solid", fgColor=HEADER_COLOR)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border    = border
+    ws.row_dimensions[2].height = 20
 
-    for ri, row in enumerate(rows, 2):
+    # ── Rows 3+: data ────────────────────────────────────────────────
+    for ri, row in enumerate(rows, 3):
+        fill = PatternFill("solid", fgColor=ALT_COLOR) if ri % 2 == 1 else None
         for ci, (field, _) in enumerate(COLS, 1):
-            val = row.get(field)
-            if val is not None:
-                ws.cell(row=ri, column=ci, value=str(val)[:120] if isinstance(val, str) else val)
+            if field == "_poc":
+                poc_name  = (row.get("poc_name")  or "").strip()
+                poc_email = (row.get("poc_email") or "").strip()
+                if poc_name and poc_email:
+                    val = f"{poc_name} ({poc_email})"
+                else:
+                    val = poc_name or poc_email or ""
+            else:
+                raw = row.get(field)
+                if field == "fees" and raw is not None:
+                    try:
+                        val = int(float(raw))
+                    except (ValueError, TypeError):
+                        val = raw
+                elif field == "invoice_date" and raw:
+                    try:
+                        from datetime import datetime as _dt
+                        val = _dt.strptime(str(raw)[:10], "%Y-%m-%d").strftime("%-d %b %Y")
+                    except Exception:
+                        val = str(raw)[:10]
+                else:
+                    val = str(raw).strip() if raw is not None else ""
 
-    for col in ws.columns:
-        max_len = max((len(str(c.value or "")) for c in col), default=10)
-        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 40)
+            cell = ws.cell(row=ri, column=ci, value=val if val != "" else None)
+            cell.alignment = Alignment(vertical="center")
+            if fill:
+                cell.fill = fill
+
+        ws.row_dimensions[ri].height = 16
+
+    # ── Column widths ────────────────────────────────────────────────
+    WIDTHS = [22, 22, 32, 14, 16, 18]
+    for ci, w in enumerate(WIDTHS, 1):
+        ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
 
     safe_uid = re.sub(r'[^a-zA-Z0-9]', '_', str(user_id))[-20:]
     filename = f"jobs_{safe_uid}_{int(time.time())}.xlsx"
