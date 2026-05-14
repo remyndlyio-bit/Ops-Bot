@@ -58,8 +58,8 @@ class ResendEmailService:
     REMINDER_DISCLAIMER = (
         "\n\n---\n"
         "Disclaimer: This is an automated payment reminder. "
-        "If payment has already been processed, kindly disregard this message. "
-        "For any questions or clarifications, please reply directly to this email.\n"
+        "If payment has already been processed, kindly disregard. "
+        "For any questions, please reply all to this email. "
         "Sent via Remyndly — your operations assistant."
     )
 
