@@ -684,7 +684,7 @@ class SupabaseService:
 
     _BANK_DETAIL_FIELDS = [
         "bank_account_name", "bank_account_number", "bank_ifsc",
-        "bank_name", "upi_id",
+        "bank_name", "upi_id", "mobile_number", "pan_number", "gst_number",
     ]
 
     def get_user_bank_details(self, user_id: str) -> Dict[str, Any]:

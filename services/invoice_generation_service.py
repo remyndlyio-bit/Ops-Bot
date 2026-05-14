@@ -20,11 +20,10 @@ def sanitize_pdf_text(text):
     text = text.replace("—", "-")
     text = text.replace("–", "-")
     text = text.replace("₹", "Rs ")
-    text = text.replace("\u201c", '"')
-    text = text.replace("\u201d", '"')
-    # Final guard: transliterate any remaining non-Latin-1 characters
+    text = text.replace("“", '"')
+    text = text.replace("”", '"')
     try:
-        text.encode("latin-1")          # fast check — raises if outside range
+        text.encode("latin-1")
     except (UnicodeEncodeError, UnicodeDecodeError):
         try:
             from unidecode import unidecode
@@ -32,6 +31,14 @@ def sanitize_pdf_text(text):
         except ImportError:
             text = text.encode("latin-1", errors="replace").decode("latin-1")
     return text
+
+
+# Brand colors
+_DARK = (30, 30, 30)
+_GRAY_BAR = (220, 220, 220)
+_WHITE = (255, 255, 255)
+_ACCENT = (50, 50, 50)
+_LIGHT_ROW = (248, 248, 248)
 
 
 class InvoiceGenerationService:
@@ -42,28 +49,24 @@ class InvoiceGenerationService:
         """
         Generates a PDF using fpdf2.
 
-        user_profile (optional) keys used for the header:
-          name, title, address, email  (from user_profiles.preferences or defaults)
-        bank_details keys used for bank section:
-          bank_name, bank_account_name, bank_account_number, bank_ifsc, upi_id
-        client_data rows may contain:
-          client_billing_details, production_house  (used in "Invoice To" section)
+        user_profile keys: name, title, address, email, mobile, pan, gst
+        bank_details keys: bank_name, bank_account_name, bank_account_number,
+                           bank_ifsc, upi_id, mobile_number, pan_number, gst_number
         """
         try:
             pdf = FPDF()
             pdf.add_page()
             pdf.set_auto_page_break(auto=True, margin=15)
+            pdf.set_margins(15, 15, 15)
 
-            # Unicode font (DejaVu) — required for non-Latin names (Hindi, etc.).
-            # fpdf2 >= 2.5 dropped the uni=True kwarg; bold variant registered separately.
             font_family = "Helvetica"
             try:
                 fonts_dir = os.path.join(os.path.dirname(__file__), "..", "fonts")
                 font_path      = os.path.join(fonts_dir, "DejaVuSans.ttf")
                 font_path_bold = os.path.join(fonts_dir, "DejaVuSans-Bold.ttf")
+                font_path_italic = os.path.join(fonts_dir, "DejaVuSans-Oblique.ttf")
                 if not os.path.exists(font_path):
                     raise FileNotFoundError(f"TTF Font file not found: {font_path}")
-                font_path_italic = os.path.join(fonts_dir, "DejaVuSans-Oblique.ttf")
                 pdf.add_font("DejaVu", "",  font_path)
                 pdf.add_font("DejaVu", "B", font_path_bold   if os.path.exists(font_path_bold)   else font_path)
                 pdf.add_font("DejaVu", "I", font_path_italic if os.path.exists(font_path_italic) else font_path)
@@ -72,175 +75,296 @@ class InvoiceGenerationService:
             except Exception as e:
                 logger.warning(f"Could not load DejaVu font, falling back to Helvetica: {e}")
 
-            # Resolve user profile fields
             up = user_profile or {}
-            invoicer_name = up.get("name") or "Your Name"
-            invoicer_title = up.get("title") or ""
+            bd = bank_details or {}
+
+            invoicer_name    = up.get("name") or bd.get("bank_account_name") or ""
             invoicer_address = up.get("address") or ""
-            invoicer_email = up.get("email") or ""
+            invoicer_email   = up.get("email") or ""
+            invoicer_mobile  = up.get("mobile") or bd.get("mobile_number") or ""
+            invoicer_pan     = up.get("pan") or bd.get("pan_number") or ""
+            invoicer_gst     = up.get("gst") or bd.get("gst_number") or "NA"
 
-            # Colors
-            primary_color = (0, 0, 0)
-            gray_color = (128, 128, 128)
-
-            # Header - Name & Details
-            pdf.set_font(font_family, "B", 20)
-            pdf.cell(100, 10, sanitize_pdf_text(invoicer_name), ln=0)
-
-            pdf.set_font(font_family, "B", 12)
-            pdf.set_text_color(*gray_color)
-            pdf.cell(90, 10, sanitize_pdf_text("INVOICE"), ln=1, align="R")
-            pdf.set_text_color(*primary_color)
-
-            pdf.set_font(font_family, "", 10)
-            if invoicer_title:
-                pdf.cell(100, 5, sanitize_pdf_text(invoicer_title), ln=0)
-            else:
-                pdf.cell(100, 5, "", ln=0)
-            # Use the DB bill_no if present (assigned by trigger on insert);
-            # fall back to date+client prefix only for legacy rows missing bill_no.
+            # ── Invoice number ────────────────────────────────────────────
             _db_bill_no = ""
             for _r in (client_data or []):
                 _bn = str(_r.get("bill_no") or "").strip()
                 if _bn:
                     _db_bill_no = _bn
                     break
-            if _db_bill_no:
-                invoice_no = sanitize_pdf_text(f"Invoice #: {_db_bill_no}")
-            else:
+            if not _db_bill_no:
                 client_prefix = sanitize_pdf_text(summary.get("client", "")[:3].upper())
-                invoice_no = sanitize_pdf_text(f"Invoice #: {datetime.now().strftime('%y%m%d')}-{client_prefix}")
-            pdf.cell(90, 5, invoice_no, ln=1, align="R")
+                _db_bill_no = f"{datetime.now().strftime('%y%m%d')}-{client_prefix}"
 
-            if invoicer_address:
-                pdf.cell(100, 5, sanitize_pdf_text(invoicer_address), ln=0)
-            else:
-                pdf.cell(100, 5, "", ln=0)
-            pdf.cell(90, 5, sanitize_pdf_text(f"Date: {datetime.now().strftime('%d-%m-%Y')}"), ln=1, align="R")
+            invoice_date = datetime.now().strftime("%d/%m/%y")
 
-            if invoicer_email:
-                pdf.cell(100, 5, sanitize_pdf_text(f"Email: {invoicer_email}"), ln=0)
-            else:
-                pdf.cell(100, 5, "", ln=0)
-            pdf.cell(90, 5, sanitize_pdf_text("Terms: Immediate"), ln=1, align="R")
+            # ── PAGE WIDTH helpers ────────────────────────────────────────
+            page_w = pdf.w - pdf.l_margin - pdf.r_margin  # ~180mm
+            left_w = page_w * 0.55
+            right_w = page_w * 0.45
 
+            # ══════════════════════════════════════════════════════════════
+            # SECTION 1 — Two-column header
+            # ══════════════════════════════════════════════════════════════
+            top_y = pdf.get_y()
+
+            # Left: user details
+            pdf.set_font(font_family, "B", 20)
+            pdf.set_text_color(*_DARK)
+            pdf.cell(left_w, 10, sanitize_pdf_text(invoicer_name), ln=0)
             pdf.ln(10)
 
-            # Client Info — use client_billing_details, poc_name, production_house from data rows.
-            # Walk the FULL list so poc_name is found even if billing details came first.
+            pdf.set_font(font_family, "", 9)
+            pdf.set_text_color(80, 80, 80)
+            if invoicer_address:
+                for _line in sanitize_pdf_text(invoicer_address).split("\n"):
+                    _line = _line.strip()
+                    if _line:
+                        pdf.cell(left_w, 5, _line, ln=1)
+            if invoicer_email:
+                pdf.cell(left_w, 5, sanitize_pdf_text(f"Email ID: {invoicer_email}"), ln=1)
+            if invoicer_mobile:
+                pdf.cell(left_w, 5, sanitize_pdf_text(f"Mobile Number: {invoicer_mobile}"), ln=1)
+            if invoicer_pan:
+                pdf.cell(left_w, 5, sanitize_pdf_text(f"PAN: {invoicer_pan}"), ln=1)
+
+            after_left_y = pdf.get_y()
+
+            # Right: invoice metadata (go back to top_y)
+            pdf.set_xy(pdf.l_margin + left_w, top_y)
+            pdf.set_font(font_family, "", 9)
+            pdf.set_text_color(*_DARK)
+
+            def _right_row(label, value):
+                pdf.set_x(pdf.l_margin + left_w)
+                pdf.set_font(font_family, "", 9)
+                pdf.cell(right_w * 0.48, 6, sanitize_pdf_text(label), ln=0, align="L")
+                pdf.set_font(font_family, "B", 9)
+                pdf.cell(right_w * 0.52, 6, sanitize_pdf_text(value), ln=1, align="R")
+
+            _right_row("Invoice Number :", _db_bill_no)
+            _right_row("Invoice Date :", invoice_date)
+            _right_row("Payment Terms :", "Immediate")
+            _right_row("GST :", invoicer_gst if invoicer_gst else "NA")
+            _right_row("Job No. :", "NA")
+
+            pdf.set_y(max(after_left_y, pdf.get_y()) + 4)
+
+            # Thin separator line
+            pdf.set_draw_color(180, 180, 180)
+            pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
+            pdf.ln(5)
+
+            # ══════════════════════════════════════════════════════════════
+            # SECTION 2 — Invoice To
+            # ══════════════════════════════════════════════════════════════
+            # Gray header bar
+            pdf.set_fill_color(*_GRAY_BAR)
+            pdf.set_text_color(*_DARK)
+            pdf.set_font(font_family, "B", 10)
+            pdf.cell(0, 7, "  Invoice To:", ln=1, fill=True)
+            pdf.ln(2)
+
+            # Collect client billing info
             client_billing = ""
             production_house = ""
             poc_name = ""
-            for row in client_data:
+            brand_name_invoice = ""
+            for row in (client_data or []):
                 if not client_billing:
                     client_billing = (str(row.get("client_billing_details") or "")).strip()
                 if not production_house:
                     production_house = (str(row.get("production_house") or "")).strip()
                 if not poc_name:
                     _pn = (str(row.get("poc_name") or "")).strip()
-                    if _pn and _pn.lower() != "none":
+                    if _pn and _pn.lower() not in ("none", ""):
                         poc_name = _pn
+                if not brand_name_invoice:
+                    _bn = (str(row.get("brand_name") or "")).strip()
+                    if _bn and _bn.lower() not in ("none", ""):
+                        brand_name_invoice = _bn
 
-            pdf.set_font(font_family, "B", 12)
-            pdf.cell(0, 7, sanitize_pdf_text("Invoice To:"), ln=1)
-            pdf.set_font(font_family, "", 11)
-            client_display = sanitize_pdf_text(summary.get("client", "Client Name"))
-            # Always lead with POC name when available (the actual person to invoice)
-            if poc_name:
-                pdf.cell(0, 6, sanitize_pdf_text(poc_name), ln=1)
-            if client_billing:
-                # client_billing_details may contain multi-line info (name, address, GST, etc.)
-                for line in client_billing.split("\n"):
-                    line = line.strip()
-                    if line:
-                        pdf.cell(0, 6, sanitize_pdf_text(line), ln=1)
-            else:
-                if production_house and production_house.lower() not in ("none", ""):
-                    pdf.cell(0, 6, sanitize_pdf_text(production_house), ln=1)
-                elif not poc_name:
-                    # Fallback to client/brand name only if we have nothing else
-                    pdf.cell(0, 6, client_display, ln=1)
-
-            pdf.ln(10)
-
-            # Table Header
-            pdf.set_font(font_family, "B", 10)
-            pdf.set_fill_color(240, 240, 240)
-            pdf.cell(12, 10, sanitize_pdf_text("Sr."), 1, 0, "C", True)
-            pdf.cell(25, 10, sanitize_pdf_text("Date"), 1, 0, "C", True)
-            pdf.cell(113, 10, sanitize_pdf_text("Particulars / Job Description"), 1, 0, "L", True)
-            pdf.cell(40, 10, sanitize_pdf_text("Fees (INR)"), 1, 1, "R", True)
-
-            # Table Rows
-            pdf.set_font(font_family, "", 10)
-            for idx, row in enumerate(client_data, 1):
-                date_val = sanitize_pdf_text(str(row.get("job_date", row.get("Date", ""))).strip())
-                job_val = sanitize_pdf_text(str(row.get("job_description_details", row.get("Job", ""))).strip())
-                brand_val_raw = row.get("brand_name", "")
-                brand_val = sanitize_pdf_text(brand_val_raw).strip()
-                if brand_val and brand_val.lower() != "none":
-                    job_val = f"{brand_val} - {job_val}" if job_val else brand_val
-                fees_val = self._parse_fees(row.get("fees", row.get("Fees", "0")))
-
-                # Dynamic height based on job description length
-                pdf.cell(12, 10, sanitize_pdf_text(str(idx)), 1, 0, "C")
-                pdf.cell(25, 10, date_val, 1, 0, "C")
-                pdf.cell(113, 10, job_val, 1, 0, "L")
-                pdf.cell(40, 10, sanitize_pdf_text(f"{fees_val:,.2f}"), 1, 1, "R")
-
-            # Totals
+            client_display = sanitize_pdf_text(summary.get("client", ""))
             pdf.set_font(font_family, "B", 11)
-            pdf.cell(150, 10, sanitize_pdf_text("TOTAL"), 1, 0, "R")
-            pdf.cell(40, 10, sanitize_pdf_text(f"{summary.get('total', 0):,.2f}"), 1, 1, "R")
+            pdf.set_text_color(*_DARK)
+            # Lead with client / billing name
+            if client_billing:
+                first_line = client_billing.split("\n")[0].strip()
+                pdf.cell(0, 6, sanitize_pdf_text(first_line), ln=1)
+                pdf.set_font(font_family, "", 9)
+                pdf.set_text_color(80, 80, 80)
+                for _bl in client_billing.split("\n")[1:]:
+                    _bl = _bl.strip()
+                    if _bl:
+                        pdf.cell(0, 5, sanitize_pdf_text(_bl), ln=1)
+            elif production_house and production_house.lower() not in ("none", ""):
+                pdf.cell(0, 6, sanitize_pdf_text(production_house), ln=1)
+            elif client_display:
+                pdf.cell(0, 6, client_display, ln=1)
 
-            pdf.ln(5)
-            # In Words
-            total = summary.get("total", 0)
-            total_words = sanitize_pdf_text(num2words(total, lang="en_IN").capitalize())
-            pdf.set_font(font_family, "I", 10)
-            pdf.cell(0, 10, sanitize_pdf_text(f"Amount in Words: {total_words} Only"), ln=1)
+            if poc_name:
+                pdf.set_font(font_family, "", 9)
+                pdf.set_text_color(80, 80, 80)
+                pdf.cell(0, 5, sanitize_pdf_text(poc_name), ln=1)
 
-            pdf.ln(10)
+            # Brand line — right-aligned
+            if brand_name_invoice:
+                _by = pdf.get_y()
+                pdf.set_xy(pdf.l_margin, _by)
+                pdf.set_font(font_family, "B", 9)
+                pdf.set_text_color(*_DARK)
+                pdf.cell(0, 6, sanitize_pdf_text(f"Brand : {brand_name_invoice}"), ln=1, align="R")
 
-            # Footer / Bank Details
-            bd = bank_details or {}
-            pdf.set_font(font_family, "B", 10)
-            pdf.cell(0, 6, sanitize_pdf_text("BANK ACCOUNT DETAILS:"), ln=1)
-            pdf.set_font(font_family, "", 10)
-            pdf.cell(0, 5, sanitize_pdf_text(f"Bank Name: {bd.get('bank_name') or '[Your Bank Name]'}"), ln=1)
-            pdf.cell(0, 5, sanitize_pdf_text(f"Account Holder: {bd.get('bank_account_name') or '[Account Holder]'}"), ln=1)
-            pdf.cell(0, 5, sanitize_pdf_text(f"Account Number: {bd.get('bank_account_number') or '[Your Account Number]'}"), ln=1)
-            pdf.cell(0, 5, sanitize_pdf_text(f"IFSC Code: {bd.get('bank_ifsc') or '[Your IFSC Code]'}"), ln=1)
-            if bd.get("upi_id"):
-                pdf.cell(0, 5, sanitize_pdf_text(f"UPI ID: {bd['upi_id']}"), ln=1)
+            pdf.ln(4)
 
-            pdf.ln(5)
-            pdf.set_font(font_family, "B", 10)
-            pdf.cell(0, 6, sanitize_pdf_text("Terms and Conditions:"), ln=1)
+            # ══════════════════════════════════════════════════════════════
+            # SECTION 3 — Job table
+            # ══════════════════════════════════════════════════════════════
+            col_sr   = 12
+            col_date = 28
+            col_desc = page_w - col_sr - col_date - 38
+            col_fee  = 38
+
+            pdf.set_fill_color(*_GRAY_BAR)
+            pdf.set_text_color(*_DARK)
+            pdf.set_font(font_family, "B", 9)
+            pdf.cell(col_sr,   8, "Sr. No.",    1, 0, "C", True)
+            pdf.cell(col_date, 8, "Date",        1, 0, "C", True)
+            pdf.cell(col_desc, 8, "Particulars", 1, 0, "L", True)
+            pdf.cell(col_fee,  8, "Fees",         1, 1, "R", True)
+
             pdf.set_font(font_family, "", 9)
-            pdf.cell(
-                0,
-                5,
-                sanitize_pdf_text("- Advance payments should be made within 2 working days from invoice date."),
-                ln=1,
-            )
-            payee_name = (up.get("name") or bd.get("bank_account_name") or "the account holder")
-            pdf.cell(
-                0,
-                5,
-                sanitize_pdf_text(f"- Payment should be made in favor of '{payee_name}'."),
-                ln=1,
-            )
+            total = 0
+            for idx, row in enumerate(client_data or [], 1):
+                bg = _LIGHT_ROW if idx % 2 == 0 else _WHITE
+                pdf.set_fill_color(*bg)
+                pdf.set_text_color(*_DARK)
 
-            # Save
+                date_val = sanitize_pdf_text(str(row.get("job_date", "")).strip())
+                # Format date as DD/MM/YY if it's YYYY-MM-DD
+                try:
+                    _d = datetime.strptime(date_val[:10], "%Y-%m-%d")
+                    date_val = _d.strftime("%d/%m/%y")
+                except Exception:
+                    pass
+
+                job_val = sanitize_pdf_text(str(row.get("job_description_details", "")).strip())
+                brand_val = sanitize_pdf_text(str(row.get("brand_name", "") or "")).strip()
+                if brand_val and brand_val.lower() not in ("none", ""):
+                    job_val = f"{brand_val} {job_val}" if job_val else brand_val
+
+                fees_val = self._parse_fees(row.get("fees", "0"))
+                total += fees_val
+
+                pdf.cell(col_sr,   8, str(idx),                           1, 0, "C", True)
+                pdf.cell(col_date, 8, date_val,                            1, 0, "C", True)
+                pdf.cell(col_desc, 8, job_val,                             1, 0, "L", True)
+                pdf.cell(col_fee,  8, f"Rs {fees_val:,.0f}",               1, 1, "R", True)
+
+            # Empty filler rows (min 5 rows shown like reference)
+            filled = len(client_data or [])
+            for _ in range(max(0, 5 - filled)):
+                pdf.set_fill_color(*_WHITE)
+                pdf.cell(col_sr,   8, "", 1, 0, "C")
+                pdf.cell(col_date, 8, "", 1, 0, "C")
+                pdf.cell(col_desc, 8, "", 1, 0, "L")
+                pdf.cell(col_fee,  8, "", 1, 1, "R")
+
+            # Total row
+            pdf.set_fill_color(*_GRAY_BAR)
+            pdf.set_font(font_family, "B", 10)
+            pdf.cell(col_sr + col_date + col_desc, 8, "TOTAL", 1, 0, "R", True)
+            pdf.cell(col_fee, 8, sanitize_pdf_text(f"Rs {total:,.0f}"), 1, 1, "R", True)
+
+            pdf.ln(3)
+
+            # In Words
+            try:
+                total_int = int(round(total))
+                total_words = num2words(total_int, lang="en_IN").capitalize() + " Only"
+            except Exception:
+                total_words = ""
+            pdf.set_font(font_family, "B", 9)
+            pdf.set_text_color(*_DARK)
+            pdf.cell(20, 6, "In words:", ln=0)
+            pdf.set_font(font_family, "I", 9)
+            pdf.cell(0, 6, sanitize_pdf_text(total_words), ln=1)
+
+            pdf.ln(5)
+
+            # ══════════════════════════════════════════════════════════════
+            # SECTION 4 — Terms & Bank (gray header bar + two columns)
+            # ══════════════════════════════════════════════════════════════
+            pdf.set_fill_color(*_GRAY_BAR)
+            pdf.set_text_color(*_DARK)
+            pdf.set_font(font_family, "B", 9)
+            pdf.cell(0, 7, "  Terms and Condition", ln=1, fill=True)
+            pdf.ln(2)
+
+            footer_y = pdf.get_y()
+            left_col_w  = page_w * 0.50
+            right_col_w = page_w * 0.50
+
+            # Left: T&C text
+            pdf.set_font(font_family, "", 8)
+            pdf.set_text_color(60, 60, 60)
+            payee_name = invoicer_name or bd.get("bank_account_name") or "the account holder"
+            tc_lines = [
+                "Advance payments should be made within 2 working",
+                "days from invoice date.",
+                "Full payment should be made within 30 days of",
+                "invoice date.",
+                f"Payment in favour of '{sanitize_pdf_text(payee_name)}'.",
+            ]
+            for _tl in tc_lines:
+                pdf.set_x(pdf.l_margin)
+                pdf.cell(left_col_w, 5, sanitize_pdf_text(_tl), ln=1)
+
+            # Right: Bank details (go back to footer_y)
+            right_x = pdf.l_margin + left_col_w
+            pdf.set_xy(right_x, footer_y)
+            pdf.set_font(font_family, "B", 9)
+            pdf.set_text_color(*_DARK)
+            pdf.cell(right_col_w, 5, "BANK ACCOUNT DETAILS:", ln=1)
+            pdf.set_font(font_family, "", 8)
+            pdf.set_text_color(60, 60, 60)
+
+            def _bank_row(label, value):
+                if not value:
+                    return
+                pdf.set_x(right_x)
+                pdf.set_font(font_family, "B", 8)
+                pdf.cell(right_col_w * 0.38, 5, sanitize_pdf_text(label), ln=0)
+                pdf.set_font(font_family, "", 8)
+                pdf.cell(right_col_w * 0.62, 5, sanitize_pdf_text(str(value)), ln=1)
+
+            _bank_row("Bank:",          bd.get("bank_name") or "")
+            _bank_row("A/C Name:",      bd.get("bank_account_name") or "")
+            _bank_row("A/C No.:",       bd.get("bank_account_number") or "")
+            _bank_row("IFSC Code:",     bd.get("bank_ifsc") or "")
+            if bd.get("upi_id"):
+                _bank_row("UPI:",       bd.get("upi_id"))
+            if bd.get("swift_code"):
+                _bank_row("Swift Code:", bd.get("swift_code"))
+
+            # ══════════════════════════════════════════════════════════════
+            # FOOTER — Powered by Remyndly
+            # ══════════════════════════════════════════════════════════════
+            pdf.ln(6)
+            pdf.set_draw_color(180, 180, 180)
+            pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
+            pdf.ln(3)
+            pdf.set_font(font_family, "I", 8)
+            pdf.set_text_color(140, 140, 140)
+            pdf.cell(0, 5, "Powered by Remyndly", ln=1, align="C")
+
+            # ── Save ──────────────────────────────────────────────────────
             os.makedirs("output", exist_ok=True)
             safe_client = sanitize_pdf_text(summary.get("client", "Client")).replace(" ", "_")
-            safe_month = sanitize_pdf_text(summary.get("month", "Period")).replace(" ", "_")
-            output_filename = f"Invoice_{safe_client}_{safe_month}.pdf"
-            output_path = os.path.join("output", output_filename)
+            safe_month  = sanitize_pdf_text(summary.get("month", "Period")).replace(" ", "_")
+            output_path = os.path.join("output", f"Invoice_{safe_client}_{safe_month}.pdf")
             pdf.output(output_path)
-
-            logger.info(f"PDF generated successfully manually with fpdf2: {output_path}")
+            logger.info(f"PDF generated: {output_path}")
             return output_path
 
         except Exception:
@@ -249,7 +373,7 @@ class InvoiceGenerationService:
 
     def _parse_fees(self, fees_str: str) -> float:
         try:
-            clean = str(fees_str).replace("₹", "").replace(",", "").strip()
+            clean = str(fees_str).replace("₹", "").replace("Rs", "").replace(",", "").strip()
             return float(clean) if clean else 0.0
         except ValueError:
             return 0.0

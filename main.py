@@ -266,6 +266,9 @@ async def process_and_send_invoice(
                     "title": prefs.get("invoice_title", ""),
                     "address": prefs.get("invoice_address", ""),
                     "email": prefs.get("invoice_email", ""),
+                    "mobile": bank_details.get("mobile_number", "") if bank_details else "",
+                    "pan": bank_details.get("pan_number", "") if bank_details else "",
+                    "gst": bank_details.get("gst_number", "") if bank_details else "",
                 }
                 logger.info(f"[INVOICE] Loaded user profile for invoice header: name={user_profile.get('name')}")
         pdf_path = invoice_gen_service.generate_pdf(summary, data, bank_details=bank_details, user_profile=user_profile)
