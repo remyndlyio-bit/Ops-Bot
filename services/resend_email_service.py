@@ -55,6 +55,19 @@ class ResendEmailService:
             return None
         return f"{self.from_name} <{self.from_email}>"
 
+    REMINDER_DISCLAIMER = (
+        "\n\n---\n"
+        "Disclaimer: This is an automated payment reminder. "
+        "If payment has already been processed, kindly disregard this message. "
+        "For any questions or clarifications, please reply directly to this email.\n"
+        "Sent via Remyndly — your operations assistant."
+    )
+
+    INVOICE_DISCLAIMER = (
+        "\n\n---\n"
+        "Sent via Remyndly — your operations assistant."
+    )
+
     def send_payment_reminder(
         self,
         to_email: str,
@@ -62,6 +75,7 @@ class ResendEmailService:
         invoice_number: str,
         amount_due: str,
         due_date_str: str,
+        cc: str = None,
     ) -> bool:
         subject = f"Payment Reminder – {invoice_number}"
         body = (
@@ -69,9 +83,10 @@ class ResendEmailService:
             f"This is a friendly reminder that payment for {invoice_number} in the amount of {amount_due} "
             f"is due on {due_date_str}.\n\n"
             f"If you've already made the payment, you can ignore this message.\n\n"
-            f"Thanks,\n{self.from_name}\n"
+            f"Thanks,\n{self.from_name}"
+            f"{self.REMINDER_DISCLAIMER}"
         )
-        return self.send_email(to_email=to_email, subject=subject, body=body, bcc=self.reminder_bcc)
+        return self.send_email(to_email=to_email, subject=subject, body=body, bcc=self.reminder_bcc, cc=cc)
 
     def send_email(
         self,
@@ -79,6 +94,7 @@ class ResendEmailService:
         subject: str,
         body: str,
         bcc: str = None,
+        cc: str = None,
         attachments: Optional[List[Dict[str, str]]] = None,
     ) -> bool:
         if not to_email:
@@ -96,9 +112,12 @@ class ResendEmailService:
         # Normalize recipient emails
         to_emails = self._normalize_emails(to_email)
         bcc_list = self._normalize_emails(bcc) if bcc else []
+        cc_list = self._normalize_emails(cc) if cc else []
+        # Drop CCs that are already in To/BCC to avoid duplicate delivery
+        cc_list = [e for e in cc_list if e not in to_emails and e not in bcc_list]
 
         logger.info(
-            f"[RESEND] Preparing email -> To={to_emails} | BCC={bcc_list or None} | "
+            f"[RESEND] Preparing email -> To={to_emails} | CC={cc_list or None} | BCC={bcc_list or None} | "
             f"Subject={subject} | Attachments={bool(attachments)} | DryRun={self.dry_run}"
         )
 
@@ -116,6 +135,8 @@ class ResendEmailService:
             "subject": subject,
             "text": body,
         }
+        if cc_list:
+            payload["cc"] = cc_list
         if bcc_list:
             payload["bcc"] = bcc_list
         if attachments:
@@ -135,7 +156,7 @@ class ResendEmailService:
                 except Exception:
                     data = {}
                 message_id = data.get("id") or data.get("message") or "<no-id>"
-                logger.info(f"[RESEND] Email sent -> To={to_emails} | BCC={bcc_list or None} | ID={message_id}")
+                logger.info(f"[RESEND] Email sent -> To={to_emails} | CC={cc_list or None} | BCC={bcc_list or None} | ID={message_id}")
                 return True
             else:
                 logger.error(
@@ -156,11 +177,13 @@ class ResendEmailService:
         pdf_path: str,
         poc_name: str = None,
         invoicer_name: str = None,
+        cc: str = None,
     ) -> bool:
         """
         Send an invoice email with the PDF attached.
         poc_name: name of the client's point of contact (used in greeting).
         invoicer_name: the sender's actual name (used in sign-off).
+        cc: optional CC recipient (typically the invoicing user's own email).
         """
         if not os.path.exists(pdf_path):
             logger.error(f"[RESEND] Invoice PDF not found at path: {pdf_path}")
@@ -176,7 +199,8 @@ class ResendEmailService:
             f"Kindly review and process the payment at your earliest convenience. "
             f"If you have any questions regarding the invoice, please feel free to reply to this email.\n\n"
             f"Thank you for your business.\n\n"
-            f"Best regards,\n{sign_off_name}\n"
+            f"Best regards,\n{sign_off_name}"
+            f"{self.INVOICE_DISCLAIMER}"
         )
 
         try:
@@ -195,5 +219,5 @@ class ResendEmailService:
             }
         ]
 
-        return self.send_email(to_email=to_email, subject=subject, body=body, attachments=attachments)
+        return self.send_email(to_email=to_email, subject=subject, body=body, attachments=attachments, cc=cc)
 
