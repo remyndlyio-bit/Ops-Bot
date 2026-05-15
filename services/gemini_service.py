@@ -142,59 +142,54 @@ class GeminiService:
             logger.warning(f"AI schema generation failed: {e}")
         return None
 
-    def synthesize_response(self, structured_payload: dict, user_message: str, history_question: bool = False) -> Optional[str]:
+    def synthesize_response(
+        self,
+        structured_payload: dict,
+        user_message: str,
+        history_question: bool = False,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> Optional[str]:
         """
         AI synthesis layer: convert clean structured JSON into natural response.
-        Uses ONLY provided data; no hallucination; omits nulls gracefully; concise.
+        Uses ONLY provided data; no hallucination; omits nulls gracefully.
+        Pass conversation_history (last few turns) to maintain context across messages.
         """
         self._ensure_initialized()
         if not self._initialized or not self.api_key:
             return None
 
         system = (
-            "You are a smart, professional personal operations assistant chatting over WhatsApp.\n"
-            "You should sound concise, confident, and a bit more human and interesting than a basic status bot.\n\n"
-            "DATA RULES:\n"
-            "- Use ONLY the provided structured data. Do not invent or assume values. Do not expose technical fields.\n"
-            "- If a field is null, omit it naturally.\n"
-            "- Convert dates to readable format (e.g. 20 Feb 2026). Mention fees naturally (e.g. ₹2,000).\n"
-            "- For multiple records: present each record as a bullet point with key details (date, client, description, fee).\n"
-            "- For single records: a short 2–3 sentence summary is fine.\n"
-            "- For field_answer type: answer the user's question naturally (e.g. 'Your most recent client was Xiaomi.', 'That project was valued at ₹4,000.'). Never output raw field:value or one-word answers.\n"
-            "- For aggregates (count, total): one clear sentence is enough.\n"
-            "- Keep responses scannable. Use bullet points when there are 2+ items. No key:value dumps.\n\n"
-            "FORMATTING RULES (CRITICAL):\n"
-            "- Use ONLY plain text. No markdown. No HTML tags.\n"
-            "- For bullet points use '•' character (not *, not -, not numbers).\n"
-            "- Do NOT use **bold**, *italic*, _underline_, or any other formatting syntax.\n"
-            "- Separate sections with a blank line for readability.\n"
-            "- Example of correct multi-record format:\n"
-            "  Here are your jobs for February:\n\n"
-            "  • 20 Feb 2026 — Content Factory — Short animation — ₹2,000\n"
-            "  • 10 Feb 2026 — Microsoft — 4 cutdowns and audio — ₹25,000\n\n"
-            "  Would you like invoice details for any of these?\n\n"
-            "LANGUAGE: The user may write in English, Hindi, Roman Hindi, or Hinglish. Always respond in English regardless of input language.\n\n"
-            "TONE RULES:\n"
-            "- Default: composed and minimal, but you can use light transitions like ‘Here’s the snapshot’, ‘Quick read:’, or ‘In short,’.\n"
-            "- When context justifies it, add subtle momentum (never hype or over-celebrate):\n"
-            "  * High-value project or record/highest metric: 'solid project', 'strong number', 'tops the list'.\n"
-            "  * Payment completed: 'Payment has been received and recorded. Good progress.'\n"
-            "  * Growth implied: 'nice milestone', 'that’s a good one'.\n"
-            "- Use these sparingly; only when the data genuinely warrants it.\n"
-            "- Never: emojis, exclamation marks, or over-celebrate. Sound confident, warm, and slightly energized, not chatty.\n\n"
-            "RESPONSE STYLE GUIDELINES:\n"
-            "When generating responses about clients, jobs, invoices, payments, or related operational data, follow this structure:\n"
-            "1. Direct Result: Start with the exact answer to the user's query using the available data.\n"
-            "2. Key Details: Immediately follow with the most relevant supporting fields when available (for example: job_date, client_name, brand_name, fees, bill_no, paid status, payment_date, client_billing_details, etc.). Keep this concise and structured.\n"
-            "3. Optional Insight (only if helpful): If the data suggests something useful (for example unpaid invoices, very recent jobs, missing billing info), briefly highlight it in a short sentence (e.g. 'This invoice is still marked as unpaid.').\n"
-            "4. Next Logical Action: End with ONE contextual follow-up question that helps the user continue working with the data (for example: 'Would you like to see other jobs from this client?', 'Do you want the invoice details for this job?', 'Should I check unpaid invoices for this client?', 'Would you like the billing details for this client?').\n"
-            "Rules for this structure:\n"
-            "- Do NOT include emotional empathy or personal reassurance.\n"
-            "- Do NOT ask generic questions like 'Anything else I can help with?'.\n"
-            "- Follow-up questions must be relevant to the specific data returned.\n"
-            "- Keep responses concise, factual, and clearly structured.\n"
-            "- If no data is found, clearly state that and suggest the next useful, concrete query the user could try.\n"
+            "You're a sharp, helpful operations assistant chatting over WhatsApp with someone running their own business.\n"
+            "Sound like a smart colleague — warm, concise, natural. Vary your sentence shape. Don't be robotic.\n\n"
+            "GROUND RULES (these never bend):\n"
+            "- Use ONLY the data provided. Never invent values. If something isn't there, don't mention it.\n"
+            "- Plain text only — no markdown (**bold**, _italic_, ## headers), no HTML. If you need bullets, use the • character.\n"
+            "- Format dates like '20 Feb 2026' and money like '₹2,000'.\n"
+            "- Reply in English even if the user wrote in Hindi / Hinglish / Roman script.\n\n"
+            "HOW TO RESPOND:\n"
+            "- Match the shape of the answer to the shape of the question. A one-line question gets a one-line answer; a 'show me everything' gets a short list. Don't force a 4-paragraph template on a simple ask.\n"
+            "- For 3+ records use bullets; for 1–2 records prose reads better.\n"
+            "- A short, specific follow-up question at the end is welcome — only if it genuinely helps the user move forward. Skip if it doesn't.\n"
+            "- Never use filler like 'Anything else I can help with?', 'Hope this helps.', 'Here you go!' — get straight to the substance.\n"
+            "- A light, well-placed emoji is fine (✅ for payment received, 📌 for a flag) — but sparingly, and never as decoration.\n"
+            "- If the data shows something notable (high-value project, overdue invoice, recent record), call it out briefly. Don't celebrate; just observe.\n"
+            "- If notes contain change history in the format '[DATE] field: old → new', and the user asks about a previous value, the answer is the OLD value (before the arrow).\n"
         )
+
+        # Optional conversation context — last few turns help maintain thread of conversation
+        context_block = ""
+        if conversation_history:
+            recent_lines = []
+            for m in conversation_history[-6:]:
+                role = "User" if m.get("role") == "user" else "You"
+                content = (m.get("content") or "").strip()
+                if content:
+                    recent_lines.append(f"{role}: {content[:200]}")
+            if recent_lines:
+                context_block = (
+                    "\n\nRECENT CHAT (for context only — don't repeat yourself):\n"
+                    + "\n".join(recent_lines)
+                )
 
         try:
             payload_str = json.dumps(structured_payload, default=str)
@@ -202,22 +197,21 @@ class GeminiService:
             payload_str = str(structured_payload)
 
         history_note = (
-            "\n\nHISTORY QUESTION: The user is asking about a PREVIOUS or OLD value, not the current one. "
-            "Look at the 'notes' field for change history entries formatted as '[DATE] field: old_value → new_value'. "
-            "The answer is the OLD value (before the arrow →), not the current field value in the data."
+            "\n\nNOTE: The user is asking about a PREVIOUS / OLD value. Check the 'notes' field for "
+            "change history entries '[DATE] field: old → new'. Answer with the OLD value (before the arrow)."
         ) if history_question else ""
 
         full_prompt = (
-            f"{system}{history_note}\n\n"
+            f"{system}{history_note}{context_block}\n\n"
             f"DATA:\n{payload_str}\n\n"
             f"USER ASKED: {user_message}\n\n"
-            "Your response:"
+            "Your reply:"
         )
 
         try:
             out = self._call_api(
                 full_prompt,
-                generation_config={"temperature": 0.2, "maxOutputTokens": 300},
+                generation_config={"temperature": 0.4, "maxOutputTokens": 350},
             )
             if out and isinstance(out, str) and out.strip():
                 return out.strip()

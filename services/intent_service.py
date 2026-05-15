@@ -1038,7 +1038,8 @@ class IntentService:
         
         logger.info(f"[FOLLOWUP] Serving field from stored row without DB call: {matched_col} = {value}")
         payload = build_field_answer_payload(matched_col, value, last_row_data)
-        response = self.gemini.synthesize_response(payload, message)
+        _hist = self.memory.get_conversation_history(user_id)
+        response = self.gemini.synthesize_response(payload, message, conversation_history=_hist)
         if response and response.strip():
             return response
         # Fallback if synthesis fails: minimal natural phrasing (no raw field:value)
@@ -3342,7 +3343,7 @@ class IntentService:
                                     ctx["last_sql"] = full_sql
                                     self.memory.update_user_memory(user_id, {"uscf_context": ctx})
                                     payload = build_clean_payload(rows, "select")
-                                    response = self.gemini.synthesize_response(payload, message)
+                                    response = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
                                     if not response or not response.strip():
                                         response = "Here are the full details for your records."
                                     self._store_conversation(user_id, message, response)
@@ -3468,7 +3469,7 @@ class IntentService:
                             if _direct_rows:
                                 self._update_sql_context(user_id, _direct_rows)
                             _payload = build_clean_payload(_direct_rows or _pre_rows, "select")
-                            response = self.gemini.synthesize_response(_payload, message)
+                            response = self.gemini.synthesize_response(_payload, message, conversation_history=conversation_history)
                             if not response or not response.strip():
                                 response = f"Done! Updated {_direct_exec.get('rowcount', 1)} record."
                             self._store_conversation(user_id, message, response)
@@ -3751,7 +3752,7 @@ class IntentService:
                 if rows:
                     self._update_sql_context(user_id, rows)
                     payload = build_clean_payload(rows, "select")
-                    response = self.gemini.synthesize_response(payload, message)
+                    response = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
                     if not response or not response.strip():
                         response = f"Done! Updated {rowcount} record{'s' if rowcount != 1 else ''}."
                 else:
@@ -3811,7 +3812,7 @@ class IntentService:
                                         if _retry_rows:
                                             self._update_sql_context(user_id, _retry_rows)
                                         payload = build_clean_payload(_retry_rows or _pre2_rows, "select")
-                                        response = self.gemini.synthesize_response(payload, message)
+                                        response = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
                                         if not response or not response.strip():
                                             response = f"Done! Updated {_retry_exec.get('rowcount', 1)} record."
                                         self._store_conversation(user_id, message, response)
@@ -3876,7 +3877,7 @@ class IntentService:
                                     response = _format_job_cards(kw_rows)
                                 else:
                                     payload = build_clean_payload(kw_rows, "select")
-                                    response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q)
+                                    response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q, conversation_history=conversation_history)
                                     if not response or not response.strip():
                                         response = self._format_sql_result(kw_rows)
                                 self._store_conversation(user_id, message, response)
@@ -3906,7 +3907,7 @@ class IntentService:
                     logger.info(f"[QUERY] Success: {len(rows)} rows (structured card format)")
                 else:
                     payload = build_clean_payload(rows, "select")
-                    response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q)
+                    response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q, conversation_history=conversation_history)
                     if not response or not response.strip():
                         logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
                         response = "I found matching records but couldn't format the reply. Try asking again?"
@@ -4115,7 +4116,7 @@ class IntentService:
         if result_rows:
             self._update_sql_context(user_id, result_rows)
             payload = build_clean_payload(result_rows, "select")
-            response = self.gemini.synthesize_response(payload, message)
+            response = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
             if not response or not response.strip():
                 response = "Done! The selected record has been updated."
         else:
