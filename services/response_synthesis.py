@@ -79,18 +79,33 @@ def build_clean_payload(rows: List[Dict], operation: str = "select") -> Dict[str
     if operation == "insert":
         return {"type": "insert_confirmation", "data": {"inserted": True}}
 
+    # Aggregate detection must happen BEFORE _clean_row, which drops nulls.
+    # The query planner aliases SUM/COUNT/AVG/etc. as "result"; we also accept
+    # generic keys like count/sum/total. When the aggregate value is NULL
+    # (no matching rows), surface that explicitly so the synthesizer says
+    # "₹0 / no records this period" instead of "I can't see anything".
+    _AGG_KEYS = ("count", "sum", "total", "avg", "average", "min", "max", "result")
+    if len(rows) == 1:
+        orig_keys = [str(k).lower() for k in rows[0].keys()]
+        if any(c in orig_keys for c in _AGG_KEYS):
+            raw_row = rows[0]
+            agg_val = None
+            for k in raw_row:
+                if str(k).lower() in _AGG_KEYS:
+                    agg_val = raw_row[k]
+                    break
+            if agg_val is None:
+                return {
+                    "type": "aggregate",
+                    "data": {"result": 0},
+                    "note": "No matching records for the requested filter / period — total is 0.",
+                }
+            return {"type": "aggregate", "data": {"result": agg_val}}
+
     cleaned = [_clean_row(r) for r in rows]
 
     if len(cleaned) == 1:
         row = cleaned[0]
-        keys = [str(k).lower() for k in row.keys()]
-        # Aggregate result — only when the column actually looks like an aggregate.
-        # A bare single-field row (e.g. {"job_description": "dubbing"}) is a field
-        # answer, NOT an aggregate; classifying it as aggregate confuses the
-        # synthesizer into treating the value as a count/total.
-        _AGG_KEYS = ("count", "sum", "total", "avg", "average", "min", "max")
-        if any(c in keys for c in _AGG_KEYS):
-            return {"type": "aggregate", "data": row}
         if len(row) == 1:
             field_name = list(row.keys())[0]
             return {
