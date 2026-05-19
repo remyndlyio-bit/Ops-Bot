@@ -3074,7 +3074,23 @@ class IntentService:
                                 pass
                     if not month_display:
                         month_display = "Request"
-                    invoice_data = {"client_name": display_client, "month": month_display, "bill_number": bill_number, "year": year_val}
+                    # Detect explicit "regenerate" intent — only then bypass the cached PDF.
+                    _regen_keywords = (
+                        "regenerate", "regen ", "regen.", "re-generate", "re generate",
+                        "fresh copy", "fresh invoice", "new copy", "new pdf",
+                        "redo invoice", "remake invoice", "rebuild invoice", "recreate invoice",
+                        "force regenerate", "generate again", "make it again",
+                    )
+                    _force_regen = any(kw in msg_lower for kw in _regen_keywords)
+                    invoice_data = {
+                        "client_name": display_client,
+                        "month": month_display,
+                        "bill_number": bill_number,
+                        "year": year_val,
+                        "force_regenerate": _force_regen,
+                    }
+                    if _force_regen:
+                        logger.info(f"[INVOICE] User requested regeneration — bypassing cache for {display_client} {month_display} {year_val}")
 
                     # Extract poc_name and invoicer_name for email personalization
                     _inv_poc_name = ""

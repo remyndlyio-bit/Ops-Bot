@@ -231,10 +231,12 @@ async def process_and_send_invoice(
     bill_number: str = None,
     year: int = None,
     user_id: str = None,
+    force_regenerate: bool = False,
 ):
     """
     Background task to generate PDF and send it via WhatsApp or Telegram.
     Data is fetched from Supabase job_entries.
+    Reuses a cached PDF from generated_invoices unless force_regenerate=True.
     """
     try:
         month_num = month_name_to_number(month) if month else None
@@ -258,45 +260,119 @@ async def process_and_send_invoice(
         safe_month = (summary.get("month") or month or "Period").replace(" ", "_")
         os.makedirs("output", exist_ok=True)
 
-        # Always regenerate the PDF to pick up latest profile/bank/billing details.
-        # PDF generation is fast (<1s); caching caused stale invoices after profile updates.
-        bank_details = None
-        user_profile = None
-        if user_id:
-            bank_result = supabase_service.get_user_bank_details(user_id)
-            if bank_result.get("ok") and bank_result.get("data"):
-                bank_details = bank_result["data"]
-                logger.info(f"[INVOICE] Loaded bank details for user_id={user_id}")
-            else:
-                logger.info(f"[INVOICE] No bank details found for user_id={user_id}, using defaults")
-            # Fetch user profile for invoice header (name, title, address, email)
-            prof_result = supabase_service.get_user_profile(user_id)
-            if prof_result.get("ok") and prof_result.get("data"):
-                prof_data = prof_result["data"]
-                prefs = prof_data.get("preferences") or {}
-                if isinstance(prefs, str):
-                    import json as _json
-                    try:
-                        prefs = _json.loads(prefs)
-                    except Exception:
-                        prefs = {}
-                profile_name = prefs.get("invoice_name") or prof_data.get("name")
-                if not profile_name and bank_details:
-                    profile_name = bank_details.get("bank_account_name")
-                user_profile = {
-                    "name": profile_name or "",
-                    "title": prefs.get("invoice_title", ""),
-                    "address": prefs.get("invoice_address", ""),
-                    "email": prefs.get("invoice_email", ""),
-                    "mobile": bank_details.get("mobile_number", "") if bank_details else "",
-                    "pan": bank_details.get("pan_number", "") if bank_details else "",
-                    "gst": bank_details.get("gst_number", "") if bank_details else "",
-                }
-                logger.info(f"[INVOICE] Loaded user profile for invoice header: name={user_profile.get('name')}")
-        pdf_path = invoice_gen_service.generate_pdf(summary, data, bank_details=bank_details, user_profile=user_profile)
-        if not pdf_path:
-            logger.error("Failed to generate PDF")
-            return
+        # ── Try cache first (unless user asked to regenerate) ─────────────
+        cached_pdf_path = None
+        if user_id and not force_regenerate:
+            try:
+                _cache_lookup = supabase_service.get_cached_invoice(
+                    user_id=user_id,
+                    client_name=summary.get("client") or client_name,
+                    month=summary.get("month") or month or "",
+                    year=int(year),
+                )
+                _cached = _cache_lookup.get("data") if _cache_lookup.get("ok") else None
+                if _cached and _cached.get("pdf_bytes"):
+                    cached_filename = _cached.get("pdf_filename") or f"Invoice_{safe_client}_{safe_month}.pdf"
+                    cached_pdf_path = os.path.join("output", cached_filename)
+                    _bytes = _cached["pdf_bytes"]
+                    if isinstance(_bytes, memoryview):
+                        _bytes = bytes(_bytes)
+                    with open(cached_pdf_path, "wb") as _f:
+                        _f.write(_bytes)
+                    logger.info(
+                        f"[INVOICE_CACHE] Reusing stored PDF for {user_id} | "
+                        f"{summary.get('client')} {summary.get('month')} {year} "
+                        f"(regenerated_count={_cached.get('regenerated_count')})"
+                    )
+            except Exception as _ce:
+                logger.warning(f"[INVOICE_CACHE] lookup failed (will regenerate): {_ce}")
+                cached_pdf_path = None
+
+        if cached_pdf_path:
+            pdf_path = cached_pdf_path
+            # Skip the full bank/profile load — they're baked into the cached PDF
+            bank_details = None
+            user_profile = None
+        else:
+            # Fresh generation — load bank + profile, then build the PDF.
+            bank_details = None
+            user_profile = None
+            if user_id:
+                bank_result = supabase_service.get_user_bank_details(user_id)
+                if bank_result.get("ok") and bank_result.get("data"):
+                    bank_details = bank_result["data"]
+                    logger.info(f"[INVOICE] Loaded bank details for user_id={user_id}")
+                else:
+                    logger.info(f"[INVOICE] No bank details found for user_id={user_id}, using defaults")
+                # Fetch user profile for invoice header (name, title, address, email)
+                prof_result = supabase_service.get_user_profile(user_id)
+                if prof_result.get("ok") and prof_result.get("data"):
+                    prof_data = prof_result["data"]
+                    prefs = prof_data.get("preferences") or {}
+                    if isinstance(prefs, str):
+                        import json as _json
+                        try:
+                            prefs = _json.loads(prefs)
+                        except Exception:
+                            prefs = {}
+                    profile_name = prefs.get("invoice_name") or prof_data.get("name")
+                    if not profile_name and bank_details:
+                        profile_name = bank_details.get("bank_account_name")
+                    user_profile = {
+                        "name": profile_name or "",
+                        "title": prefs.get("invoice_title", ""),
+                        "address": prefs.get("invoice_address", ""),
+                        "email": prefs.get("invoice_email", ""),
+                        "mobile": bank_details.get("mobile_number", "") if bank_details else "",
+                        "pan": bank_details.get("pan_number", "") if bank_details else "",
+                        "gst": bank_details.get("gst_number", "") if bank_details else "",
+                    }
+                    logger.info(f"[INVOICE] Loaded user profile for invoice header: name={user_profile.get('name')}")
+            pdf_path = invoice_gen_service.generate_pdf(summary, data, bank_details=bank_details, user_profile=user_profile)
+            if not pdf_path:
+                logger.error("Failed to generate PDF")
+                return
+
+            # Store the freshly-generated PDF in Supabase so future asks can reuse it
+            if user_id:
+                try:
+                    with open(pdf_path, "rb") as _pf:
+                        _pdf_bytes = _pf.read()
+                    _poc_email_for_cache = ""
+                    _poc_name_for_cache = ""
+                    for row in data:
+                        if not _poc_email_for_cache:
+                            _ev = (row.get("poc_email") or "").strip()
+                            if _ev:
+                                _poc_email_for_cache = _ev
+                        if not _poc_name_for_cache:
+                            _nv = (row.get("poc_name") or "").strip()
+                            if _nv and _nv.lower() != "none":
+                                _poc_name_for_cache = _nv
+                        if _poc_email_for_cache and _poc_name_for_cache:
+                            break
+                    supabase_service.upsert_cached_invoice(
+                        user_id=user_id,
+                        client_name=summary.get("client") or client_name,
+                        month=summary.get("month") or month or "",
+                        year=int(year),
+                        pdf_filename=os.path.basename(pdf_path),
+                        pdf_bytes=_pdf_bytes,
+                        poc_email=_poc_email_for_cache or None,
+                        poc_name=_poc_name_for_cache or None,
+                        invoicer_name=(user_profile or {}).get("name") or None,
+                        row_ids=[r["id"] for r in data if r.get("id")],
+                        invoice_total=summary.get("total"),
+                        bill_no=summary.get("bill_no"),
+                        is_regeneration=force_regenerate,
+                    )
+                    logger.info(
+                        f"[INVOICE_CACHE] Stored PDF for {user_id} | "
+                        f"{summary.get('client')} {summary.get('month')} {year} "
+                        f"(force_regenerate={force_regenerate})"
+                    )
+                except Exception as _se:
+                    logger.warning(f"[INVOICE_CACHE] Failed to store PDF: {_se}")
 
         # Look up poc_email up-front so we can combine the delivery message
         # with the "Should I email this?" prompt into a single message.
@@ -476,6 +552,7 @@ async def _handle_bot_message(
             bill_number=inv.get("bill_number"),
             year=inv.get("year"),
             user_id=user_id,
+            force_regenerate=bool(inv.get("force_regenerate")),
         )
 
     return result
