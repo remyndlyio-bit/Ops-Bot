@@ -2115,6 +2115,7 @@ class IntentService:
         """
         Check if a WhatsApp user has pending reminders and is replying with
         a number (e.g. '1', '2') to send, or 'skip' to dismiss.
+        Also handles overdue-audit replies ('paid 1', 'all paid', 'later').
         Returns a response dict if handled, None otherwise.
         """
         pending = get_pending(user_id)
@@ -2122,6 +2123,16 @@ class IntentService:
             return None
 
         msg = message.strip().lower()
+
+        # ── Overdue-audit branch — pending entries tagged _audit_row=True ─
+        is_audit = any(p.get("_audit_row") for p in pending)
+        if is_audit:
+            resp = self._handle_pending_audit_reply(user_id, message, msg, pending)
+            if resp is not None:
+                return resp
+            # Fall through if the user typed something not recognized — let
+            # the universal pipeline handle it (don't trap forever).
+            return None
 
         # "skip" / "skip all" → clear pending
         if msg in ("skip", "skip all", "no", "cancel"):
@@ -2217,6 +2228,85 @@ class IntentService:
 
         self._store_conversation(user_id, message, response)
         return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_pending_audit_reply(self, user_id: str, message: str, msg_lower: str, pending: list) -> Optional[Dict]:
+        """Handle WhatsApp replies to the overdue-audit message.
+        Accepts: 'paid <n>' / 'paid' / 'all paid' / 'paid all' / 'later' / 'skip'.
+        Returns a response dict, or None if reply wasn't recognized."""
+        # 'later' / 'remind later' — push the next nag out by stamping NOW().
+        if msg_lower in ("later", "remind later", "remind me later", "next week", "not now"):
+            ids = [p.get("id") for p in pending if p.get("id")]
+            if ids:
+                ids_sql = ",".join(f"'{i}'" for i in ids)
+                self.supabase.execute_sql(
+                    f"UPDATE public.job_entries SET overdue_audit_sent = NOW() WHERE id IN ({ids_sql})"
+                )
+            clear_pending(user_id)
+            response = "⏸ Got it — I'll check back next week."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "audit_later", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # 'all paid' / 'paid all' / 'mark all paid' — bulk
+        if msg_lower in ("all paid", "paid all", "mark all paid", "all are paid", "yes all paid"):
+            ids = [p.get("id") for p in pending if p.get("id")]
+            if not ids:
+                clear_pending(user_id)
+                return {"operation": "audit_paid", "response": "Nothing to update.", "trigger_invoice": False, "invoice_data": {}}
+            ids_sql = ",".join(f"'{i}'" for i in ids)
+            res = self.supabase.execute_sql(
+                f"UPDATE public.job_entries SET paid = 'Yes', payment_date = CURRENT_DATE "
+                f"WHERE id IN ({ids_sql}) RETURNING id"
+            )
+            count = len(res.get("rows", []) or ids)
+            clear_pending(user_id)
+            response = f"✅ Marked {count} invoice(s) as paid. Nice — payments cleared."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "audit_paid", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # 'paid <n>' / 'paid' / '<n> paid' / 'mark 2 paid'
+        if "paid" in msg_lower:
+            num_m = re.search(r"\b(\d+)\b", msg_lower)
+            if num_m:
+                idx = int(num_m.group(1))
+                if 1 <= idx <= len(pending):
+                    target = pending[idx - 1]
+                    job_id = target.get("id")
+                    if job_id:
+                        self.supabase.execute_sql(
+                            f"UPDATE public.job_entries SET paid = 'Yes', payment_date = CURRENT_DATE "
+                            f"WHERE id = '{job_id}'"
+                        )
+                    remove_single(user_id, job_id)
+                    client = target.get("client_name") or "the invoice"
+                    try:
+                        amt = f" — ₹{int(float(target.get('fees') or 0)):,}"
+                    except Exception:
+                        amt = ""
+                    remaining = get_pending(user_id)
+                    response = f"✅ Marked paid: {client}{amt}."
+                    if remaining:
+                        response += f"\n\n{len(remaining)} invoice(s) still pending. Reply 'paid <n>', 'all paid', or 'later'."
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "audit_paid", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                response = f"Please choose a number between 1 and {len(pending)}."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "audit_paid", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            # 'paid' alone with only one pending row → mark it
+            if len(pending) == 1:
+                target = pending[0]
+                job_id = target.get("id")
+                if job_id:
+                    self.supabase.execute_sql(
+                        f"UPDATE public.job_entries SET paid = 'Yes', payment_date = CURRENT_DATE "
+                        f"WHERE id = '{job_id}'"
+                    )
+                clear_pending(user_id)
+                client = target.get("client_name") or "the invoice"
+                response = f"✅ Marked paid: {client}."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "audit_paid", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        return None  # not recognized — let other handlers try
 
     def _send_all_pending_reminders(self, user_id: str, message: str, pending: list) -> Dict:
         """Send reminder emails for every item in the pending list (WhatsApp 'send all')."""

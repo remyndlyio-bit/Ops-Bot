@@ -682,12 +682,86 @@ async def _handle_send_all_reminders(callback_query: dict):
     await telegram_service.edit_message_text(chat_id, message_id, "\n".join(lines))
 
 
+async def _handle_overdue_audit_callback(callback_query: dict, action: str, target: str):
+    """Handle overdue-invoice audit buttons: 'audit:paid:<id|all>' or 'audit:later:<id|all>'."""
+    cb_id = callback_query.get("id")
+    chat_id = callback_query["message"]["chat"]["id"]
+    message_id = callback_query["message"]["message_id"]
+    await telegram_service.answer_callback_query(cb_id)
+
+    # Resolve the set of job_ids this action applies to
+    if target == "all":
+        # Pull every job_id from the reply markup's other buttons
+        reply_markup = callback_query["message"].get("reply_markup", {})
+        ids = set()
+        for row in reply_markup.get("inline_keyboard", []):
+            for btn in row:
+                cb = btn.get("callback_data", "")
+                parts = cb.split(":")
+                if len(parts) == 3 and parts[0] == "audit" and parts[2] not in ("all",):
+                    ids.add(parts[2])
+        job_ids = list(ids)
+    else:
+        job_ids = [target]
+
+    if not job_ids:
+        await telegram_service.edit_message_text(chat_id, message_id, "Nothing to update.")
+        return
+
+    ids_sql = ",".join(f"'{jid}'" for jid in job_ids)
+    if action == "paid":
+        update_sql = (
+            f"UPDATE public.job_entries SET paid = 'Yes', payment_date = CURRENT_DATE "
+            f"WHERE id IN ({ids_sql}) RETURNING id, client_name, fees"
+        )
+        result = supabase_service.execute_sql(update_sql)
+        if not result.get("ok"):
+            await telegram_service.edit_message_text(chat_id, message_id,
+                f"❌ Couldn't update: {result.get('error', 'unknown')[:120]}")
+            return
+        rows = result.get("rows", []) or []
+        if len(rows) == 1:
+            r = rows[0]
+            client = (r.get("client_name") or "the invoice").strip()
+            try:
+                amt = f"₹{int(float(r.get('fees') or 0)):,}"
+            except Exception:
+                amt = ""
+            msg = f"✅ Marked paid: {client}" + (f" — {amt}" if amt else "")
+        else:
+            msg = f"✅ Marked {len(rows)} invoice(s) as paid."
+        await telegram_service.edit_message_text(chat_id, message_id, msg)
+        return
+
+    if action == "later":
+        # Push the next nag out by RENAG_DAYS — stamp overdue_audit_sent = NOW()
+        bump_sql = (
+            f"UPDATE public.job_entries SET overdue_audit_sent = NOW() "
+            f"WHERE id IN ({ids_sql}) RETURNING id"
+        )
+        supabase_service.execute_sql(bump_sql)
+        await telegram_service.edit_message_text(
+            chat_id, message_id,
+            "⏸ Got it — I'll check back next week."
+        )
+        return
+
+
 async def _handle_reminder_callback(callback_query: dict):
     """Handle inline button presses from the reminder worker notifications."""
     cb_id = callback_query.get("id")
     cb_data = callback_query.get("data", "")
     chat_id = callback_query["message"]["chat"]["id"]
     message_id = callback_query["message"]["message_id"]
+
+    # Overdue-audit buttons (separate flow from client-reminder buttons)
+    if cb_data.startswith("audit:"):
+        parts = cb_data.split(":")
+        if len(parts) == 3 and parts[1] in ("paid", "later"):
+            await _handle_overdue_audit_callback(callback_query, parts[1], parts[2])
+        else:
+            await telegram_service.answer_callback_query(cb_id)
+        return
 
     # Acknowledge the button press immediately
     await telegram_service.answer_callback_query(cb_id)
