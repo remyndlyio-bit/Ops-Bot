@@ -2437,18 +2437,32 @@ class IntentService:
             }
             _active_pending = [k for k in _PENDING_STATES if user_mem.get(k)]
             if _active_pending:
-                ctx_desc = "; ".join(_PENDING_STATES[k] for k in _active_pending)
-                if self.gemini.is_new_query_not_response(message, ctx_desc):
-                    logger.info(f"[INTENT_SHIFT] Clearing pending states {_active_pending} — user typed a new query")
-                    _clear_patch = {k: False for k in _active_pending}
-                    _clear_patch.update({
-                        "pending_send_invoice": None,
-                        "pending_invoice_client": None,
-                        "pending_poc_email_client": None,
-                        "pending_poc_name_client": None,
-                    })
-                    self.memory.update_user_memory(user_id, _clear_patch)
-                    user_mem = self.memory.get_user_memory(user_id)  # refresh after clear
+                # Short-circuit: well-known response tokens are NEVER a new query.
+                # This guards against AI overreach (e.g. classifying "skip" — which is
+                # literally what we asked the user to type — as a fresh command).
+                _RESPONSE_TOKENS = {
+                    "skip", "cancel", "yes", "y", "yeah", "yep", "yup", "yes please",
+                    "no", "n", "nope", "nah", "no thanks", "not now", "later",
+                    "ok", "okay", "sure", "go ahead", "do it", "confirm", "send it",
+                    "don't send", "dont send",
+                }
+                _msg_stripped = message.strip().lower().rstrip(".!?")
+                _is_response_token = _msg_stripped in _RESPONSE_TOKENS
+                if _is_response_token:
+                    logger.info(f"[INTENT_SHIFT] '{_msg_stripped}' is a response token — keeping pending state {_active_pending}")
+                else:
+                    ctx_desc = "; ".join(_PENDING_STATES[k] for k in _active_pending)
+                    if self.gemini.is_new_query_not_response(message, ctx_desc):
+                        logger.info(f"[INTENT_SHIFT] Clearing pending states {_active_pending} — user typed a new query")
+                        _clear_patch = {k: False for k in _active_pending}
+                        _clear_patch.update({
+                            "pending_send_invoice": None,
+                            "pending_invoice_client": None,
+                            "pending_poc_email_client": None,
+                            "pending_poc_name_client": None,
+                        })
+                        self.memory.update_user_memory(user_id, _clear_patch)
+                        user_mem = self.memory.get_user_memory(user_id)  # refresh after clear
 
             # 0b1.4. Check if user is providing the month for a pending invoice
             if user_mem.get("awaiting_invoice_month"):
