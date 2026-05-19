@@ -3123,28 +3123,11 @@ class IntentService:
                             self._store_conversation(user_id, message, response)
                             return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-                        # Generate the invoice first, then ask for confirmation before emailing
+                        # PDF delivery + email confirmation prompt are owned by
+                        # main.py.process_and_send_invoice — don't duplicate them here.
                         invoice_data["send_to_client"] = True
-                        # Store pending send confirmation so user can approve
-                        self.memory.update_user_memory(user_id, {
-                            "awaiting_send_confirmation": True,
-                            "pending_send_invoice": {
-                                "client_name": display_client,
-                                "month": month_display,
-                                "year": year_val,
-                                "poc_email": poc_email,
-                                "row_ids": [r["id"] for r in rows if r.get("id")],
-                                "poc_name": _inv_poc_name,
-                                "invoicer_name": _inv_invoicer_name,
-                            },
-                        })
-                        # Generate PDF and send to user first via WhatsApp/Telegram
                         trigger_invoice = True
-                        response = (
-                            f"I've generated the invoice for {display_client} ({month_display}).\n\n"
-                            f"Should I email it to **{poc_email}**?\n"
-                            f"Reply 'Yes' to send or 'No' to skip."
-                        )
+                        response = f"On it — generating your invoice for {display_client} ({month_display}) now…"
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
 
@@ -3243,23 +3226,10 @@ class IntentService:
                             break
 
                     if _auto_poc_email:
-                        self.memory.update_user_memory(user_id, {
-                            "awaiting_send_confirmation": True,
-                            "pending_send_invoice": {
-                                "client_name": display_client,
-                                "month": month_display,
-                                "year": year_val,
-                                "poc_email": _auto_poc_email,
-                                "row_ids": _row_ids,
-                                "poc_name": _inv_poc_name,
-                                "invoicer_name": _inv_invoicer_name,
-                            },
-                        })
-                        response = (
-                            f"I've generated the invoice for {display_client} ({month_display}).\n\n"
-                            f"Should I email it to {_auto_poc_email}?\n"
-                            f"Reply 'Yes' to send or 'No' to skip."
-                        )
+                        # PDF delivery + email confirmation prompt are owned by
+                        # main.py.process_and_send_invoice — don't duplicate them here.
+                        # Just acknowledge so the user has feedback during PDF generation.
+                        response = f"On it — generating your invoice for {display_client} ({month_display}) now…"
                     else:
                         self.memory.update_user_memory(user_id, {
                             "awaiting_poc_email": True,
@@ -3273,9 +3243,9 @@ class IntentService:
                             },
                         })
                         response = (
-                            f"I've generated the invoice for {display_client} ({month_display}).\n\n"
-                            f"There's no contact email on file. Send the client's email and I'll deliver the invoice "
-                            f"(e.g. client@agency.com), or type 'skip' to keep it offline."
+                            f"On it — generating your invoice for {display_client} ({month_display}) now.\n\n"
+                            f"Heads up: no client email on file. Reply with one (e.g. client@agency.com) "
+                            f"and I'll send it over, or 'skip' to keep it offline."
                         )
 
                     self._store_conversation(user_id, message, response)
