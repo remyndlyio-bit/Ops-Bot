@@ -2884,9 +2884,12 @@ class IntentService:
                         return {"operation": "ACTION_TRIGGER", "response": clar_q, "trigger_invoice": False, "invoice_data": {}}
 
                 # AI confirmed the request is out of scope (not query/invoice/action) →
-                # respond with a friendly "not yet" message instead of falling through to SQL.
+                # use the feature-aware AI responder so we can humorously confirm what
+                # Remyndly does/doesn't do, grounded in REMYNDLY_FEATURES.md.
                 if intent_result.get("operation") == "UNKNOWN":
-                    response = unsupported_feature_phrase(message[:80])
+                    response = self.gemini.answer_feature_question(message, conversation_history=conversation_history)
+                    if not response or not response.strip():
+                        response = unsupported_feature_phrase(message[:80])
                     self._store_conversation(user_id, message, response)
                     return {"operation": "unsupported", "response": response, "trigger_invoice": False, "invoice_data": {}}
 

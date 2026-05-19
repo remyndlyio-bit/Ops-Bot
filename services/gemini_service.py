@@ -12,11 +12,34 @@ class GeminiService:
     """
     AI backend via OpenRouter. Set one env variable: AI_KEY (your OpenRouter API key).
     """
+    # Cached feature catalog (loaded once from REMYNDLY_FEATURES.md and reused
+    # across every AI call that needs to know what Remyndly does or doesn't do).
+    _features_doc_cache: Optional[str] = None
+
     def __init__(self):
         self.api_key = None
         self.model_name = DEFAULT_MODEL
         self._initialized = False
         self._ensure_initialized()
+
+    @classmethod
+    def _load_features_doc(cls) -> str:
+        """Read REMYNDLY_FEATURES.md (once) and cache it. Returns '' if missing."""
+        if cls._features_doc_cache is not None:
+            return cls._features_doc_cache
+        try:
+            import os as _os
+            here = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            path = _os.path.join(here, "REMYNDLY_FEATURES.md")
+            if _os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    cls._features_doc_cache = f.read()
+            else:
+                cls._features_doc_cache = ""
+        except Exception as e:
+            logger.warning(f"[GEMINI] Failed to load REMYNDLY_FEATURES.md: {e}")
+            cls._features_doc_cache = ""
+        return cls._features_doc_cache
 
     def _ensure_initialized(self) -> bool:
         """Initialize from AI_KEY. Called at startup and lazily on first use."""
@@ -201,8 +224,15 @@ class GeminiService:
             "change history entries '[DATE] field: old → new'. Answer with the OLD value (before the arrow)."
         ) if history_question else ""
 
+        # Inject the feature catalog so the AI knows what Remyndly does/doesn't do.
+        # Only included when small enough; otherwise skipped to save tokens.
+        features_doc = self._load_features_doc()
+        features_block = (
+            f"\n\nREMYNDLY CAPABILITIES (truth source — never contradict this):\n{features_doc}\n"
+        ) if features_doc and len(features_doc) < 12000 else ""
+
         full_prompt = (
-            f"{system}{history_note}{context_block}\n\n"
+            f"{system}{history_note}{context_block}{features_block}\n\n"
             f"DATA:\n{payload_str}\n\n"
             f"USER ASKED: {user_message}\n\n"
             "Your reply:"
@@ -217,6 +247,58 @@ class GeminiService:
                 return out.strip()
         except Exception as e:
             logger.warning(f"Response synthesis failed: {e}")
+        return None
+
+    def answer_feature_question(self, user_message: str, conversation_history: Optional[List[Dict[str, str]]] = None) -> Optional[str]:
+        """
+        Answer 'can Remyndly do X?' / 'how do I ...?' / 'do you support ...?' questions.
+        Uses REMYNDLY_FEATURES.md as the truth source:
+          - If the asked feature IS supported → reply with confidence + a concrete example.
+          - If NOT supported → own it with light humour and redirect to something we DO have.
+        Returns a single short reply (plain text, no markdown).
+        """
+        self._ensure_initialized()
+        if not self._initialized or not self.api_key:
+            return None
+        features_doc = self._load_features_doc()
+        if not features_doc:
+            return None
+
+        recent = ""
+        if conversation_history:
+            lines = []
+            for m in conversation_history[-4:]:
+                role = "User" if m.get("role") == "user" else "You"
+                content = (m.get("content") or "").strip()
+                if content:
+                    lines.append(f"{role}: {content[:160]}")
+            if lines:
+                recent = "\n\nRECENT CHAT:\n" + "\n".join(lines)
+
+        prompt = (
+            "You are Remyndly's WhatsApp/Telegram assistant. The user is asking about a feature, "
+            "a how-to, or whether the bot supports something. Use ONLY the capability catalog below "
+            "as your truth source — never invent features.\n\n"
+            "RULES:\n"
+            "- If the asked feature IS in the catalog: confirm it's supported in one short sentence "
+            "  and give ONE concrete example phrase the user can type next.\n"
+            "- If the asked feature is in the 'does NOT do (yet)' list OR not in the catalog at all: "
+            "  own it with light, warm humour (one playful line) and redirect to the closest thing "
+            "  Remyndly DOES handle. Never sound apologetic or defeated.\n"
+            "- Plain text only. No markdown (**bold**, _italic_), no HTML. A single ✨/🔮/📊 emoji is "
+            "  fine if it lands naturally, but don't decorate.\n"
+            "- Keep it under 4 sentences. Be specific. Skip filler like 'Great question!' or 'Hope this helps!'.\n\n"
+            f"CAPABILITY CATALOG:\n{features_doc}\n"
+            f"{recent}\n\n"
+            f"USER ASKED: {user_message}\n\n"
+            "Your reply:"
+        )
+        try:
+            out = self._call_api(prompt, generation_config={"temperature": 0.6, "maxOutputTokens": 200})
+            if out and isinstance(out, str) and out.strip():
+                return out.strip()
+        except Exception as e:
+            logger.warning(f"answer_feature_question failed: {e}")
         return None
 
     def make_response(
