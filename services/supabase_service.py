@@ -687,6 +687,105 @@ class SupabaseService:
         "bank_name", "upi_id", "mobile_number", "pan_number", "gst_number",
     ]
 
+    # ── Generated invoice cache ──────────────────────────────────────
+    def get_cached_invoice(self, user_id: str, client_name: str, month: str, year: int) -> Dict[str, Any]:
+        """Look up a previously-generated invoice for this (user, client, month, year).
+        Returns {"ok": True, "data": {...}} with pdf_bytes or {"ok": True, "data": None}."""
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+        except ImportError:
+            return {"ok": False, "error": "psycopg2 not installed."}
+        try:
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, pdf_filename, pdf_bytes, poc_email, poc_name,
+                           invoicer_name, row_ids, invoice_total, bill_no,
+                           generated_at, last_regenerated_at, regenerated_count
+                    FROM public.generated_invoices
+                    WHERE user_id = %s AND client_name = %s
+                          AND year = %s AND month = %s
+                    LIMIT 1
+                    """,
+                    (str(user_id), client_name, int(year), month),
+                )
+                row = cur.fetchone()
+            conn.close()
+            return {"ok": True, "data": dict(row) if row else None}
+        except Exception as e:
+            logger.error(f"[INVOICE_CACHE] get_cached_invoice failed: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def upsert_cached_invoice(
+        self,
+        user_id: str,
+        client_name: str,
+        month: str,
+        year: int,
+        pdf_filename: str,
+        pdf_bytes: bytes,
+        poc_email: Optional[str] = None,
+        poc_name: Optional[str] = None,
+        invoicer_name: Optional[str] = None,
+        row_ids: Optional[List[str]] = None,
+        invoice_total: Optional[float] = None,
+        bill_no: Optional[str] = None,
+        is_regeneration: bool = False,
+    ) -> Dict[str, Any]:
+        """Insert a fresh invoice; on conflict (same user/client/period) replace the PDF
+        and bump regenerated_count. Returns {"ok": True, "id": ...}."""
+        if not self.db_url:
+            return {"ok": False, "error": "Database URL not configured."}
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            import json as _json
+        except ImportError:
+            return {"ok": False, "error": "psycopg2 not installed."}
+        try:
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.generated_invoices
+                        (user_id, client_name, month, year,
+                         pdf_filename, pdf_bytes, poc_email, poc_name, invoicer_name,
+                         row_ids, invoice_total, bill_no, generated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (user_id, client_name, year, month) DO UPDATE SET
+                        pdf_filename = EXCLUDED.pdf_filename,
+                        pdf_bytes    = EXCLUDED.pdf_bytes,
+                        poc_email    = COALESCE(EXCLUDED.poc_email, generated_invoices.poc_email),
+                        poc_name     = COALESCE(EXCLUDED.poc_name,  generated_invoices.poc_name),
+                        invoicer_name= COALESCE(EXCLUDED.invoicer_name, generated_invoices.invoicer_name),
+                        row_ids      = COALESCE(EXCLUDED.row_ids,   generated_invoices.row_ids),
+                        invoice_total= COALESCE(EXCLUDED.invoice_total, generated_invoices.invoice_total),
+                        bill_no      = COALESCE(EXCLUDED.bill_no,   generated_invoices.bill_no),
+                        last_regenerated_at = NOW(),
+                        regenerated_count   = generated_invoices.regenerated_count + 1
+                    RETURNING id
+                    """,
+                    (
+                        str(user_id), client_name, month, int(year),
+                        pdf_filename, psycopg2.Binary(pdf_bytes),
+                        poc_email, poc_name, invoicer_name,
+                        _json.dumps(row_ids) if row_ids is not None else None,
+                        invoice_total, bill_no,
+                    ),
+                )
+                rec = cur.fetchone()
+            conn.close()
+            return {"ok": True, "id": rec["id"] if rec else None}
+        except Exception as e:
+            logger.error(f"[INVOICE_CACHE] upsert_cached_invoice failed: {e}")
+            return {"ok": False, "error": str(e)}
+
     def get_user_bank_details(self, user_id: str) -> Dict[str, Any]:
         """
         Fetch bank details from user_config for a given user_id.
