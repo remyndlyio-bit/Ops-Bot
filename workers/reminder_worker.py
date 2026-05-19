@@ -35,6 +35,12 @@ FIRST_REMINDER_DAYS = 15
 SECOND_REMINDER_DAYS = 30
 THIRD_REMINDER_DAYS = 45
 
+# Daily overdue-audit: ping the OWNER (not the client) when an invoice has
+# been outstanding 60+ days, in case it was paid offline and they forgot to
+# update the bot. Re-ping every OVERDUE_AUDIT_RENAG_DAYS until resolved.
+OVERDUE_AUDIT_THRESHOLD_DAYS = 60
+OVERDUE_AUDIT_RENAG_DAYS = 7
+
 REMINDER_QUERY = """
 SELECT
     id,
@@ -209,6 +215,128 @@ def notify_user_whatsapp(user_id: str, reminders: list, whatsapp: WhatsAppServic
     whatsapp.send_text_message(user_id, plain_text)
 
 
+# ── Overdue audit (>60 day owner-side check) ──────────────────────────────
+
+OVERDUE_AUDIT_QUERY = """
+SELECT
+    id, user_id, client_name, poc_name, fees, bill_no, invoice_date,
+    overdue_audit_sent
+FROM public.job_entries
+WHERE
+    (paid IS NULL OR TRIM(paid) = '' OR LOWER(paid) IN ('false', 'no', 'unpaid'))
+    AND ("isDeleted" IS NOT TRUE)
+    AND invoice_date IS NOT NULL
+    AND invoice_date <= CURRENT_DATE - INTERVAL '{threshold_days} days'
+    AND (
+        overdue_audit_sent IS NULL
+        OR overdue_audit_sent <= NOW() - INTERVAL '{renag_days} days'
+    )
+ORDER BY user_id, invoice_date ASC
+""".format(threshold_days=OVERDUE_AUDIT_THRESHOLD_DAYS, renag_days=OVERDUE_AUDIT_RENAG_DAYS)
+
+
+def _days_since(d) -> int:
+    """How many days ago was invoice_date (date or ISO string)?"""
+    try:
+        if isinstance(d, str):
+            from datetime import datetime
+            d = datetime.fromisoformat(d[:10]).date()
+        return (date.today() - d).days
+    except Exception:
+        return 0
+
+
+def scan_overdue_audits() -> list:
+    """Query Supabase for unpaid invoices that are 60+ days old and need an owner audit ping."""
+    db = SupabaseService()
+    logger.info(f"[AUDIT_WORKER] Scanning for unpaid invoices >{OVERDUE_AUDIT_THRESHOLD_DAYS} days old…")
+    result = db.execute_sql(OVERDUE_AUDIT_QUERY)
+    if not result.get("ok"):
+        logger.error(f"[AUDIT_WORKER] DB query failed: {result.get('error')}")
+        return []
+    rows = result.get("rows", [])
+    logger.info(f"[AUDIT_WORKER] Found {len(rows)} invoice(s) needing audit.")
+    return rows
+
+
+def _build_audit_text(audits: list) -> str:
+    """Build the owner-facing audit text."""
+    lines = ["📌 Overdue Invoice Check\n"]
+    lines.append(
+        f"These invoices are {OVERDUE_AUDIT_THRESHOLD_DAYS}+ days old "
+        "and still marked unpaid. Any of them actually paid?\n"
+    )
+    for idx, row in enumerate(audits, start=1):
+        client = row.get("client_name") or "Unknown"
+        bill = row.get("bill_no") or "N/A"
+        amount = _format_amount(row.get("fees"))
+        days_old = _days_since(row.get("invoice_date"))
+        lines.append(
+            f"{idx}. {client} — {bill}\n"
+            f"   {amount} — invoiced {days_old} days ago"
+        )
+    return "\n".join(lines)
+
+
+def notify_audit_telegram(user_id: str, audits: list, telegram: TelegramService):
+    """Telegram message with per-job 'Mark Paid' / 'Remind Later' buttons."""
+    chat_id = int(user_id)
+    message_text = _build_audit_text(audits)
+
+    buttons = []
+    for idx, row in enumerate(audits, start=1):
+        job_id = row.get("id")
+        # Compact label so two buttons fit on one Telegram row
+        label = f"#{idx} {(row.get('client_name') or '')[:14]}".strip()
+        buttons.append([
+            {"text": f"✅ Paid · {label}", "callback_data": f"audit:paid:{job_id}"},
+            {"text": f"⏸ Later · {label}", "callback_data": f"audit:later:{job_id}"},
+        ])
+    buttons.append([{"text": "✅ Mark All Paid",     "callback_data": "audit:paid:all"}])
+    buttons.append([{"text": "⏸ Remind Me Next Week", "callback_data": "audit:later:all"}])
+
+    logger.info(f"[AUDIT_WORKER] Notifying Telegram user {user_id} ({len(audits)} audit row(s))")
+    telegram.send_message_with_buttons_sync(chat_id, message_text, buttons)
+
+
+def notify_audit_whatsapp(user_id: str, audits: list, whatsapp: WhatsAppService):
+    """WhatsApp text + pending state. User replies e.g. 'paid 1' or 'all paid'."""
+    message_text = _build_audit_text(audits)
+    message_text += (
+        "\n\nReply:\n"
+        "• paid <number>  — mark one as paid (e.g. 'paid 1')\n"
+        "• all paid       — mark all of these as paid\n"
+        "• later          — remind me next week"
+    )
+    pending = []
+    for row in audits:
+        pending.append({
+            "id": row.get("id"),
+            "client_name": row.get("client_name"),
+            "bill_no": row.get("bill_no"),
+            "fees": row.get("fees"),
+            "_audit_row": True,
+        })
+    # Reuse the same pending_reminders store; reply handler will branch on _audit_row.
+    save_pending(user_id, pending)
+    logger.info(f"[AUDIT_WORKER] Notifying WhatsApp user {user_id} ({len(audits)} audit row(s))")
+    whatsapp.send_text_message(user_id, message_text)
+
+
+def mark_audits_pinged(db: SupabaseService, audits: list):
+    """Stamp overdue_audit_sent = NOW() so we don't re-nag for RENAG_DAYS."""
+    for row in audits:
+        job_id = row.get("id")
+        if not job_id:
+            continue
+        try:
+            db.execute_sql(
+                f"UPDATE public.job_entries SET overdue_audit_sent = NOW() WHERE id = '{job_id}'"
+            )
+        except Exception as e:
+            logger.error(f"[AUDIT_WORKER] Failed to stamp overdue_audit_sent for job {job_id}: {e}")
+
+
 # ── DB Flag Update ────────────────────────────────────────────────────────
 
 LEVEL_TO_FLAG = {
@@ -247,37 +375,59 @@ def run():
     logger.info("[REMINDER_WORKER] === Starting reminder scan ===")
 
     db = SupabaseService()
-
-    rows = scan_reminders()
-    if not rows:
-        logger.info("[REMINDER_WORKER] No reminders due. Exiting.")
-        return
-
-    grouped = group_by_user(rows)
-    logger.info(f"[REMINDER_WORKER] Reminders grouped for {len(grouped)} user(s).")
-
     telegram = TelegramService()
     whatsapp = WhatsAppService()
 
-    total_sent = 0
-    total_failed = 0
+    # ── Phase 1: client-facing payment reminders (15/30/45-day cadence) ──
+    rows = scan_reminders()
+    if rows:
+        grouped = group_by_user(rows)
+        logger.info(f"[REMINDER_WORKER] Reminders grouped for {len(grouped)} user(s).")
+        total_sent = 0
+        total_failed = 0
+        for user_id, reminders in grouped.items():
+            try:
+                if _is_telegram_user(user_id):
+                    notify_user_telegram(user_id, reminders, telegram)
+                else:
+                    notify_user_whatsapp(user_id, reminders, whatsapp)
+                mark_reminders_sent(db, reminders)
+                total_sent += len(reminders)
+                logger.info(f"[REMINDER_WORKER] Sent {len(reminders)} reminder(s) for user {user_id}")
+            except Exception as e:
+                total_failed += len(reminders)
+                logger.error(f"[REMINDER_WORKER] Failed to notify user {user_id}: {e}")
+        logger.info(f"[REMINDER_WORKER] Phase 1 complete: {total_sent} sent, {total_failed} failed")
+    else:
+        logger.info("[REMINDER_WORKER] No client-facing reminders due.")
 
-    for user_id, reminders in grouped.items():
-        try:
-            if _is_telegram_user(user_id):
-                notify_user_telegram(user_id, reminders, telegram)
-            else:
-                notify_user_whatsapp(user_id, reminders, whatsapp)
+    # ── Phase 2: owner-side overdue audit (>60 days, weekly re-nag) ──────
+    logger.info("[AUDIT_WORKER] === Starting overdue audit ===")
+    audits = scan_overdue_audits()
+    if audits:
+        audit_grouped = defaultdict(list)
+        for row in audits:
+            audit_grouped[row["user_id"]].append(row)
+        logger.info(f"[AUDIT_WORKER] Audit groups: {len(audit_grouped)} user(s).")
+        audit_sent = 0
+        audit_failed = 0
+        for user_id, user_audits in audit_grouped.items():
+            try:
+                if _is_telegram_user(user_id):
+                    notify_audit_telegram(user_id, user_audits, telegram)
+                else:
+                    notify_audit_whatsapp(user_id, user_audits, whatsapp)
+                mark_audits_pinged(db, user_audits)
+                audit_sent += len(user_audits)
+                logger.info(f"[AUDIT_WORKER] Sent audit ping for {len(user_audits)} job(s) to user {user_id}")
+            except Exception as e:
+                audit_failed += len(user_audits)
+                logger.error(f"[AUDIT_WORKER] Failed audit ping for user {user_id}: {e}")
+        logger.info(f"[AUDIT_WORKER] Phase 2 complete: {audit_sent} pinged, {audit_failed} failed")
+    else:
+        logger.info("[AUDIT_WORKER] No overdue audits due.")
 
-            # Mark DB flags immediately after successful notification
-            mark_reminders_sent(db, reminders)
-            total_sent += len(reminders)
-            logger.info(f"[REMINDER_WORKER] Sent {len(reminders)} reminder(s) for user {user_id}")
-        except Exception as e:
-            total_failed += len(reminders)
-            logger.error(f"[REMINDER_WORKER] Failed to notify user {user_id}: {e}")
-
-    logger.info(f"[REMINDER_WORKER] === Scan complete: {total_sent} sent, {total_failed} failed ===")
+    logger.info("[REMINDER_WORKER] === All phases complete ===")
 
 
 if __name__ == "__main__":
