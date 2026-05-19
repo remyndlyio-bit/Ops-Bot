@@ -3984,6 +3984,27 @@ class IntentService:
         ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
         last_row = ctx.get("last_row_data")
 
+        # Detect "all" — bulk delete mode (e.g. "delete all Nike jobs", "remove all entries")
+        is_bulk = bool(re.search(r'\ball\b', msg_lower))
+        # Try to pull a client/brand name out of the message:
+        #   "delete all Nike jobs"   → "Nike"
+        #   "delete Nike jobs"       → "Nike"
+        #   "remove all from Bisleri"→ "Bisleri"
+        client_hint = ""
+        _patterns = [
+            r'\b(?:delete|remove|erase|trash|discard)\s+(?:all\s+)?(?:my\s+)?(.+?)\s+(?:jobs?|entries|records?|rows?)\b',
+            r'\b(?:delete|remove|erase|trash|discard)\s+(?:all\s+)?(?:jobs?|entries|records?|rows?)\s+(?:for|from|of)\s+(.+?)$',
+            r'\b(?:all|every)\s+(.+?)\s+(?:jobs?|entries|records?)\b',
+        ]
+        for _pat in _patterns:
+            _m = re.search(_pat, msg_lower, re.IGNORECASE)
+            if _m:
+                _hint = _m.group(1).strip().strip("'\"")
+                # Reject empty / generic words
+                if _hint and _hint not in ("my", "the", "all", "every", "this", "that"):
+                    client_hint = _hint
+                    break
+
         if not is_last and last_row and any(w in msg_lower for w in ["this", "it", "that"]):
             # Delete the job that was most recently shown
             row_id = last_row.get("id", "")
@@ -3993,16 +4014,28 @@ class IntentService:
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
             candidate_rows = [last_row]
         else:
-            # Fetch the most recent job(s) to determine what to delete
+            # Build the candidate fetch — filter by client/brand if we extracted one,
+            # and drop the LIMIT for bulk deletes so we don't silently truncate.
+            _where_extra = ""
+            _params_label = ""
+            if client_hint:
+                _safe_hint = client_hint.replace("'", "''")
+                _where_extra = (
+                    f" AND (client_name ILIKE '%{_safe_hint}%' "
+                    f"OR brand_name ILIKE '%{_safe_hint}%' "
+                    f"OR production_house ILIKE '%{_safe_hint}%')"
+                )
+                _params_label = f" matching '{client_hint}'"
+            _limit_clause = "" if is_bulk else "LIMIT 5"
             fetch_sql = (
                 f"SELECT id, client_name, brand_name, job_date, job_description_details, fees "
                 f"FROM public.job_entries "
-                f"WHERE user_id = '{uid}' AND {_not_deleted} "
-                f"ORDER BY job_date DESC NULLS LAST LIMIT 5"
-            )
+                f"WHERE user_id = '{uid}' AND {_not_deleted}{_where_extra} "
+                f"ORDER BY job_date DESC NULLS LAST {_limit_clause}"
+            ).strip()
             fetch_result = self.supabase.execute_sql(fetch_sql)
             if not fetch_result.get("ok") or not fetch_result.get("rows"):
-                response = "You don't have any jobs to delete."
+                response = f"You don't have any jobs{_params_label} to delete."
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
             candidate_rows = fetch_result["rows"]
@@ -4010,6 +4043,35 @@ class IntentService:
         # If "last job" and multiple rows returned, take only the very last one
         if is_last:
             candidate_rows = candidate_rows[:1]
+
+        # Bulk path: user said "all" — confirm before nuking everything we found.
+        if is_bulk and len(candidate_rows) > 1:
+            self.memory.update_user_memory(user_id, {
+                "pending_disambiguation": {
+                    "rows": candidate_rows,
+                    "data_user_id": data_user_id,
+                    "bulk_mode": True,
+                    "client_hint": client_hint,
+                }
+            })
+            _label = f"{len(candidate_rows)} jobs"
+            if client_hint:
+                _label = f"{len(candidate_rows)} {client_hint} jobs"
+            preview = []
+            for r in candidate_rows[:5]:
+                d = str(r.get("job_date") or "")[:10]
+                desc = str(r.get("job_description_details") or "")[:40].strip()
+                bits = []
+                if d: bits.append(d)
+                if desc: bits.append(f"— {desc}")
+                preview.append("• " + (" ".join(bits) if bits else "(no date)"))
+            more = "" if len(candidate_rows) <= 5 else f"\n…and {len(candidate_rows) - 5} more"
+            response = (
+                f"I found {_label}. Reply 'Yes' to delete all of them, "
+                f"or 'cancel' to abort.\n\n" + "\n".join(preview) + more
+            )
+            self._store_conversation(user_id, message, response)
+            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         if len(candidate_rows) > 1:
             # Disambiguate — reuse the existing disambiguation flow
@@ -4034,7 +4096,7 @@ class IntentService:
                 if d: parts.append(d)
                 if desc: parts.append(f"— {desc}")
                 opts.append(" ".join(parts))
-            opts.append("\nReply with a number, or 'cancel' to abort.")
+            opts.append("\nReply with a number, 'all' to delete every match, or 'cancel' to abort.")
             response = "\n".join(opts)
             self._store_conversation(user_id, message, response)
             return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -4072,22 +4134,55 @@ class IntentService:
         return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _handle_disambiguation_reply(self, user_id: str, message: str, pending: Dict) -> Dict:
-        """User is replying with a number to pick one row from a disambiguation list."""
-        msg = message.strip().lower()
+        """User is replying to pick one row (by number) or all rows ('all'/'yes') from a disambiguation list."""
+        msg = message.strip().lower().rstrip(".!?")
         if msg in ("cancel", "stop", "nevermind", "abort", "no"):
             self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
             response = "Cancelled. Let me know if you need anything else."
             self._store_conversation(user_id, message, response)
             return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+        rows = pending.get("rows", [])
+        # Bulk-delete path: "all" / "yes" / "delete all" / "all of them" → mark every row deleted.
+        _BULK_TOKENS = {"all", "yes", "y", "delete all", "all of them", "every one", "everyone", "do it"}
+        if msg in _BULK_TOKENS or msg.startswith("delete all") or msg.startswith("yes"):
+            if not rows:
+                self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
+                response = "Nothing to delete. Let me know if you need anything else."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            data_uid = pending.get("data_user_id", user_id).replace("'", "''")
+            ids = [r.get("id") for r in rows if r.get("id")]
+            if not ids:
+                self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
+                response = "Couldn't resolve which rows to delete. Please try again."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            ids_sql = ",".join(f"'{rid}'" for rid in ids)
+            bulk_sql = (
+                f"UPDATE public.job_entries SET \"isDeleted\" = true "
+                f"WHERE id IN ({ids_sql}) AND user_id = '{data_uid}' RETURNING id"
+            )
+            exec_result = self.supabase.execute_sql(bulk_sql)
+            self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
+            if not exec_result.get("ok"):
+                response = "Something went wrong with the bulk delete. Please try again."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            deleted_count = len(exec_result.get("rows", []) or ids)
+            hint = pending.get("client_hint") or ""
+            label = f"{deleted_count} {hint} job{'s' if deleted_count != 1 else ''}".strip()
+            response = f"Done — deleted {label}. Let me know if you need anything else."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
         num_match = re.search(r'\b(\d+)\b', message)
         if not num_match:
-            response = "Please reply with a number to select the record, or 'cancel' to abort."
+            response = "Please reply with a number to select the record, 'all' to delete every match, or 'cancel' to abort."
             self._store_conversation(user_id, message, response)
             return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         idx = int(num_match.group(1)) - 1
-        rows = pending.get("rows", [])
         if idx < 0 or idx >= len(rows):
             response = f"Please choose a number between 1 and {len(rows)}, or 'cancel' to abort."
             self._store_conversation(user_id, message, response)
