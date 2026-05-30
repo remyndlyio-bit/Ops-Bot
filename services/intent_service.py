@@ -2423,6 +2423,53 @@ class IntentService:
             if reminder_result:
                 return reminder_result
 
+            # ── FlowMachine v2 — session 1 (classifier + IDLE leaf routing) ──
+            # Behind a feature flag so production stays on the legacy path until
+            # we explicitly flip FLOW_MACHINE_V2=true on Railway. v2 only takes
+            # over for messages that arrive while the user is FULLY IDLE.
+            # Read/write intents shadow-only (telemetry); SMALL_TALK / FEATURE_QUESTION
+            # / UNKNOWN are owned by v2 for instant on-brand replies.
+            try:
+                _v2_enabled = os.getenv("FLOW_MACHINE_V2", "").strip().lower() in ("1", "true", "yes", "on")
+            except Exception:
+                _v2_enabled = False
+            if _v2_enabled:
+                _idle_blockers = (
+                    "awaiting_job_input", "awaiting_invoice_month", "awaiting_poc_email",
+                    "awaiting_send_confirmation", "awaiting_client_billing",
+                    "awaiting_poc_name", "awaiting_bank_details", "awaiting_name_change",
+                    "awaiting_modify_field", "pending_disambiguation",
+                )
+                _is_idle = (
+                    not any(user_mem.get(k) for k in _idle_blockers)
+                    and not self.memory.get_form_state(user_id)
+                )
+                if _is_idle:
+                    try:
+                        from services.classifier import classify as _v2_classify
+                        from services.flow_dispatcher import dispatch_idle as _v2_dispatch
+                        _schema_summary = ", ".join(
+                            c for c in JOB_ENTRIES_COLUMNS if not c.startswith("_")
+                        )[:1500]
+                        _verdict = _v2_classify(
+                            message, self.gemini,
+                            conversation_history=conversation_history,
+                            schema_summary=_schema_summary,
+                        )
+                        if _verdict:
+                            _result = _v2_dispatch(
+                                _verdict,
+                                intent_service=self,
+                                user_id=user_id,
+                                conversation_history=conversation_history,
+                            )
+                            if _result is not None:
+                                return _result
+                            # Shadow-only — fall through to legacy with the
+                            # verdict already logged inside classifier.classify.
+                    except Exception as _v2_err:
+                        logger.warning(f"[V2] dispatch failed, falling back to legacy: {_v2_err}")
+
             # 0a-. Small talk detection (greetings, thanks, etc.) — avoid expensive SQL path
             small_talk_resp = self._detect_small_talk(message, user_id=user_id)
             if small_talk_resp:
