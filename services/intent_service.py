@@ -286,6 +286,11 @@ class IntentService:
         self.memory = MemoryService()
         # Column schema (if provided via COLUMN_SCHEMA env) for AI validation.
         self.column_schema = _COLUMN_SCHEMA_FROM_ENV or {}
+        # FlowMachine v2 (session 2+). Owned alongside the legacy awaiting_*
+        # flag bag during migration; either path can reset state if v2 is
+        # flag-flipped on/off mid-flow.
+        from services.flow_machine import FlowMachine as _FlowMachine
+        self.flow_machine = _FlowMachine(self.memory)
 
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
         """Store user message and bot response in conversation history."""
@@ -2434,41 +2439,88 @@ class IntentService:
             except Exception:
                 _v2_enabled = False
             if _v2_enabled:
-                _idle_blockers = (
-                    "awaiting_job_input", "awaiting_invoice_month", "awaiting_poc_email",
-                    "awaiting_send_confirmation", "awaiting_client_billing",
-                    "awaiting_poc_name", "awaiting_bank_details", "awaiting_name_change",
-                    "awaiting_modify_field", "pending_disambiguation",
-                )
-                _is_idle = (
-                    not any(user_mem.get(k) for k in _idle_blockers)
-                    and not self.memory.get_form_state(user_id)
-                )
-                if _is_idle:
+                try:
+                    # First: apply TTL — long-idle flow auto-resets so the user
+                    # isn't trapped in a stale state from hours ago.
+                    if self.flow_machine.expire_if_stale(user_id):
+                        # The legacy awaiting flags don't know about this reset;
+                        # session 2 only owns INVOICE_AWAIT_SEND_CONFIRM, so we
+                        # clear that specific legacy pair if it was the stale flow.
+                        if user_mem.get("awaiting_send_confirmation"):
+                            self.memory.update_user_memory(user_id, {
+                                "awaiting_send_confirmation": False,
+                                "pending_send_invoice": None,
+                            })
+                            user_mem = self.memory.get_user_memory(user_id)
+                except Exception as _ttl_err:
+                    logger.warning(f"[V2] TTL check failed: {_ttl_err}")
+
+                from services.classifier import classify as _v2_classify
+                from services.flow_dispatcher import dispatch_idle as _v2_dispatch_idle
+                from services.flow_dispatcher import dispatch_in_flow as _v2_dispatch_in_flow
+                from services.flow_machine import FLOW_IDLE
+                _v2_current_flow = self.flow_machine.current_flow(user_id)
+                _v2_current_state = self.flow_machine.get_state(user_id)
+                _v2_in_owned_flow = _v2_current_flow != FLOW_IDLE
+                _schema_summary = ", ".join(
+                    c for c in JOB_ENTRIES_COLUMNS if not c.startswith("_")
+                )[:1500]
+
+                if _v2_in_owned_flow:
+                    # In a v2-owned flow — classify with flow context, route through dispatch_in_flow.
                     try:
-                        from services.classifier import classify as _v2_classify
-                        from services.flow_dispatcher import dispatch_idle as _v2_dispatch
-                        _schema_summary = ", ".join(
-                            c for c in JOB_ENTRIES_COLUMNS if not c.startswith("_")
-                        )[:1500]
                         _verdict = _v2_classify(
                             message, self.gemini,
                             conversation_history=conversation_history,
                             schema_summary=_schema_summary,
+                            current_flow=_v2_current_flow,
+                            current_context=_v2_current_state.get("context") or {},
                         )
                         if _verdict:
-                            _result = _v2_dispatch(
+                            _result = _v2_dispatch_in_flow(
                                 _verdict,
                                 intent_service=self,
                                 user_id=user_id,
+                                current_flow=_v2_current_flow,
+                                current_context=_v2_current_state.get("context") or {},
                                 conversation_history=conversation_history,
                             )
                             if _result is not None:
                                 return _result
-                            # Shadow-only — fall through to legacy with the
-                            # verdict already logged inside classifier.classify.
+                            # Shadow → fall through to legacy.
                     except Exception as _v2_err:
-                        logger.warning(f"[V2] dispatch failed, falling back to legacy: {_v2_err}")
+                        logger.warning(f"[V2] in-flow dispatch failed, falling back: {_v2_err}")
+                else:
+                    # IDLE path — also gated on no legacy awaiting flag set so
+                    # mid-migration flows still use legacy handlers.
+                    _idle_blockers = (
+                        "awaiting_job_input", "awaiting_invoice_month", "awaiting_poc_email",
+                        "awaiting_send_confirmation", "awaiting_client_billing",
+                        "awaiting_poc_name", "awaiting_bank_details", "awaiting_name_change",
+                        "awaiting_modify_field", "pending_disambiguation",
+                    )
+                    _is_idle = (
+                        not any(user_mem.get(k) for k in _idle_blockers)
+                        and not self.memory.get_form_state(user_id)
+                    )
+                    if _is_idle:
+                        try:
+                            _verdict = _v2_classify(
+                                message, self.gemini,
+                                conversation_history=conversation_history,
+                                schema_summary=_schema_summary,
+                            )
+                            if _verdict:
+                                _result = _v2_dispatch_idle(
+                                    _verdict,
+                                    intent_service=self,
+                                    user_id=user_id,
+                                    conversation_history=conversation_history,
+                                )
+                                if _result is not None:
+                                    return _result
+                        except Exception as _v2_err:
+                            logger.warning(f"[V2] idle dispatch failed, falling back: {_v2_err}")
 
             # 0a-. Small talk detection (greetings, thanks, etc.) — avoid expensive SQL path
             small_talk_resp = self._detect_small_talk(message, user_id=user_id)

@@ -17,6 +17,8 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from services.classifier import Verdict
+from services.flow_machine import FlowMachine
+from services.flows import get_flow
 from services.response_formatter import unsupported_feature_phrase
 from utils.logger import logger
 
@@ -105,3 +107,91 @@ def dispatch_idle(
     # production telemetry trail of "what would v2 have decided" vs
     # "what the legacy code actually did", without behaviour change.
     return SHADOW_ONLY
+
+
+def dispatch_in_flow(
+    verdict: Verdict,
+    *,
+    intent_service,
+    user_id: str,
+    current_flow: str,
+    current_context: Dict[str, Any],
+    conversation_history,
+) -> Optional[Dict[str, Any]]:
+    """
+    Routes a verdict that arrived while the user is in an ACTIVE flow.
+    Reads `verdict['flow_compatible']` and acts accordingly.
+
+    Returns a process_request-shaped dict if v2 handled it, or SHADOW_ONLY
+    (None) to fall back to legacy. We fall back when:
+      - flow_compatible is None or invalid
+      - the flow isn't in our registry yet (session 2 only owns one)
+      - any branch hits an exception
+    """
+    flow = get_flow(current_flow)
+    if flow is None:
+        logger.info(f"[V2_DISPATCH] in_flow={current_flow} not in registry — shadow only")
+        return SHADOW_ONLY
+
+    fc = verdict.get("flow_compatible")
+    raw = verdict["raw_message"]
+
+    try:
+        # CANCEL — user wants out of the flow.
+        if fc == "CANCEL":
+            logger.info(f"[V2_DISPATCH] CANCEL in flow={current_flow}")
+            return flow.on_cancel(intent_service, user_id, raw, current_context)
+
+        # FLOW_RESPONSE — user is answering the bot's pending question.
+        if fc == "FLOW_RESPONSE":
+            logger.info(f"[V2_DISPATCH] FLOW_RESPONSE in flow={current_flow}")
+            return flow.handle_response(intent_service, user_id, raw, current_context)
+
+        # SIDE_QUESTION — answer inline, stay in flow.
+        # Session 2 keeps this simple: only owns side questions that are
+        # READ_QUERY / READ_AGGREGATE / FEATURE_QUESTION. For READ paths we
+        # need an answer — easiest reliable way is to fall back to legacy
+        # for the actual SQL pipeline, then append the resume_nudge.
+        # For FEATURE_QUESTION we can answer here directly.
+        if fc == "SIDE_QUESTION":
+            if verdict["intent"] == "FEATURE_QUESTION":
+                reply = intent_service.gemini.answer_feature_question(
+                    raw, conversation_history=conversation_history
+                ) or unsupported_feature_phrase(raw[:80])
+                reply = reply + flow.resume_nudge(current_context)
+                intent_service._store_conversation(user_id, raw, reply)
+                logger.info(f"[V2_DISPATCH] SIDE_QUESTION (FEATURE) answered, staying in {current_flow}")
+                return {
+                    "operation": "side_q",
+                    "response": reply,
+                    "trigger_invoice": False,
+                    "invoice_data": {},
+                }
+            # READ_QUERY / READ_AGGREGATE side questions — fall back to legacy
+            # query path. The active flow's awaiting_* legacy flag remains set
+            # in parallel, so the next message still routes to the flow handler.
+            # Note: legacy code will append no nudge — accepted as a limitation
+            # for session 2. Session 3 will own SIDE_QUESTION for read paths
+            # too once the typed query plan lands.
+            logger.info(
+                f"[V2_DISPATCH] SIDE_QUESTION (READ) → shadow (legacy answers, "
+                f"flow={current_flow} preserved via legacy awaiting flag)"
+            )
+            return SHADOW_ONLY
+
+        # NEW_FLOW — user is starting a different operation mid-flow.
+        # Session 2 takes the safe path: fall back to legacy. The existing
+        # intent-shift guard will decide whether to clear the legacy awaiting
+        # flag based on the message. Push/pop semantics land in session 3
+        # once more flows are migrated and we can guarantee stack invariants.
+        if fc == "NEW_FLOW":
+            logger.info(f"[V2_DISPATCH] NEW_FLOW in flow={current_flow} — shadow (legacy decides)")
+            return SHADOW_ONLY
+
+        # Missing or unknown flow_compatible — shadow.
+        logger.info(f"[V2_DISPATCH] flow_compatible={fc!r} — shadow")
+        return SHADOW_ONLY
+
+    except Exception as e:
+        logger.warning(f"[V2_DISPATCH] in_flow exception, falling back: {e}")
+        return SHADOW_ONLY
