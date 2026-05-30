@@ -2511,7 +2511,35 @@ class IntentService:
                 return self._start_smart_capture(user_id, first_part_msg)
 
             if user_mem.get("awaiting_job_input"):
-                return self._extract_and_confirm(user_id, message)
+                # Escape hatch: if the user's message clearly looks like a new query
+                # (question word + verb, or a known query/command pattern), don't
+                # treat it as job-form input — clear the sticky state and fall through.
+                _msg_l_jobform = message.strip().lower().rstrip(".!?")
+                _question_starts = (
+                    "who ", "what ", "when ", "where ", "how ", "why ", "which ",
+                    "show ", "list ", "find ", "tell ", "give ", "fetch ", "get me ",
+                    "do you ", "can you ", "are you ", "is there ",
+                    "delete ", "remove ", "update ", "modify ", "change ",
+                    "generate invoice", "send invoice", "mark ",
+                )
+                _looks_like_query = (
+                    any(_msg_l_jobform.startswith(s) for s in _question_starts)
+                    or "?" in message
+                    or self.gemini.is_new_query_not_response(
+                        message,
+                        "free-text job description (brand, date, fees, client, POC) for the smart-capture form"
+                    )
+                )
+                if _looks_like_query:
+                    logger.info(
+                        f"[SMART_CAPTURE] Sticky awaiting_job_input cleared — message "
+                        f"looks like a new query: {message[:80]!r}"
+                    )
+                    self.memory.update_user_memory(user_id, {"awaiting_job_input": False})
+                    user_mem = self.memory.get_user_memory(user_id)
+                    # Fall through to normal pipeline
+                else:
+                    return self._extract_and_confirm(user_id, message)
 
             # Universal intent-shift guard: if the bot is in any single-question awaiting state
             # and the user's message looks like a brand-new query, clear the pending state and
@@ -3626,7 +3654,25 @@ class IntentService:
                     entity="query",
                     pending_clarification="details",
                 )
-                response = plan_result["clarification"]
+                # Generic / off-brand clarifications (e.g. "I'm a spreadsheet assistant…")
+                # are useless to the user — route through the feature-aware AI responder
+                # which has the catalog as a truth source.
+                raw_clar = plan_result["clarification"]
+                _off_brand_markers = (
+                    "spreadsheet assistant", "spreadsheet or database",
+                    "i'm a spreadsheet", "data assistant",
+                    "how can i help you with your data",
+                    "internal identifier", "malformed request",
+                    "cannot fulfill this request",
+                )
+                _is_off_brand = any(m in raw_clar.lower() for m in _off_brand_markers)
+                if _is_off_brand:
+                    on_brand = self.gemini.answer_feature_question(
+                        message, conversation_history=conversation_history
+                    )
+                    response = on_brand or unsupported_feature_phrase(message[:80])
+                else:
+                    response = raw_clar
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
