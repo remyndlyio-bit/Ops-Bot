@@ -99,21 +99,55 @@ session 2.5 / 3 to keep this session's blast radius contained.
 `[FLOW_V2] popped → resumed ...`, `[V2_DISPATCH] in_flow=...`,
 `[CLASSIFIER] ... fc=...` on every message.
 
-## Session 2.5 — next (deferred from session 2)
+## Session 2.5 — landed
 
-**Scope**: Migrate the remaining invoice prep flows + smart capture.
+**Scope shipped**: 5 more flows migrated, bringing v2 to **6 owned flows**
+(was 1 after session 2). All multi-turn user flows now have a Flow class.
 
-1. `INVOICE_NEED_BILLING` — currently `awaiting_client_billing` + several
-   `pending_billing_*` keys.
-2. `INVOICE_NEED_POC_NAME` — currently `awaiting_poc_name` + `pending_poc_*`.
-3. `INVOICE_NEED_POC_EMAIL` — currently `awaiting_poc_email` + `pending_poc_email_*`.
-4. `SMART_CAPTURE_NEED_DESCRIPTION` + `SMART_CAPTURE_CONFIRM_PENDING` — the
-   add-job form. Permanently kills the sticky-state bug class.
+**Touched**:
+- `services/flow_machine.py` — added 5 new flow constants and grew
+  `KNOWN_FLOWS`. New ownership:
+    INVOICE_NEED_BILLING
+    INVOICE_NEED_POC_NAME
+    INVOICE_NEED_POC_EMAIL
+    SMART_CAPTURE_NEED_DESCRIPTION
+    SMART_CAPTURE_CONFIRM_PENDING
+- `services/flows.py` — 5 new Flow classes added to REGISTRY. Same
+  delegation pattern as session 2: `handle_response` and `on_cancel`
+  call the existing `_handle_*_response` / `_extract_and_confirm` /
+  `_handle_form_step` methods, then `flow_machine.reset(user_id)`.
+  SmartCaptureNeedDescription also transitions into
+  SMART_CAPTURE_CONFIRM_PENDING after a successful extract, so the
+  two-step add-job flow stays consistent on both sides.
+- `services/classifier.py` — per-flow guidance blocks for each of the
+  5 new flows in `_flow_compat_block`, telling the AI what counts as
+  FLOW_RESPONSE / CANCEL / SIDE_QUESTION for each.
+- `services/intent_service.py` — new method
+  `_reconcile_legacy_to_flow_machine` runs once per message at the
+  top of `process_request` (when v2 is enabled). If FlowMachine is
+  IDLE but a legacy `awaiting_*` flag is armed, it syncs FlowMachine
+  to match. This avoids touching 10+ legacy arm sites individually.
+  Stale-flow TTL cleanup extended to clear ALL 6 legacy flag groups,
+  not just `awaiting_send_confirmation`.
 
-For each, the pattern from session 2 repeats: add the flow name to
-`KNOWN_FLOWS`, build the Flow class in `flows.py` delegating to existing
-handlers, mirror legacy flag-writes into `FlowMachine.set_state`, no other
-production behaviour changes.
+**Behavioural effect when flag is on** (vs session 2 alone):
+- The "skip" → junk Redmi job bug class is permanently dead for the
+  smart-capture flow. The Flow's `handle_response` is called only when
+  the classifier sees `flow_compatible: FLOW_RESPONSE`; "skip" routes
+  to `on_cancel` which clears `awaiting_job_input` + resets v2.
+- Same for the 3 invoice-detail-collection flows. Each understands
+  what "skip" means in its own context.
+- Side questions during any of the 6 owned flows now get the right
+  resume-nudge — "Still waiting on the {client} contact email…", etc.
+- 30-min idle TTL applies uniformly across all 6 owned flows.
+
+**Tests in repo**:
+- All 6 flows registered in KNOWN_FLOWS.
+- All 6 Flow classes have full surface (handle_response / resume_nudge
+  / on_cancel) and resume_nudge is safe to call standalone.
+- Per-flow classifier guidance appears in built prompts for each.
+- MemoryService round-trip persistence verified for all 6 flow names.
+- set_state still rejects unknown flow names.
 
 ## Session 3 — planned
 

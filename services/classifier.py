@@ -82,6 +82,36 @@ def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Di
             "    Treat 'yes', 'yep', 'sure', 'send it', 'go ahead', 'confirm' as FLOW_RESPONSE.\n"
             "    Treat 'no', 'nope', 'skip', 'cancel', 'don't send', 'not now' as CANCEL.\n"
         ),
+        "INVOICE_NEED_BILLING": (
+            "  - The bot just asked the user to provide CLIENT billing details (billing name,\n"
+            "    address, GST). Any free-text reply describing those details is FLOW_RESPONSE.\n"
+            "  - 'skip', 'cancel', 'no', 'none', 'don't have' = CANCEL.\n"
+            "  - A clearly unrelated question (e.g. 'what was my last fee') is SIDE_QUESTION.\n"
+        ),
+        "INVOICE_NEED_POC_NAME": (
+            "  - The bot just asked for the POC NAME on the invoice. Any short text that looks\n"
+            "    like a person's name is FLOW_RESPONSE.\n"
+            "  - 'skip', 'cancel', 'no', 'none', 'use the brand' = CANCEL.\n"
+        ),
+        "INVOICE_NEED_POC_EMAIL": (
+            "  - The bot just asked for the client's contact EMAIL. Any email-looking string\n"
+            "    (contains '@' and a domain) is FLOW_RESPONSE.\n"
+            "  - 'skip', 'cancel', 'no', 'nevermind', \"don't have\" = CANCEL.\n"
+        ),
+        "SMART_CAPTURE_NEED_DESCRIPTION": (
+            "  - The bot is waiting for a free-text JOB DESCRIPTION (brand, date, fees, client,\n"
+            "    POC name, POC email). Any text that contains job-like fields is FLOW_RESPONSE.\n"
+            "  - 'cancel', 'nevermind', 'drop it', 'never mind' = CANCEL.\n"
+            "  - A clearly unrelated question (starts with who/what/show/list/etc., or contains\n"
+            "    a '?') is SIDE_QUESTION — DO NOT classify those as FLOW_RESPONSE. The bot will\n"
+            "    answer inline and prompt the user again for the job description.\n"
+        ),
+        "SMART_CAPTURE_CONFIRM_PENDING": (
+            "  - The bot just showed an extracted-job confirmation card with 'Save this job?\n"
+            "    (Yes / Edit)'. FLOW_RESPONSE for: 'yes', 'save', 'edit', 'no', or any text\n"
+            "    that supplies missing fields (e.g. 'fee 4500', 'date 12 Mar').\n"
+            "  - 'cancel', 'drop it', 'nevermind' = CANCEL.\n"
+        ),
     }.get(current_flow, "")
     return (
         "\n\nACTIVE FLOW (the bot just asked a question and is waiting):\n"

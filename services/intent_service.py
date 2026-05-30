@@ -292,6 +292,74 @@ class IntentService:
         from services.flow_machine import FlowMachine as _FlowMachine
         self.flow_machine = _FlowMachine(self.memory)
 
+    def _reconcile_legacy_to_flow_machine(self, user_id: str, user_mem: Dict) -> None:
+        """Once per message: if FlowMachine is IDLE but a legacy awaiting_* flag
+        (or a form_state) was armed on the previous turn, sync FlowMachine to
+        match. This lets dispatch_in_flow take over without modifying every
+        legacy arm site. No-op when FlowMachine is already tracking a flow."""
+        from services.flow_machine import (
+            FLOW_IDLE,
+            FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_INVOICE_NEED_BILLING,
+            FLOW_INVOICE_NEED_POC_NAME, FLOW_INVOICE_NEED_POC_EMAIL,
+            FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
+        )
+        # Already tracking — nothing to reconcile.
+        if self.flow_machine.current_flow(user_id) != FLOW_IDLE:
+            return
+
+        # Order matters: form_state (smart-capture confirm) is the "deepest"
+        # state, so it wins if multiple flags happen to be set.
+        if self.memory.get_form_state(user_id):
+            self.flow_machine.set_state(
+                user_id, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
+                {"source": "reconcile_form_state"},
+            )
+            return
+
+        if user_mem.get("awaiting_send_confirmation"):
+            pend = user_mem.get("pending_send_invoice") or {}
+            self.flow_machine.set_state(
+                user_id, FLOW_INVOICE_AWAIT_SEND_CONFIRM,
+                {
+                    "client_name": pend.get("client_name"),
+                    "month":       pend.get("month"),
+                    "year":        pend.get("year"),
+                    "poc_email":   pend.get("poc_email"),
+                },
+            )
+            return
+
+        if user_mem.get("awaiting_client_billing"):
+            self.flow_machine.set_state(
+                user_id, FLOW_INVOICE_NEED_BILLING,
+                {"client_name": user_mem.get("pending_billing_client")},
+            )
+            return
+
+        if user_mem.get("awaiting_poc_name"):
+            self.flow_machine.set_state(
+                user_id, FLOW_INVOICE_NEED_POC_NAME,
+                {"client_name": user_mem.get("pending_poc_client")},
+            )
+            return
+
+        if user_mem.get("awaiting_poc_email"):
+            pend = user_mem.get("pending_send_invoice") or {}
+            self.flow_machine.set_state(
+                user_id, FLOW_INVOICE_NEED_POC_EMAIL,
+                {
+                    "client_name": (user_mem.get("poc_email_client")
+                                    or pend.get("client_name")),
+                },
+            )
+            return
+
+        if user_mem.get("awaiting_job_input"):
+            self.flow_machine.set_state(
+                user_id, FLOW_SMART_CAPTURE_NEED_DESCRIPTION, {},
+            )
+            return
+
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
         """Store user message and bot response in conversation history."""
         self.memory.add_message(user_id, "user", user_message)
@@ -2441,19 +2509,45 @@ class IntentService:
             if _v2_enabled:
                 try:
                     # First: apply TTL — long-idle flow auto-resets so the user
-                    # isn't trapped in a stale state from hours ago.
+                    # isn't trapped in a stale state from hours ago. When the
+                    # FlowMachine resets, also clear ALL legacy awaiting flags
+                    # so they don't re-arm the flow on the next message.
                     if self.flow_machine.expire_if_stale(user_id):
-                        # The legacy awaiting flags don't know about this reset;
-                        # session 2 only owns INVOICE_AWAIT_SEND_CONFIRM, so we
-                        # clear that specific legacy pair if it was the stale flow.
-                        if user_mem.get("awaiting_send_confirmation"):
-                            self.memory.update_user_memory(user_id, {
-                                "awaiting_send_confirmation": False,
-                                "pending_send_invoice": None,
-                            })
-                            user_mem = self.memory.get_user_memory(user_id)
+                        _stale_clear = {
+                            "awaiting_send_confirmation": False,
+                            "pending_send_invoice":       None,
+                            "awaiting_client_billing":    False,
+                            "pending_billing_client":     None,
+                            "pending_billing_user_id":    None,
+                            "pending_invoice":            None,
+                            "awaiting_poc_name":          False,
+                            "pending_poc_client":         None,
+                            "pending_poc_user_id":        None,
+                            "pending_poc_row_ids":        None,
+                            "awaiting_poc_email":         False,
+                            "poc_email_client":           None,
+                            "awaiting_job_input":         False,
+                        }
+                        self.memory.update_user_memory(user_id, _stale_clear)
+                        # Also drop any in-progress smart-capture form.
+                        try:
+                            if self.memory.get_form_state(user_id):
+                                self.memory.cancel_form(user_id)
+                        except Exception:
+                            pass
+                        user_mem = self.memory.get_user_memory(user_id)
                 except Exception as _ttl_err:
                     logger.warning(f"[V2] TTL check failed: {_ttl_err}")
+
+                # Reconciliation: legacy code paths still arm awaiting_* flags
+                # in dozens of places (we haven't migrated each arm site to
+                # write FlowMachine directly). Once per message, if v2 thinks
+                # IDLE but a legacy flag is set, sync FlowMachine to match so
+                # dispatch_in_flow can take over.
+                try:
+                    self._reconcile_legacy_to_flow_machine(user_id, user_mem)
+                except Exception as _rec_err:
+                    logger.warning(f"[V2] reconcile failed: {_rec_err}")
 
                 from services.classifier import classify as _v2_classify
                 from services.flow_dispatcher import dispatch_idle as _v2_dispatch_idle

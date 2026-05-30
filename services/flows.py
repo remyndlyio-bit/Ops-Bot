@@ -18,7 +18,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from services.flow_machine import FLOW_INVOICE_AWAIT_SEND_CONFIRM
+from services.flow_machine import (
+    FLOW_INVOICE_AWAIT_SEND_CONFIRM,
+    FLOW_INVOICE_NEED_BILLING,
+    FLOW_INVOICE_NEED_POC_NAME,
+    FLOW_INVOICE_NEED_POC_EMAIL,
+    FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
+    FLOW_SMART_CAPTURE_CONFIRM_PENDING,
+)
 from utils.logger import logger
 
 
@@ -106,9 +113,216 @@ class InvoiceAwaitSendConfirm(Flow):
         return result
 
 
+# ── INVOICE_NEED_BILLING ──────────────────────────────────────────────
+
+class InvoiceNeedBilling(Flow):
+    """Bot asked for client billing details (name, address, GST) before
+    generating the invoice. User reply is either free-text billing details
+    or a skip token. Delegates to existing _handle_client_billing_response
+    which already accepts 'skip'/'cancel'/'no'/'none' internally."""
+
+    name = FLOW_INVOICE_NEED_BILLING
+
+    def handle_response(self, intent_service, user_id, message, context):
+        logger.info(
+            f"[FLOW_V2] InvoiceNeedBilling.handle_response user={user_id} "
+            f"ctx_client={context.get('client_name')!r}"
+        )
+        result = intent_service._handle_client_billing_response(user_id, message)
+        # _handle_client_billing_response clears the legacy flag. Mirror v2.
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context):
+        client = context.get("client_name", "the client")
+        return f"\n\nStill waiting on billing details for {client} (or 'skip' to skip)."
+
+    def on_cancel(self, intent_service, user_id, message, context):
+        # Delegate to the existing skip path which knows to resume invoice generation.
+        result = intent_service._handle_client_billing_response(user_id, "skip")
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+
+# ── INVOICE_NEED_POC_NAME ─────────────────────────────────────────────
+
+class InvoiceNeedPocName(Flow):
+    """Bot asked for the POC name to address the invoice to. Delegates to
+    _handle_poc_name_response which accepts 'skip'/'cancel'/'no'/'none'."""
+
+    name = FLOW_INVOICE_NEED_POC_NAME
+
+    def handle_response(self, intent_service, user_id, message, context):
+        logger.info(
+            f"[FLOW_V2] InvoiceNeedPocName.handle_response user={user_id} "
+            f"ctx_client={context.get('client_name')!r}"
+        )
+        result = intent_service._handle_poc_name_response(user_id, message)
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context):
+        client = context.get("client_name", "the client")
+        return f"\n\nStill need a POC name for the {client} invoice (or 'skip' to use the brand/client name)."
+
+    def on_cancel(self, intent_service, user_id, message, context):
+        result = intent_service._handle_poc_name_response(user_id, "skip")
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+
+# ── INVOICE_NEED_POC_EMAIL ────────────────────────────────────────────
+
+class InvoiceNeedPocEmail(Flow):
+    """Bot asked for the client's contact email to send the invoice.
+    Delegates to _handle_poc_email_response which validates the email
+    format and supports 'cancel'/'skip'/'no'/'nevermind'."""
+
+    name = FLOW_INVOICE_NEED_POC_EMAIL
+
+    def handle_response(self, intent_service, user_id, message, context):
+        logger.info(
+            f"[FLOW_V2] InvoiceNeedPocEmail.handle_response user={user_id} "
+            f"ctx_client={context.get('client_name')!r}"
+        )
+        result = intent_service._handle_poc_email_response(user_id, message)
+        # NOTE: _handle_poc_email_response may RE-ARM awaiting_poc_email when
+        # the email format is invalid. In that case the legacy flag is still
+        # True, so we keep FlowMachine in this same state too (don't reset).
+        try:
+            user_mem_after = intent_service.memory.get_user_memory(user_id) or {}
+            if not user_mem_after.get("awaiting_poc_email"):
+                intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context):
+        client = context.get("client_name", "the client")
+        return f"\n\nStill need the {client} contact email — send it (e.g. client@x.com) or 'skip'."
+
+    def on_cancel(self, intent_service, user_id, message, context):
+        result = intent_service._handle_poc_email_response(user_id, "cancel")
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+
+# ── SMART_CAPTURE_NEED_DESCRIPTION ────────────────────────────────────
+
+class SmartCaptureNeedDescription(Flow):
+    """The bot asked the user to describe a new job. Reply is free-text job
+    details (brand, date, fees, etc.) which goes through field extraction.
+    Delegates to _extract_and_confirm. This flow has historically been
+    sticky — session 2.5 explicitly clears it on CANCEL so the user can
+    always type a question and escape."""
+
+    name = FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+
+    def handle_response(self, intent_service, user_id, message, context):
+        logger.info(f"[FLOW_V2] SmartCaptureNeedDescription.handle_response user={user_id}")
+        # _extract_and_confirm itself transitions to the confirm form state
+        # (via memory.start_form), so we let it run and DON'T reset v2 — the
+        # next message arrives in SMART_CAPTURE_CONFIRM_PENDING.
+        result = intent_service._extract_and_confirm(user_id, message)
+        # If extraction came back empty, _extract_and_confirm RE-PROMPTS for
+        # job input. Stay in this flow. Otherwise transition to the confirm
+        # state via flow_machine (parallel writer).
+        try:
+            from services.flow_machine import FLOW_SMART_CAPTURE_CONFIRM_PENDING
+            user_mem_after = intent_service.memory.get_user_memory(user_id) or {}
+            if intent_service.memory.get_form_state(user_id):
+                # Form started → confirm pending.
+                intent_service.flow_machine.set_state(
+                    user_id, FLOW_SMART_CAPTURE_CONFIRM_PENDING, {"source": "smart_capture"}
+                )
+            elif not user_mem_after.get("awaiting_job_input"):
+                # No form, no awaiting → done somehow → reset.
+                intent_service.flow_machine.reset(user_id)
+            # else: still awaiting more job input, stay in this flow.
+        except Exception as e:
+            logger.warning(f"[FLOW_V2] post-extract transition failed: {e}")
+        return result
+
+    def resume_nudge(self, context):
+        return "\n\nStill waiting on the job description — send it in one message, or 'cancel' to drop the form."
+
+    def on_cancel(self, intent_service, user_id, message, context):
+        intent_service.memory.update_user_memory(user_id, {"awaiting_job_input": False})
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        ack = "OK, dropped the add-job form. Let me know if you need anything else."
+        intent_service._store_conversation(user_id, message, ack)
+        return {"operation": "smart_capture_cancelled", "response": ack,
+                "trigger_invoice": False, "invoice_data": {}}
+
+
+# ── SMART_CAPTURE_CONFIRM_PENDING ─────────────────────────────────────
+
+class SmartCaptureConfirmPending(Flow):
+    """User has been shown the extracted-job confirmation card with
+    'Save this job? (Yes / Edit)'. Reply is Yes / Edit / extra fields /
+    No. Delegates to _handle_form_step which routes to
+    _handle_smart_capture_confirm. After completion the form_state is
+    cleared and v2 transitions back to IDLE."""
+
+    name = FLOW_SMART_CAPTURE_CONFIRM_PENDING
+
+    def handle_response(self, intent_service, user_id, message, context):
+        logger.info(f"[FLOW_V2] SmartCaptureConfirmPending.handle_response user={user_id}")
+        result = intent_service._handle_form_step(user_id, message)
+        # _handle_form_step may complete the form (form_state cleared) or
+        # stay in confirm (still awaiting). Sync v2 to whichever.
+        try:
+            if not intent_service.memory.get_form_state(user_id):
+                intent_service.flow_machine.reset(user_id)
+            # else: still in confirm, leave v2 state as-is.
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context):
+        return "\n\nStill waiting on the Yes/Edit confirmation for the new job — or 'cancel' to drop it."
+
+    def on_cancel(self, intent_service, user_id, message, context):
+        try:
+            intent_service.memory.cancel_form(user_id)
+        except Exception:
+            pass
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        ack = "OK, dropped the new job. Let me know if you need anything else."
+        intent_service._store_conversation(user_id, message, ack)
+        return {"operation": "smart_capture_cancelled", "response": ack,
+                "trigger_invoice": False, "invoice_data": {}}
+
+
 # Registry — dispatcher uses this to look up the right Flow by name.
 REGISTRY: Dict[str, Flow] = {
-    FLOW_INVOICE_AWAIT_SEND_CONFIRM: InvoiceAwaitSendConfirm(),
+    FLOW_INVOICE_AWAIT_SEND_CONFIRM:     InvoiceAwaitSendConfirm(),
+    FLOW_INVOICE_NEED_BILLING:           InvoiceNeedBilling(),
+    FLOW_INVOICE_NEED_POC_NAME:          InvoiceNeedPocName(),
+    FLOW_INVOICE_NEED_POC_EMAIL:         InvoiceNeedPocEmail(),
+    FLOW_SMART_CAPTURE_NEED_DESCRIPTION: SmartCaptureNeedDescription(),
+    FLOW_SMART_CAPTURE_CONFIRM_PENDING:  SmartCaptureConfirmPending(),
 }
 
 
