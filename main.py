@@ -458,6 +458,24 @@ async def process_and_send_invoice(
                     }
                 intent_service.memory.update_user_memory(user_id, _patch)
                 logger.info(f"[INVOICE] Cached invoice + armed email confirm state for user {user_id}")
+                # Mirror into FlowMachine v2 so dispatch_in_flow can recognise
+                # this state when FLOW_MACHINE_V2 is on. Legacy flag still
+                # drives behaviour today; FlowMachine is a parallel writer.
+                if poc_email:
+                    try:
+                        from services.flow_machine import FLOW_INVOICE_AWAIT_SEND_CONFIRM
+                        intent_service.flow_machine.set_state(
+                            user_id,
+                            FLOW_INVOICE_AWAIT_SEND_CONFIRM,
+                            {
+                                "client_name": cached_client_name,
+                                "month": cached_month_name,
+                                "year": year,
+                                "poc_email": poc_email,
+                            },
+                        )
+                    except Exception as fm_err:
+                        logger.warning(f"[FLOW_V2] mirror set_state failed (non-fatal): {fm_err}")
         except Exception as cache_err:
             logger.warning(f"Failed to cache invoice context: {cache_err}")
 

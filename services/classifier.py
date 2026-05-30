@@ -39,6 +39,17 @@ VALID_INTENTS = {
     "WRITE_DELETE", "WRITE_INVOICE", "FEATURE_QUESTION", "SMALL_TALK", "UNKNOWN",
 }
 
+# How a fresh intent combines with whatever flow the user is currently in.
+# Only meaningful when current_flow != IDLE.
+FlowCompat = Literal[
+    "FLOW_RESPONSE",     # user is answering the pending prompt
+    "SIDE_QUESTION",     # read-only ask; answer inline, stay in flow
+    "NEW_FLOW",          # user wants to start a different operation
+    "CANCEL",            # user wants out ('skip', 'cancel', 'nevermind')
+]
+
+VALID_FLOW_COMPAT = {"FLOW_RESPONSE", "SIDE_QUESTION", "NEW_FLOW", "CANCEL"}
+
 
 class Verdict(TypedDict):
     intent: Intent
@@ -47,6 +58,49 @@ class Verdict(TypedDict):
     raw_message: str
     historical: bool
     bulk: bool
+    # flow_compatible is None when the user was IDLE at classification time.
+    # When set, it tells the dispatcher how to combine the new intent with the
+    # active flow (push/pop, treat as response, cancel, etc.).
+    flow_compatible: Optional[FlowCompat]
+
+
+def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Dict[str, Any]]) -> str:
+    """Return prompt block describing the active flow (if any) and how the
+    classifier should set flow_compatible. Empty string when IDLE."""
+    if not current_flow or current_flow == "IDLE":
+        return ""
+    ctx_str = ""
+    if current_context:
+        try:
+            ctx_str = json.dumps(current_context, default=str)[:300]
+        except Exception:
+            ctx_str = str(current_context)[:300]
+    # Per-flow guidance: what counts as a FLOW_RESPONSE vs CANCEL.
+    per_flow = {
+        "INVOICE_AWAIT_SEND_CONFIRM": (
+            "  - FLOW_RESPONSE: user is answering yes/no to 'should I email this invoice?'.\n"
+            "    Treat 'yes', 'yep', 'sure', 'send it', 'go ahead', 'confirm' as FLOW_RESPONSE.\n"
+            "    Treat 'no', 'nope', 'skip', 'cancel', 'don't send', 'not now' as CANCEL.\n"
+        ),
+    }.get(current_flow, "")
+    return (
+        "\n\nACTIVE FLOW (the bot just asked a question and is waiting):\n"
+        f"  current_flow: {current_flow}\n"
+        f"  context:      {ctx_str}\n"
+        "\n"
+        "MUST set the 'flow_compatible' field to one of:\n"
+        "  FLOW_RESPONSE - user is directly answering the bot's pending question.\n"
+        "  CANCEL        - user wants out (any natural 'skip / cancel / nevermind' phrasing).\n"
+        "  SIDE_QUESTION - user asks an unrelated READ_QUERY / READ_AGGREGATE / FEATURE_QUESTION\n"
+        "                  that does NOT advance the current flow. Bot will answer inline\n"
+        "                  and stay in the flow.\n"
+        "  NEW_FLOW      - user is starting an unrelated WRITE_* operation (e.g. logging a\n"
+        "                  new job, generating a different invoice). Bot may push/swap.\n"
+        "\n"
+        f"{per_flow}"
+        "If unsure: prefer FLOW_RESPONSE over SIDE_QUESTION (the bot just asked a question;\n"
+        "most replies are answers). Prefer SIDE_QUESTION over NEW_FLOW for any READ intent.\n"
+    )
 
 
 def _build_prompt(
@@ -54,6 +108,8 @@ def _build_prompt(
     schema_summary: str,
     features_doc: str,
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    current_flow: Optional[str] = None,
+    current_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     recent = ""
     if conversation_history:
@@ -67,6 +123,14 @@ def _build_prompt(
             recent = "RECENT CHAT:\n" + "\n".join(lines) + "\n\n"
 
     feat_block = f"FEATURE CATALOG (truth source for FEATURE_QUESTION and UNKNOWN):\n{features_doc}\n\n" if features_doc else ""
+
+    flow_block = _flow_compat_block(current_flow, current_context)
+    flow_field_line = (
+        '  "flow_compatible": one of [FLOW_RESPONSE, CANCEL, SIDE_QUESTION, NEW_FLOW]\n'
+        '                     (required when ACTIVE FLOW is set below, null otherwise)\n'
+    ) if flow_block else (
+        '  "flow_compatible": null  (no active flow)\n'
+    )
 
     return (
         "You are Remyndly's intent classifier. The user just sent a WhatsApp/Telegram message.\n"
@@ -82,7 +146,8 @@ def _build_prompt(
         '  "historical":  true ONLY if user asks about a PREVIOUS / OLD value\n'
         '                 ("what was the EARLIER fee on X", "the amount BEFORE we changed it"),\n'
         '  "bulk":        true ONLY if user said "all" / "every" with a write intent\n'
-        '                 ("delete all Nike jobs", "mark all paid")\n'
+        '                 ("delete all Nike jobs", "mark all paid"),\n'
+        f"{flow_field_line}"
         "}\n\n"
         "INTENT DEFINITIONS:\n"
         "- READ_QUERY: user wants to see specific job(s) or fields.\n"
@@ -132,6 +197,7 @@ def _build_prompt(
         f"{feat_block}"
         f"SCHEMA SUMMARY:\n{schema_summary}\n\n"
         f"{recent}"
+        f"{flow_block}"
         f"USER MESSAGE: {message}\n\n"
         "Your JSON Verdict:"
     )
@@ -163,6 +229,12 @@ def _parse_verdict(raw: str, message: str) -> Optional[Verdict]:
     params = data.get("parameters")
     if not isinstance(params, dict):
         params = {}
+    fc_raw = data.get("flow_compatible")
+    if isinstance(fc_raw, str):
+        fc_up = fc_raw.upper().strip()
+        flow_compatible = fc_up if fc_up in VALID_FLOW_COMPAT else None
+    else:
+        flow_compatible = None
     return Verdict(
         intent=intent,       # type: ignore[arg-type]
         parameters=params,
@@ -170,6 +242,7 @@ def _parse_verdict(raw: str, message: str) -> Optional[Verdict]:
         raw_message=message,
         historical=bool(data.get("historical")),
         bulk=bool(data.get("bulk")),
+        flow_compatible=flow_compatible,   # type: ignore[arg-type]
     )
 
 
@@ -178,11 +251,17 @@ def classify(
     gemini,
     conversation_history: Optional[List[Dict[str, str]]] = None,
     schema_summary: str = "",
+    current_flow: Optional[str] = None,
+    current_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[Verdict]:
     """
     Single Gemini call that returns a Verdict.
     Returns None if the call fails or output is unparseable — caller MUST
     fall back to the legacy code path in that case.
+
+    Pass `current_flow` (e.g. "INVOICE_AWAIT_SEND_CONFIRM") + `current_context`
+    when the user is in a v2-owned flow; the classifier will then set
+    `flow_compatible` so the dispatcher can route correctly.
     """
     if not message or not message.strip():
         return None
@@ -201,7 +280,10 @@ def classify(
     except Exception:
         pass
 
-    prompt = _build_prompt(message, schema_summary or "", features_doc, conversation_history)
+    prompt = _build_prompt(
+        message, schema_summary or "", features_doc, conversation_history,
+        current_flow=current_flow, current_context=current_context,
+    )
     try:
         raw = gemini._call_api(
             prompt,
@@ -216,6 +298,7 @@ def classify(
             f"[CLASSIFIER] intent={verdict['intent']} "
             f"conf={verdict['confidence']:.2f} "
             f"hist={verdict['historical']} bulk={verdict['bulk']} "
+            f"fc={verdict.get('flow_compatible')} "
             f"params={json.dumps(verdict['parameters'], default=str)[:160]}"
         )
     return verdict
