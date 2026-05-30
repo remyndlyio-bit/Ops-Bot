@@ -2477,6 +2477,12 @@ class IntentService:
         from services.business_logic_service import BusinessLogicService
         logic = BusinessLogicService()
         conversation_history = self.memory.get_conversation_history(user_id)
+        # Bind user_mem early so the v2 block (which runs before the legacy
+        # cascade re-fetches it) can read it safely. Without this top-of-fn
+        # assignment, the genexpr inside `if _v2_enabled` triggers a
+        # NameError because Python marks user_mem as a function-local but
+        # the first textual assignment is later in the function.
+        user_mem = self.memory.get_user_memory(user_id) or {}
         trigger_invoice = False
         invoice_data = {}
 
