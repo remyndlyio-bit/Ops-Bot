@@ -223,7 +223,15 @@ def _build_prompt(
         "  the app picks an on-brand reply.\n"
         "- Never invent column names; reference only the schema below.\n"
         "- A message can mention 'invoice' or 'bill' without being WRITE_INVOICE\n"
-        '  (e.g. "who got invoices" is READ_QUERY, "total invoices last month" is READ_AGGREGATE).\n\n'
+        '  (e.g. "who got invoices" is READ_QUERY, "total invoices last month" is READ_AGGREGATE).\n'
+        "- FORBIDDEN PARAMETER VALUES — never put any of these in `field`, `column`,\n"
+        "  or `filters` keys/values: 'bill_sent', 'invoice_sent', 'sent', 'is_sent',\n"
+        "  'paid_status' (use 'paid'), 'amount' (use 'fees'). These columns DO NOT EXIST.\n"
+        "  Semantic mappings the planner (next stage) understands — use these instead:\n"
+        "    'invoice sent / billed / invoiced clients' → set parameters.field = 'invoice_date'\n"
+        "      and the planner will filter where invoice_date IS NOT NULL.\n"
+        "    'unpaid / pending' → parameters.field = 'paid' (planner handles NULL/empty logic).\n"
+        "    'how much / amount / earnings' → parameters.field = 'fees'.\n\n"
         f"{feat_block}"
         f"SCHEMA SUMMARY:\n{schema_summary}\n\n"
         f"{recent}"

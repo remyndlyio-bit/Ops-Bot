@@ -484,8 +484,29 @@ def _is_date(val) -> bool:
     return bool(re.match(r"^\d{4}-\d{2}-\d{2}$", str(val).strip()))
 
 
+_DATE_COLUMNS = {
+    "job_date", "invoice_date", "payment_date", "due_date",
+    "first_reminder_sent", "second_reminder_sent", "third_reminder_sent",
+    "created_at", "updated_at", "overdue_audit_sent",
+}
+
+
 def _build_filter_clause(col: str, val, use_ilike: bool = True) -> str:
     """Build a single filter condition."""
+    # NULL handling — the planner sometimes emits {"col": null} or {"col": "IS
+    # NOT NULL"} as a string to express "any value" / "has a value". Treat
+    # both as IS NULL / IS NOT NULL SQL semantics instead of blindly wrapping
+    # them in ILIKE (which Postgres rejects for date columns and produces
+    # nonsense for text columns).
+    if val is None:
+        return f"{col} IS NULL"
+    if isinstance(val, str):
+        _v_up = val.strip().upper()
+        if _v_up in ("IS NULL", "NULL"):
+            return f"{col} IS NULL"
+        if _v_up in ("IS NOT NULL", "NOT NULL", "ANY", "*"):
+            return f"{col} IS NOT NULL"
+
     if isinstance(val, list):
         quoted = ", ".join(_sql_quote(v) for v in val)
         return f"{col} IN ({quoted})"
@@ -519,6 +540,12 @@ def _build_filter_clause(col: str, val, use_ilike: bool = True) -> str:
     if _is_numeric(val):
         return f"{col} = {val}"
     if _is_date(val):
+        return f"{col} = {_sql_quote(val)}"
+    # Date / timestamp columns must NEVER receive ILIKE — Postgres rejects it
+    # with 'operator does not exist: date ~~* unknown'. Fall back to equality
+    # when the value isn't a date literal we recognise (rare; means upstream
+    # gave us a junk value — better a clean no-match than a 500).
+    if col in _DATE_COLUMNS:
         return f"{col} = {_sql_quote(val)}"
     if use_ilike:
         return f"{col} ILIKE {_sql_quote(val)}"
