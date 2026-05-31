@@ -167,8 +167,8 @@ def _build_reminder_text(reminders: list) -> str:
     return "\n".join(lines)
 
 
-def notify_user_telegram(user_id: str, reminders: list, telegram: TelegramService):
-    """Send Telegram message with inline buttons."""
+def notify_user_telegram(user_id: str, reminders: list, telegram: TelegramService) -> bool:
+    """Send Telegram message with inline buttons. Returns True on success."""
     chat_id = int(user_id)
     message_text = _build_reminder_text(reminders)
 
@@ -184,18 +184,27 @@ def notify_user_telegram(user_id: str, reminders: list, telegram: TelegramServic
     buttons.append([{"text": "⏭ Skip All", "callback_data": "remind:skip:all"}])
 
     logger.info(f"[REMINDER_WORKER] Notifying Telegram user {user_id} ({len(reminders)} reminder(s))")
+    # Telegram service raises on failure; if we got here, treat as success.
     telegram.send_message_with_buttons_sync(chat_id, message_text, buttons)
+    return True
 
 
-def notify_user_whatsapp(user_id: str, reminders: list, whatsapp: WhatsAppService):
-    """Send WhatsApp text with numbered list and store pending state for reply handling."""
+def notify_user_whatsapp(user_id: str, reminders: list, whatsapp: WhatsAppService) -> bool:
+    """Send WhatsApp text with numbered list and store pending state for reply handling.
+    Returns True if Twilio accepted the message, False otherwise (e.g. 24h session
+    window closed — see whatsapp_service for the WHATSAPP_WINDOW_CLOSED log)."""
     message_text = _build_reminder_text(reminders)
     message_text += (
         "\nReply with a number (e.g. 1) to send that reminder, "
         "all to send all, or skip to skip all."
     )
 
-    # Store pending reminders so the app can handle the reply
+    # Store pending reminders so the app can handle the reply.
+    # NOTE: we store these BEFORE sending so the reply handler is armed even if
+    # the user reopens the session and replies later. If the send itself fails
+    # the worker will NOT stamp the DB reminder flags, so tomorrow's cron will
+    # retry — by which point the user has typically interacted with the bot
+    # (path C: we expect users to activate the WhatsApp window regularly).
     pending = []
     for row in reminders:
         pending.append({
@@ -209,10 +218,16 @@ def notify_user_whatsapp(user_id: str, reminders: list, whatsapp: WhatsAppServic
         })
     save_pending(user_id, pending)
 
-    # WhatsApp message text uses plain text (no Markdown bold)
     plain_text = message_text.replace("*", "")
     logger.info(f"[REMINDER_WORKER] Notifying WhatsApp user {user_id} ({len(reminders)} reminder(s))")
-    whatsapp.send_text_message(user_id, plain_text)
+    sid = whatsapp.send_text_message(user_id, plain_text)
+    if not sid:
+        logger.warning(
+            f"[REMINDER_WORKER] WhatsApp delivery FAILED for {user_id} — "
+            f"DB reminder flags NOT stamped; tomorrow's cron will retry."
+        )
+        return False
+    return True
 
 
 # ── Overdue audit (>60 day owner-side check) ──────────────────────────────
@@ -278,8 +293,9 @@ def _build_audit_text(audits: list) -> str:
     return "\n".join(lines)
 
 
-def notify_audit_telegram(user_id: str, audits: list, telegram: TelegramService):
-    """Telegram message with per-job 'Mark Paid' / 'Remind Later' buttons."""
+def notify_audit_telegram(user_id: str, audits: list, telegram: TelegramService) -> bool:
+    """Telegram message with per-job 'Mark Paid' / 'Remind Later' buttons.
+    Returns True on success."""
     chat_id = int(user_id)
     message_text = _build_audit_text(audits)
 
@@ -297,10 +313,12 @@ def notify_audit_telegram(user_id: str, audits: list, telegram: TelegramService)
 
     logger.info(f"[AUDIT_WORKER] Notifying Telegram user {user_id} ({len(audits)} audit row(s))")
     telegram.send_message_with_buttons_sync(chat_id, message_text, buttons)
+    return True
 
 
-def notify_audit_whatsapp(user_id: str, audits: list, whatsapp: WhatsAppService):
-    """WhatsApp text + pending state. User replies e.g. 'paid 1' or 'all paid'."""
+def notify_audit_whatsapp(user_id: str, audits: list, whatsapp: WhatsAppService) -> bool:
+    """WhatsApp text + pending state. User replies e.g. 'paid 1' or 'all paid'.
+    Returns True if Twilio accepted the message, False otherwise (24h window)."""
     message_text = _build_audit_text(audits)
     message_text += (
         "\n\nReply:\n"
@@ -320,7 +338,14 @@ def notify_audit_whatsapp(user_id: str, audits: list, whatsapp: WhatsAppService)
     # Reuse the same pending_reminders store; reply handler will branch on _audit_row.
     save_pending(user_id, pending)
     logger.info(f"[AUDIT_WORKER] Notifying WhatsApp user {user_id} ({len(audits)} audit row(s))")
-    whatsapp.send_text_message(user_id, message_text)
+    sid = whatsapp.send_text_message(user_id, message_text)
+    if not sid:
+        logger.warning(
+            f"[AUDIT_WORKER] WhatsApp delivery FAILED for {user_id} — "
+            f"overdue_audit_sent NOT stamped; will retry on next cron."
+        )
+        return False
+    return True
 
 
 def mark_audits_pinged(db: SupabaseService, audits: list):
@@ -388,12 +413,18 @@ def run():
         for user_id, reminders in grouped.items():
             try:
                 if _is_telegram_user(user_id):
-                    notify_user_telegram(user_id, reminders, telegram)
+                    delivered = notify_user_telegram(user_id, reminders, telegram)
                 else:
-                    notify_user_whatsapp(user_id, reminders, whatsapp)
-                mark_reminders_sent(db, reminders)
-                total_sent += len(reminders)
-                logger.info(f"[REMINDER_WORKER] Sent {len(reminders)} reminder(s) for user {user_id}")
+                    delivered = notify_user_whatsapp(user_id, reminders, whatsapp)
+                if delivered:
+                    # Only stamp the DB flags when Twilio/Telegram actually
+                    # accepted the message — otherwise we'd silently mark the
+                    # reminder as sent and never retry on subsequent days.
+                    mark_reminders_sent(db, reminders)
+                    total_sent += len(reminders)
+                    logger.info(f"[REMINDER_WORKER] Sent {len(reminders)} reminder(s) for user {user_id}")
+                else:
+                    total_failed += len(reminders)
             except Exception as e:
                 total_failed += len(reminders)
                 logger.error(f"[REMINDER_WORKER] Failed to notify user {user_id}: {e}")
@@ -414,12 +445,18 @@ def run():
         for user_id, user_audits in audit_grouped.items():
             try:
                 if _is_telegram_user(user_id):
-                    notify_audit_telegram(user_id, user_audits, telegram)
+                    delivered = notify_audit_telegram(user_id, user_audits, telegram)
                 else:
-                    notify_audit_whatsapp(user_id, user_audits, whatsapp)
-                mark_audits_pinged(db, user_audits)
-                audit_sent += len(user_audits)
-                logger.info(f"[AUDIT_WORKER] Sent audit ping for {len(user_audits)} job(s) to user {user_id}")
+                    delivered = notify_audit_whatsapp(user_id, user_audits, whatsapp)
+                if delivered:
+                    # Same safety as Phase 1: only stamp overdue_audit_sent if
+                    # the message actually went out. Otherwise tomorrow's cron
+                    # will retry instead of silently skipping for 7 days.
+                    mark_audits_pinged(db, user_audits)
+                    audit_sent += len(user_audits)
+                    logger.info(f"[AUDIT_WORKER] Sent audit ping for {len(user_audits)} job(s) to user {user_id}")
+                else:
+                    audit_failed += len(user_audits)
             except Exception as e:
                 audit_failed += len(user_audits)
                 logger.error(f"[AUDIT_WORKER] Failed audit ping for user {user_id}: {e}")

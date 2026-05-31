@@ -1,8 +1,14 @@
 from twilio.rest import Client
+from twilio.base.exceptions import TwilioRestException
 import os
 import requests
 from requests.auth import HTTPBasicAuth
 from utils.logger import logger
+
+# Twilio error codes that mean "outside the 24h customer-service session
+# window — free-form not permitted; only pre-approved templates allowed".
+# Surfaced separately from generic errors so cron telemetry is clean.
+_OUT_OF_WINDOW_CODES = {63016, 63018}
 
 class WhatsAppService:
     def __init__(self):
@@ -37,6 +43,22 @@ class WhatsAppService:
             )
             logger.info(f"[WHATSAPP] Message sent successfully. SID: {message.sid}")
             return message.sid
+        except TwilioRestException as te:
+            if getattr(te, "code", None) in _OUT_OF_WINDOW_CODES:
+                # 24h customer-service window closed — only templates allowed
+                # outside it. Use a distinct log tag so cron/worker logs are
+                # easy to filter and we can measure how often this hits.
+                logger.warning(
+                    f"[WHATSAPP_WINDOW_CLOSED] To={to_number} code={te.code} "
+                    f"msg={te.msg!r} — free-form blocked; user needs to message "
+                    f"the bot first to reopen the 24h session."
+                )
+            else:
+                logger.error(
+                    f"Failed to send WhatsApp message To={to_number} "
+                    f"twilio_code={getattr(te, 'code', None)}: {te.msg if hasattr(te, 'msg') else te}"
+                )
+            return None
         except Exception as e:
             logger.error(f"Failed to send WhatsApp message: {e}")
             return None
@@ -79,6 +101,18 @@ class WhatsAppService:
             )
             logger.info(f"[WHATSAPP] Media message sent successfully. SID: {message.sid}")
             return message.sid
+        except TwilioRestException as te:
+            if getattr(te, "code", None) in _OUT_OF_WINDOW_CODES:
+                logger.warning(
+                    f"[WHATSAPP_WINDOW_CLOSED] media To={to_number} code={te.code} "
+                    f"msg={te.msg!r} — free-form blocked."
+                )
+            else:
+                logger.error(
+                    f"Failed to send PDF message To={to_number} "
+                    f"twilio_code={getattr(te, 'code', None)}: {te.msg if hasattr(te, 'msg') else te}"
+                )
+            return None
         except Exception as e:
             logger.error(f"Failed to send PDF message: {e}")
             return None
