@@ -151,7 +151,7 @@ def _is_telegram_user(user_id: str) -> bool:
 
 
 def _build_reminder_text(reminders: list) -> str:
-    """Build the numbered reminder list text (shared by both platforms)."""
+    """Build the numbered reminder list text (used by Telegram — single message)."""
     lines = ["⚠️ Payment Reminders Due Today\n"]
     for idx, row in enumerate(reminders, start=1):
         level = row["_reminder_level"]
@@ -166,6 +166,56 @@ def _build_reminder_text(reminders: list) -> str:
             f"   Reminder: {label}\n"
         )
     return "\n".join(lines)
+
+
+# Twilio WhatsApp free-form body limit is 1600 chars. We split below this with
+# a safety margin so headers, footers, and "Part N of M" suffixes always fit.
+_WHATSAPP_BODY_LIMIT = 1500
+
+
+def _chunk_for_whatsapp(header: str, items: list, footer: str = "") -> list:
+    """Group item strings into chunks so each (header + items + footer) message
+    stays under _WHATSAPP_BODY_LIMIT chars. When >1 chunk is needed, the header
+    gets a 'Part N of M' suffix so the user knows there's more coming."""
+    if not items:
+        return []
+    overhead = len(header) + len(footer) + 24  # newlines + suffix room
+    chunks = [[]]
+    cur_len = overhead
+    for it in items:
+        # Worst-case extra length if this item gets appended (incl. newline).
+        extra = len(it) + 2
+        if chunks[-1] and cur_len + extra > _WHATSAPP_BODY_LIMIT:
+            chunks.append([])
+            cur_len = overhead
+        chunks[-1].append(it)
+        cur_len += extra
+    total = len(chunks)
+    out = []
+    for i, ch in enumerate(chunks, 1):
+        if not ch:
+            continue
+        suffix = f"  (Part {i} of {total})" if total > 1 else ""
+        body = header + suffix + "\n\n" + "\n\n".join(ch)
+        if footer:
+            body += "\n\n" + footer
+        out.append(body)
+    return out
+
+
+def _send_whatsapp_chunks(whatsapp: WhatsAppService, user_id: str, chunks: list, log_tag: str) -> bool:
+    """Send each chunk in order. Returns True only if ALL chunks were accepted
+    by Twilio. On the first failure (e.g. window-closed 63016), stops and
+    returns False so the worker won't stamp DB flags."""
+    for i, body in enumerate(chunks, 1):
+        sid = whatsapp.send_text_message(user_id, body)
+        if not sid:
+            logger.warning(
+                f"{log_tag} chunk {i}/{len(chunks)} FAILED for {user_id} — "
+                f"halting remaining chunks; DB flags will NOT be stamped."
+            )
+            return False
+    return True
 
 
 def notify_user_telegram(user_id: str, reminders: list, telegram: TelegramService) -> bool:
@@ -191,21 +241,31 @@ def notify_user_telegram(user_id: str, reminders: list, telegram: TelegramServic
 
 
 def notify_user_whatsapp(user_id: str, reminders: list, whatsapp: WhatsAppService) -> bool:
-    """Send WhatsApp text with numbered list and store pending state for reply handling.
-    Returns True if Twilio accepted the message, False otherwise (e.g. 24h session
-    window closed — see whatsapp_service for the WHATSAPP_WINDOW_CLOSED log)."""
-    message_text = _build_reminder_text(reminders)
-    message_text += (
-        "\nReply with a number (e.g. 1) to send that reminder, "
+    """Send WhatsApp reminders (chunked under Twilio's 1600-char free-form limit)
+    + arm pending state. Returns True only if ALL chunks delivered."""
+    header = "⚠️ Payment Reminders Due Today"
+    items = []
+    for idx, row in enumerate(reminders, start=1):
+        level = row["_reminder_level"]
+        label = REMINDER_LABELS.get(level, level.title())
+        client = row.get("client_name") or "Unknown"
+        bill = row.get("bill_no") or "N/A"
+        amount = _format_amount(row.get("fees"))
+        items.append(
+            f"{idx}. Client: {client}\n"
+            f"   Invoice: {bill}\n"
+            f"   Amount: {amount}\n"
+            f"   Reminder: {label}"
+        )
+    footer = (
+        "Reply with a number (e.g. 1) to send that reminder, "
         "all to send all, or skip to skip all."
     )
+    chunks = _chunk_for_whatsapp(header, items, footer)
 
-    # Store pending reminders so the app can handle the reply.
-    # NOTE: we store these BEFORE sending so the reply handler is armed even if
-    # the user reopens the session and replies later. If the send itself fails
-    # the worker will NOT stamp the DB reminder flags, so tomorrow's cron will
-    # retry — by which point the user has typically interacted with the bot
-    # (path C: we expect users to activate the WhatsApp window regularly).
+    # Arm reply state BEFORE sending so the user can reply even if a later
+    # chunk fails (they got at least chunk 1, and the pending list is
+    # comprehensive). DB reminder flags are only stamped on full success.
     pending = []
     for row in reminders:
         pending.append({
@@ -219,16 +279,11 @@ def notify_user_whatsapp(user_id: str, reminders: list, whatsapp: WhatsAppServic
         })
     save_pending(user_id, pending)
 
-    plain_text = message_text.replace("*", "")
-    logger.info(f"[REMINDER_WORKER] Notifying WhatsApp user {user_id} ({len(reminders)} reminder(s))")
-    sid = whatsapp.send_text_message(user_id, plain_text)
-    if not sid:
-        logger.warning(
-            f"[REMINDER_WORKER] WhatsApp delivery FAILED for {user_id} — "
-            f"DB reminder flags NOT stamped; tomorrow's cron will retry."
-        )
-        return False
-    return True
+    logger.info(
+        f"[REMINDER_WORKER] Notifying WhatsApp user {user_id} "
+        f"({len(reminders)} reminder(s) in {len(chunks)} chunk(s))"
+    )
+    return _send_whatsapp_chunks(whatsapp, user_id, chunks, "[REMINDER_WORKER]")
 
 
 # ── Overdue audit (>60 day owner-side check) ──────────────────────────────
@@ -318,15 +373,31 @@ def notify_audit_telegram(user_id: str, audits: list, telegram: TelegramService)
 
 
 def notify_audit_whatsapp(user_id: str, audits: list, whatsapp: WhatsAppService) -> bool:
-    """WhatsApp text + pending state. User replies e.g. 'paid 1' or 'all paid'.
-    Returns True if Twilio accepted the message, False otherwise (24h window)."""
-    message_text = _build_audit_text(audits)
-    message_text += (
-        "\n\nReply:\n"
+    """WhatsApp audit text (chunked) + pending state. User replies e.g.
+    'paid 1' / 'all paid' / 'later'. Returns True only if ALL chunks delivered."""
+    header = (
+        "📌 Overdue Invoice Check\n\n"
+        f"These invoices are {OVERDUE_AUDIT_THRESHOLD_DAYS}+ days old and still "
+        "marked unpaid. Any of them actually paid?"
+    )
+    items = []
+    for idx, row in enumerate(audits, start=1):
+        client = row.get("client_name") or "Unknown"
+        bill = row.get("bill_no") or "N/A"
+        amount = _format_amount(row.get("fees"))
+        days_old = _days_since(row.get("invoice_date"))
+        items.append(
+            f"{idx}. {client} — {bill}\n"
+            f"   {amount} — invoiced {days_old} days ago"
+        )
+    footer = (
+        "Reply:\n"
         "• paid <number>  — mark one as paid (e.g. 'paid 1')\n"
         "• all paid       — mark all of these as paid\n"
         "• later          — remind me next week"
     )
+    chunks = _chunk_for_whatsapp(header, items, footer)
+
     pending = []
     for row in audits:
         pending.append({
@@ -336,17 +407,13 @@ def notify_audit_whatsapp(user_id: str, audits: list, whatsapp: WhatsAppService)
             "fees": row.get("fees"),
             "_audit_row": True,
         })
-    # Reuse the same pending_reminders store; reply handler will branch on _audit_row.
     save_pending(user_id, pending)
-    logger.info(f"[AUDIT_WORKER] Notifying WhatsApp user {user_id} ({len(audits)} audit row(s))")
-    sid = whatsapp.send_text_message(user_id, message_text)
-    if not sid:
-        logger.warning(
-            f"[AUDIT_WORKER] WhatsApp delivery FAILED for {user_id} — "
-            f"overdue_audit_sent NOT stamped; will retry on next cron."
-        )
-        return False
-    return True
+
+    logger.info(
+        f"[AUDIT_WORKER] Notifying WhatsApp user {user_id} "
+        f"({len(audits)} audit row(s) in {len(chunks)} chunk(s))"
+    )
+    return _send_whatsapp_chunks(whatsapp, user_id, chunks, "[AUDIT_WORKER]")
 
 
 def mark_audits_pinged(db: SupabaseService, audits: list):
