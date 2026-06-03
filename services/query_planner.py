@@ -258,10 +258,17 @@ def _build_planner_prompt(
         "- 'job', 'work', 'project', 'gig' → the job description column.\n"
         "- 'contact', 'email' → the contact/email column.\n"
         "- 'paid', 'payment' status → the payment status column.\n"
-        "- 'sent invoice', 'invoiced', 'invoice sent', 'billed', 'bill sent', "
-        "'who got invoices', 'invoices delivered' → filter where invoice_date "
-        "IS NOT NULL (an invoice was generated/emailed). There is NO 'bill_sent' "
-        "or 'invoice_sent' boolean column — use invoice_date IS NOT NULL.\n"
+        "- 'invoiced', 'has invoice', 'invoice generated', 'invoice created', 'billed' (without 'sent'), "
+        "'invoice exists' → filter where invoice_date IS NOT NULL "
+        "(an invoice PDF was generated — it may or may not have been emailed yet).\n"
+        "- 'sent invoice', 'invoice sent', 'invoice emailed', 'emailed', 'delivered', "
+        "'bill sent', 'who got invoices', 'who has the invoice', 'invoices delivered' → "
+        "filter where bill_sent IS NOT NULL AND LOWER(bill_sent) IN "
+        "('yes','true','t','1','sent'). The bill_sent text column tracks actual email "
+        "delivery — set on confirmed send. It is DIFFERENT from invoice_date "
+        "(which only means the PDF exists). Always require poc_email to be set too: "
+        "AND poc_email IS NOT NULL AND TRIM(poc_email) <> '' (a row with no contact "
+        "email could never have been emailed).\n"
         "- 'unpaid', 'not paid', 'pending payment' → paid IS NULL OR LOWER(paid) "
         "IN ('no','false','unpaid','0','').\n"
         "- NEVER invent column names not in the schema. If you cannot map a concept "
@@ -536,6 +543,24 @@ def _build_filter_clause(col: str, val, use_ilike: bool = True) -> str:
             return f"(paid IS NULL OR TRIM(COALESCE(paid, '')) = '' OR LOWER(paid) NOT IN ('true', 't', 'yes', '1', 'paid'))"
         else:
             return f"LOWER(COALESCE(paid, '')) IN ('true', 't', 'yes', '1', 'paid')"
+
+    # Special case: bill_sent column (text type; set to 'Yes' / 'true' on
+    # actual email delivery). A row was sent ONLY if bill_sent is truthy AND
+    # poc_email exists — otherwise the planner is asking a logically
+    # impossible question (we can't have emailed a client we have no email for).
+    if col == "bill_sent":
+        val_str = str(val).lower().strip() if val is not None else "yes"
+        if val_str in ("false", "no", "n", "0", "not sent", "pending", "is null", "null"):
+            # "not sent" — anything that isn't a truthy bill_sent value
+            return (
+                "(bill_sent IS NULL OR TRIM(COALESCE(bill_sent, '')) = '' "
+                "OR LOWER(bill_sent) NOT IN ('true', 't', 'yes', '1', 'sent'))"
+            )
+        # "sent" — truthy bill_sent AND a real contact email (proxy for emailability)
+        return (
+            "LOWER(COALESCE(bill_sent, '')) IN ('true', 't', 'yes', '1', 'sent') "
+            "AND poc_email IS NOT NULL AND TRIM(poc_email) <> ''"
+        )
 
     if _is_numeric(val):
         return f"{col} = {val}"
