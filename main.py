@@ -122,6 +122,22 @@ def _notify_user(platform: str, chat_id, user_id_str: str, msg: str):
         logger.warning(f"Failed to notify {platform} user: {e}")
 
 
+def _build_static_url(file_path: str) -> str:
+    """Build a full publicly-fetchable URL for a file under output/ that Twilio
+    can reach. BASE_URL may be set without a scheme (e.g.
+    'web-production-02c14.up.railway.app') — Twilio rejects schemeless URLs
+    with error 21620 'Invalid media URL(s)', so we normalize here. Single
+    helper used by every send_media_message call so the bug can't recur
+    by drift."""
+    base_url = os.getenv("BASE_URL", "").strip()
+    if base_url and not base_url.startswith("http"):
+        base_url = f"https://{base_url}"
+    if not base_url:
+        base_url = "http://localhost:8080"
+    filename = os.path.basename(file_path)
+    return f"{base_url}/static/{filename}"
+
+
 def _get_user_email(user_id: str | None) -> str:
     """Fetch the user's own invoice email from preferences for CCing on outbound mail."""
     if not user_id:
@@ -394,13 +410,7 @@ async def process_and_send_invoice(
 
         # 4. Send PDF + single combined confirmation — platform-specific transport
         if platform == "whatsapp" and to_number:
-            base_url = os.getenv("BASE_URL", "").strip()
-            if base_url and not base_url.startswith("http"):
-                base_url = f"https://{base_url}"
-            if not base_url:
-                base_url = "http://localhost:8080"
-            filename = os.path.basename(pdf_path)
-            media_url = f"{base_url}/static/{filename}"
+            media_url = _build_static_url(pdf_path)
             whatsapp_service.send_media_message(to_number=to_number, body="", media_url=media_url)
             whatsapp_service.send_text_message(to_number, confirmation_text)
 
@@ -552,9 +562,7 @@ async def _handle_bot_message(
         if platform == "telegram" and chat_id:
             await telegram_service.send_document(chat_id, excel_path, caption="")
         elif platform == "whatsapp":
-            base_url = os.getenv("BASE_URL", "").strip()
-            filename = os.path.basename(excel_path)
-            media_url = f"{base_url}/static/{filename}"
+            media_url = _build_static_url(excel_path)
             whatsapp_service.send_media_message(to_number=user_id, body="", media_url=media_url)
 
     # 6. Handle invoice generation — SAME for both platforms
