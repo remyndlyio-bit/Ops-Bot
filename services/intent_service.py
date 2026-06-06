@@ -1706,17 +1706,18 @@ class IntentService:
                 cc=self._get_user_invoice_email(user_id),
             )
             if ok:
-                # Mark rows as actually-emailed: bill_sent='Yes' AND invoice_date=today.
-                # The two are distinct concepts: invoice_date = "PDF exists", bill_sent
-                # = "delivered to client by email". The planner uses bill_sent to answer
-                # questions like 'who have you sent invoices to', so we MUST set it here.
+                # Mark rows as actually-emailed:
+                #   invoice_date  = "PDF exists" (CURRENT_DATE = today)
+                #   bill_sent     = 'Yes' (text flag)
+                #   bill_sent_at  = NOW() (precise timestamp — answers
+                #                  "when was the invoice sent?")
                 if row_ids:
                     ids_str = ",".join(f"'{rid}'" for rid in row_ids)
                     self.supabase.execute_sql(
                         f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE, "
-                        f"bill_sent = 'Yes' WHERE id IN ({ids_str})"
+                        f"bill_sent = 'Yes', bill_sent_at = NOW() WHERE id IN ({ids_str})"
                     )
-                    logger.info(f"[INVOICE] Marked bill_sent + invoice_date for {len(row_ids)} row(s)")
+                    logger.info(f"[INVOICE] Marked bill_sent + bill_sent_at + invoice_date for {len(row_ids)} row(s)")
                 response = f"Invoice has been sent to {poc_email}. ✅"
             else:
                 response = "I couldn't send the invoice email. Please check the email configuration and try again."
@@ -1796,15 +1797,15 @@ class IntentService:
             if email_sent:
                 response = f"Saved! Email {email} has been added for {client_name} and the invoice has been sent. ✅"
                 # Mark rows as actually-emailed (see _handle_send_confirmation for
-                # why we set bill_sent alongside invoice_date).
+                # why we set bill_sent + bill_sent_at alongside invoice_date).
                 if row_ids:
                     try:
                         ids_str = ",".join(f"'{rid}'" for rid in row_ids)
                         self.supabase.execute_sql(
                             f"UPDATE public.job_entries SET invoice_date = CURRENT_DATE, "
-                            f"bill_sent = 'Yes' WHERE id IN ({ids_str})"
+                            f"bill_sent = 'Yes', bill_sent_at = NOW() WHERE id IN ({ids_str})"
                         )
-                        logger.info(f"[INVOICE] Marked bill_sent + invoice_date for {len(row_ids)} row(s) after POC email save")
+                        logger.info(f"[INVOICE] Marked bill_sent + bill_sent_at + invoice_date for {len(row_ids)} row(s) after POC email save")
                     except Exception as e:
                         logger.warning(f"[INVOICE] Failed to update invoice_date after POC save: {e}")
             else:

@@ -202,9 +202,16 @@ def _build_prompt(
         "- WRITE_DELETE: soft-delete one or more jobs.\n"
         '    examples: "delete my last job", "delete all Nike jobs", "remove this entry"\n'
         "    parameters: {client_name?, scope: 'last'|'this'|'all'|'specific'}\n\n"
-        "- WRITE_INVOICE: generate/send a PDF invoice.\n"
+        "- WRITE_INVOICE: generate/send a PDF invoice — OR ask the bot to re-deliver\n"
+        "  a previously-generated invoice (the cached PDF is reused automatically).\n"
         '    examples: "generate invoice for Bisleri", "send invoice for Nike for March",\n'
-        '              "regenerate invoice for X" (set parameters.force_regenerate=true)\n'
+        '              "share me the invoice for Schbang", "give me the invoice you sent",\n'
+        '              "send me the latest invoice for X", "show me the X invoice again",\n'
+        '              "the invoice file for Nike", "what was the last invoice you sent"\n'
+        "              (the bot has a cached invoice store; any 'give me / share / send me\n"
+        "               the invoice for X' triggers the same flow and re-delivers from\n"
+        "               cache — no regeneration unless force_regenerate=true).\n"
+        '              "regenerate invoice for X" / "fresh copy" → force_regenerate=true\n'
         "    parameters: {client_name?, month?, year?, force_regenerate?}\n\n"
         "- FEATURE_QUESTION: user asks what Remyndly can do, how to do X,\n"
         "  or whether a feature is supported.\n"
@@ -234,6 +241,10 @@ def _build_prompt(
         "      parameters.field = 'bill_sent'. The bill_sent column EXISTS (text type) and\n"
         "      tracks actual email delivery. DO NOT use 'invoice_date' for sent queries —\n"
         "      a generated PDF that was never emailed has invoice_date set but bill_sent NULL.\n"
+        "    'when was the invoice sent / sent date / when did you email it' →\n"
+        "      parameters.field = 'bill_sent_at'. This is a timestamptz column populated\n"
+        "      automatically when the bot successfully emails an invoice. NULL means we\n"
+        "      never sent it.\n"
         "    'unpaid / pending' → parameters.field = 'paid' (planner handles NULL/empty logic).\n"
         "    'how much / amount / earnings' → parameters.field = 'fees'.\n\n"
         f"{feat_block}"

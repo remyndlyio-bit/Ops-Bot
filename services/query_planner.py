@@ -269,6 +269,11 @@ def _build_planner_prompt(
         "(which only means the PDF exists). Always require poc_email to be set too: "
         "AND poc_email IS NOT NULL AND TRIM(poc_email) <> '' (a row with no contact "
         "email could never have been emailed).\n"
+        "- 'when was the invoice sent', 'sent date', 'date invoice went out', "
+        "'when did you email it', 'send timestamp' → use bill_sent_at (timestamptz). "
+        "This is the precise time we emailed the invoice. NULL means we never sent it. "
+        "Combine with the 'sent' predicate when filtering, but use bill_sent_at as the "
+        "field/column when the user wants the time.\n"
         "- 'unpaid', 'not paid', 'pending payment' → paid IS NULL OR LOWER(paid) "
         "IN ('no','false','unpaid','0','').\n"
         "- NEVER invent column names not in the schema. If you cannot map a concept "
@@ -494,7 +499,7 @@ def _is_date(val) -> bool:
 _DATE_COLUMNS = {
     "job_date", "invoice_date", "payment_date", "due_date",
     "first_reminder_sent", "second_reminder_sent", "third_reminder_sent",
-    "created_at", "updated_at", "overdue_audit_sent",
+    "created_at", "updated_at", "overdue_audit_sent", "bill_sent_at",
 }
 
 
