@@ -871,6 +871,39 @@ class SupabaseService:
 
     # --- User Profiles (onboarding) ---
 
+    def is_user_allowed(self, user_id: str) -> bool:
+        """Beta-gate check. Returns True when the user_id appears in
+        public.allowed_users. The seed migration auto-included every
+        already-onboarded profile so existing users never get locked out.
+
+        Fail-OPEN on DB errors — better to let a real user through than
+        lock everyone out from an outage. The dedicated gate is BETA_GATE_ENABLED;
+        flip that off to disable the gate entirely.
+        """
+        if not user_id:
+            return False
+        if not self.db_url:
+            return True  # no DB → no allowlist can be checked → fail open
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+        except ImportError:
+            return True
+        try:
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT 1 FROM public.allowed_users WHERE user_id = %s LIMIT 1",
+                    (str(user_id),),
+                )
+                row = cur.fetchone()
+            conn.close()
+            return bool(row)
+        except Exception as e:
+            logger.warning(f"[BETA_GATE] allowlist check failed (fail-open): {e}")
+            return True
+
     def get_user_profile(self, user_id: str) -> Dict[str, Any]:
         """
         Fetch user profile for a given user_id.
