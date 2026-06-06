@@ -2487,10 +2487,11 @@ class IntentService:
             if not _has_onboarded and not self.supabase.is_user_allowed(user_id):
                 logger.info(f"[BETA_GATE] blocked first-touch from {user_id}")
                 response = (
-                    "Hey 👋 — Remyndly is in private beta right now. "
-                    "Ping the team to get added to the access list and you'll be in "
-                    "within minutes. Drop your number with akshaj.kasliwal2@gmail.com "
-                    "and we'll hook you up."
+                    "Hey 👋 — Remyndly is in private beta right now.\n\n"
+                    "To get added to the access list, reach out:\n"
+                    "• Email: admin@remyndly.io\n"
+                    "• WhatsApp: +91 70386 75067 or +91 99303 30887\n\n"
+                    "Share your mobile number with us and you'll be in within minutes."
                 )
                 return {
                     "operation": "beta_gate_blocked",
