@@ -1265,6 +1265,24 @@ class IntentService:
                 return self._show_smart_capture_confirmation(user_id, extracted)
 
         if msg in ("yes", "y", "save", "confirm", "done", "ok", "okay", "sure"):
+            # Block save when poc_email is missing — it's mandatory because every
+            # invoice send needs a deliverable address. Loop back with a clear
+            # email-only re-prompt so the user knows what to type next.
+            if not extracted.get("poc_email"):
+                response = (
+                    "Almost there — I need the POC email before saving "
+                    "(e.g. 'rohan@thegoodtake.com'). It's required so we can "
+                    "email the invoice later. Reply with just the email."
+                )
+                form["values"] = extracted
+                self.memory.start_form(user_id, [], form_override=form)
+                self._store_conversation(user_id, message, response)
+                return {
+                    "operation": "smart_capture_email_required",
+                    "response": response,
+                    "trigger_invoice": False,
+                    "invoice_data": {},
+                }
             # Save to database
             return self._save_smart_capture_job(user_id, extracted)
 
@@ -1323,7 +1341,8 @@ class IntentService:
         if invalid_email_attempt:
             response = (
                 f"'{invalid_email_attempt}' doesn't look like a valid email. "
-                f"Please send a valid email (e.g. name@company.com) or skip it for now."
+                f"Please send a valid email (e.g. name@company.com). "
+                f"It's required so we can email the invoice later."
             )
             form["values"] = extracted
             self.memory.start_form(user_id, [], form_override=form)
@@ -1333,7 +1352,13 @@ class IntentService:
         # Check if still missing required fields
         still_missing = [f for f in missing if not extracted.get(f)]
         if still_missing:
-            field_labels = {"brand_name": "Brand", "job_date": "Date", "job_description_details": "Job details"}
+            field_labels = {
+                "brand_name": "Brand",
+                "job_date": "Date",
+                "job_description_details": "Job details",
+                "poc_name": "POC name",
+                "poc_email": "POC email (required for invoicing)",
+            }
             missing_str = ", ".join(field_labels.get(f, f) for f in still_missing)
             response = f"I still need: {missing_str}. Please provide them."
             # Update form with new values
@@ -1422,16 +1447,36 @@ class IntentService:
                     val = f"₹{val:,}" if isinstance(val, (int, float)) else val
                 lines.append(f"{label}: {val}")
 
-        # Hint if POC info missing — user can include them on confirm reply
-        _missing_poc = []
-        if not extracted.get("poc_name"):
-            _missing_poc.append("POC name")
-        if not extracted.get("poc_email"):
-            _missing_poc.append("POC email")
-        if _missing_poc:
-            lines.append(f"\n(Missing: {', '.join(_missing_poc)} — reply with the details to add, or 'Yes' to save without.)")
+        # Tailored prompt based on what's still missing.
+        # poc_email is REQUIRED — no "save without" option. poc_name is optional
+        # at this card (the bot will fall back to brand/client name on invoice
+        # if the user explicitly skips it later).
+        _missing_email = not extracted.get("poc_email")
+        _missing_name  = not extracted.get("poc_name")
 
-        lines.append("\nSave this job? (Yes / Edit)")
+        if _missing_email and _missing_name:
+            lines.append(
+                "\nStill need:\n"
+                "• POC name (e.g. 'Rohan Mehta')\n"
+                "• POC email (e.g. 'rohan@thegoodtake.com') — required for invoicing.\n"
+                "Reply with both in one message."
+            )
+            lines.append("\n(Saving needs the email — 'Yes' will be rejected until it's filled.)")
+        elif _missing_email:
+            lines.append(
+                "\nOne more thing — I need the POC email "
+                "(e.g. 'rohan@thegoodtake.com'). It's required so we can email "
+                "the invoice later."
+            )
+            lines.append("\n(Reply with the email — 'Yes' will be rejected until it's filled.)")
+        elif _missing_name:
+            lines.append(
+                "\n(Missing: POC name — reply with the name, "
+                "or 'Yes' to save and we'll use the brand/client name on the invoice.)"
+            )
+            lines.append("\nSave this job? (Yes / Edit)")
+        else:
+            lines.append("\nSave this job? (Yes / Edit)")
         response = "\n".join(lines)
 
         # Store in form state for confirmation
@@ -1526,9 +1571,10 @@ class IntentService:
             self._store_conversation(user_id, content, response)
             return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Check required fields — POC name is now mandatory so invoices are always
-        # addressed to a person, not a brand.
-        required = ["brand_name", "job_date", "job_description_details", "poc_name"]
+        # Check required fields — POC name AND POC email are mandatory.
+        # Email is required because every invoice send needs a deliverable address;
+        # without it the invoice flow stalls asking for one later. Catch it up-front.
+        required = ["brand_name", "job_date", "job_description_details", "poc_name", "poc_email"]
         missing = [f for f in required if not extracted.get(f)]
 
         if missing:
@@ -1537,6 +1583,7 @@ class IntentService:
                 "job_date": "Date",
                 "job_description_details": "Job details",
                 "poc_name": "POC name",
+                "poc_email": "POC email",
             }
             missing_str = ", ".join(field_labels.get(f, f) for f in missing)
 
