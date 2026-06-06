@@ -2468,6 +2468,37 @@ class IntentService:
         Main handler: keyword-based branches for reminder/invoice/overdue;
         then LLM query plan → validate → resolve time → execute → format.
         """
+        # ── Beta gate (BETA_GATE_ENABLED=true) ────────────────────────────
+        # Block first-touch from non-allowlisted users so we can pilot with
+        # specific test numbers. Existing users (those who already have a
+        # profile with onboarded_at set) are always exempt — they were
+        # auto-seeded into allowed_users when the gate shipped. Brand-new
+        # users get a friendly "private beta" reply and NO profile gets
+        # created until you add them via SQL/admin path.
+        _beta_gate_on = (os.getenv("BETA_GATE_ENABLED", "").strip().lower()
+                        in ("1", "true", "yes", "on"))
+        if _beta_gate_on:
+            try:
+                _exists = self.supabase.get_user_profile(user_id) or {}
+                _has_onboarded = bool((_exists.get("data") or {}).get("onboarded_at"))
+            except Exception:
+                _has_onboarded = False
+            # Brand-new (no profile) OR mid-onboarding profile → check allowlist.
+            if not _has_onboarded and not self.supabase.is_user_allowed(user_id):
+                logger.info(f"[BETA_GATE] blocked first-touch from {user_id}")
+                response = (
+                    "Hey 👋 — Remyndly is in private beta right now. "
+                    "Ping the team to get added to the access list and you'll be in "
+                    "within minutes. Drop your number with akshaj.kasliwal2@gmail.com "
+                    "and we'll hook you up."
+                )
+                return {
+                    "operation": "beta_gate_blocked",
+                    "response": response,
+                    "trigger_invoice": False,
+                    "invoice_data": {},
+                }
+
         # Check if user is new and needs onboarding
         profile = self.supabase.get_user_profile(user_id)
         if not profile.get("ok"):
