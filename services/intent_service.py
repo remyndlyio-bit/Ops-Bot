@@ -172,6 +172,52 @@ def _generate_jobs_excel(rows: list, user_id: str) -> str:
     filename = f"jobs_{safe_uid}_{int(time.time())}.xlsx"
     path = os.path.join("output", filename)
     wb.save(path)
+
+    # Sister CSV file at the same path with .csv extension. WhatsApp's
+    # WhatsApp Business API rejects xlsx deliveries somewhat unpredictably
+    # (Twilio 63019 = Meta-side internal failure on xlsx) — CSV is plain
+    # text, universally accepted, and opens in Excel / Sheets / Numbers.
+    # main.py picks per-platform: WhatsApp → .csv, Telegram → .xlsx.
+    try:
+        import csv as _csv
+        csv_path = path[:-5] + ".csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = _csv.writer(f)
+            w.writerow(["Remyndly — Jobs Export"])
+            w.writerow([h for _, h in COLS])
+            for row in rows:
+                line = []
+                for field, _ in COLS:
+                    if field == "_poc":
+                        poc_name  = (row.get("poc_name")  or "").strip()
+                        poc_email = (row.get("poc_email") or "").strip()
+                        if poc_name and poc_email:
+                            line.append(f"{poc_name} ({poc_email})")
+                        else:
+                            line.append(poc_name or poc_email or "")
+                    elif field == "fees":
+                        raw = row.get("fees")
+                        try:
+                            line.append(int(float(raw)) if raw is not None else "")
+                        except (ValueError, TypeError):
+                            line.append(raw or "")
+                    elif field == "invoice_date":
+                        raw = row.get("invoice_date")
+                        if raw:
+                            try:
+                                from datetime import datetime as _dt
+                                line.append(_dt.strptime(str(raw)[:10], "%Y-%m-%d").strftime("%-d %b %Y"))
+                            except Exception:
+                                line.append(str(raw)[:10])
+                        else:
+                            line.append("")
+                    else:
+                        v = row.get(field)
+                        line.append(str(v).strip() if v is not None else "")
+                w.writerow(line)
+        logger.info(f"[EXCEL] Wrote sister CSV: {csv_path}")
+    except Exception as _csv_err:
+        logger.warning(f"[EXCEL] CSV sister write failed (xlsx still usable): {_csv_err}")
     return path
 
 

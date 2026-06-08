@@ -136,6 +136,41 @@ class TestClientListFilter:
 
 
 # ── Matrix row 132 + 80: SQL builder hardening (Excel typo handling) ───
+class TestExcelExport:
+    """Regression: WhatsApp couldn't deliver xlsx (Twilio 63019).
+    Generator now writes both .xlsx and .csv at the same base path so
+    the WhatsApp send path can pick CSV (universally supported)."""
+
+    def test_csv_is_written_alongside_xlsx(self, tmp_path, monkeypatch):
+        import shutil
+        # Redirect output/ to a temp dir for isolation
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "output").mkdir(exist_ok=True)
+
+        from services.intent_service import _generate_jobs_excel
+        rows = [
+            {"client_name": "Nike", "brand_name": "Nike India",
+             "poc_name": "Rohan", "poc_email": "r@n.com",
+             "fees": 25000, "invoice_date": "2026-04-15", "bill_no": "NIK-001"},
+            {"client_name": "Garnier", "brand_name": "Garnier",
+             "poc_name": "", "poc_email": "",
+             "fees": 15000, "invoice_date": "", "bill_no": ""},
+        ]
+        xlsx_path = _generate_jobs_excel(rows, "+919876543210")
+        assert xlsx_path.endswith(".xlsx")
+        csv_path = xlsx_path[:-5] + ".csv"
+        # Sister CSV must exist next to the xlsx
+        assert os.path.exists(csv_path), f"sister CSV missing: {csv_path}"
+        with open(csv_path, encoding="utf-8") as f:
+            content = f.read()
+        # CSV must contain a banner row, header row, and our data
+        assert "Remyndly" in content
+        assert "Nike" in content
+        assert "Garnier" in content
+        # Fee should be numeric
+        assert "25000" in content
+
+
 class TestNonStandardInputs:
     """Verifies the SQL builder doesn't trip on edge values that have
     historically caused 500s in production."""

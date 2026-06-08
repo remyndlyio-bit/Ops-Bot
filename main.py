@@ -18,7 +18,19 @@ load_dotenv()
 
 app = FastAPI(title="Ops Bot - WhatsApp & Telegram") # Updated FastAPI title
 
-# Mount static files to serve generated PDFs
+# Register MIME types BEFORE mounting StaticFiles. Some container base
+# images don't have these in /etc/mime.types, so Starlette would otherwise
+# serve them as application/octet-stream — which Twilio (and downstream
+# WhatsApp / Meta) sometimes rejects for media messages.
+import mimetypes
+mimetypes.add_type(
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsx",
+)
+mimetypes.add_type("text/csv", ".csv")
+mimetypes.add_type("application/pdf", ".pdf")
+
+# Mount static files to serve generated PDFs / Excel / CSV
 os.makedirs("output", exist_ok=True)
 app.mount("/static", StaticFiles(directory="output"), name="static")
 
@@ -562,7 +574,16 @@ async def _handle_bot_message(
         if platform == "telegram" and chat_id:
             await telegram_service.send_document(chat_id, excel_path, caption="")
         elif platform == "whatsapp":
-            media_url = _build_static_url(excel_path)
+            # WhatsApp Business API rejects xlsx deliveries with Twilio code
+            # 63019 (Meta-side internal failure on this media type) somewhat
+            # unpredictably. CSV is plain text — universally accepted and
+            # opens in Excel / Sheets / Numbers. The generator writes both
+            # files at the same path with .xlsx / .csv extensions; we just
+            # swap the extension for WhatsApp.
+            csv_path = excel_path[:-5] + ".csv" if excel_path.endswith(".xlsx") else excel_path
+            send_path = csv_path if os.path.exists(csv_path) else excel_path
+            media_url = _build_static_url(send_path)
+            logger.info(f"[WHATSAPP] Sending Excel export as {os.path.basename(send_path)}")
             whatsapp_service.send_media_message(to_number=user_id, body="", media_url=media_url)
 
     # 6. Handle invoice generation — SAME for both platforms
