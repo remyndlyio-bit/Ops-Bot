@@ -197,6 +197,12 @@ class TestExcelExport:
             Telegram → .xlsx
             WhatsApp → .pdf  (Twilio rejects xlsx with 63019, csv with 63005;
                               pdf is the only reliably-accepted document type)
+
+        Test inputs include LONG row values + Unicode characters that have
+        broken PDF generation in production:
+          - Long POC field (forces truncation; ASCII '...' not Unicode '…')
+          - ₹ glyph (must normalise to 'Rs ')
+          - em-dash, smart quotes (must normalise to ASCII)
         """
         monkeypatch.chdir(tmp_path)
         (tmp_path / "output").mkdir(exist_ok=True)
@@ -209,6 +215,14 @@ class TestExcelExport:
             {"client_name": "Garnier", "brand_name": "Garnier",
              "poc_name": "", "poc_email": "",
              "fees": 15000, "invoice_date": "", "bill_no": ""},
+            # Long values + Unicode — this row would have caught the prod bug
+            # (Helvetica rejecting U+2026 horizontal ellipsis on truncation).
+            {"client_name": "Star Studios Production House Private Limited",
+             "brand_name": "Some Very Long Brand Name LLP",
+             "poc_name": "Dr. Rohan Mehta — Senior Producer",
+             "poc_email": "rohan.mehta+invoices@starstudios-production.in",
+             "fees": 250000, "invoice_date": "2026-05-20",
+             "bill_no": "STAR-001"},
         ]
         xlsx_path = _generate_jobs_excel(rows, "+919876543210")
         assert xlsx_path.endswith(".xlsx")

@@ -282,14 +282,25 @@ def _generate_jobs_excel(rows: list, user_id: str) -> str:
                 else:
                     raw = row.get(field)
                     v = str(raw).strip() if raw is not None else ""
-                # fpdf2 has trouble with some Unicode — replace ₹ and other glyphs
-                v = v.replace("₹", "Rs ").replace("—", "-").replace("'", "'").replace("'", "'")
+                # fpdf2 with the built-in Helvetica font only supports
+                # Latin-1. Any non-Latin glyph raises — so we normalise all
+                # the common offenders to ASCII equivalents.
+                v = (
+                    v.replace("₹", "Rs ")
+                     .replace("—", "-").replace("–", "-")  # em + en dash
+                     .replace("'", "'").replace("'", "'")  # smart single quotes
+                     .replace(""", '"').replace(""", '"')  # smart double quotes
+                     .replace("…", "...")                  # horizontal ellipsis (THIS bit us)
+                )
                 cells.append(v)
             for i, v in enumerate(cells):
-                # Truncate to fit; the table is for at-a-glance, not exhaustive
+                # Truncate to fit; the table is for at-a-glance, not exhaustive.
+                # MUST use ASCII '...' not '…' — Helvetica rejects U+2026
+                # and the whole PDF generation fails (we already lost a
+                # production day to that one).
                 max_chars = max(8, int(col_widths[i] / 1.8))
                 if len(v) > max_chars:
-                    v = v[:max_chars - 1] + "…"
+                    v = v[:max_chars - 3] + "..."
                 pdf.cell(col_widths[i], 6, v, border=1, align="L", fill=use_fill)
             pdf.ln(6)
         pdf.output(pdf_path)
