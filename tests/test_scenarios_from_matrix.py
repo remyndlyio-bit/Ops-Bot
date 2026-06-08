@@ -36,29 +36,33 @@ from services.invoice_generation_service import InvoiceGenerationService
 class TestFeeParsing:
     """Free-form fee strings produced by smart capture."""
 
-    # _parse_fees only handles numeric strings; the k/L/hazaar forms get
-    # canonicalized by Gemini at extraction time (not the local parser).
-    # Tracking these as xfail keeps them visible without blocking CI; when
-    # we move fee parsing locally, remove the marks.
     @pytest.mark.parametrize("raw, expected", [
+        # Plain numeric
         ("25000", 25000),
         ("25,000", 25000),
         ("₹25,000", 25000),
         ("Rs 25,000", 25000),
-        pytest.param("25k", 25000,
-                     marks=pytest.mark.xfail(reason="fee shorthand parsed by Gemini, not _parse_fees")),
-        pytest.param("25K", 25000,
-                     marks=pytest.mark.xfail(reason="fee shorthand parsed by Gemini, not _parse_fees")),
-        pytest.param("1.5L", 150000,
-                     marks=pytest.mark.xfail(reason="fee shorthand parsed by Gemini, not _parse_fees")),
-        pytest.param("1.5 lakh", 150000,
-                     marks=pytest.mark.xfail(reason="fee shorthand parsed by Gemini, not _parse_fees")),
-        pytest.param("2 lakh", 200000,
-                     marks=pytest.mark.xfail(reason="fee shorthand parsed by Gemini, not _parse_fees")),
-        pytest.param("25 hazaar", 25000,
-                     marks=pytest.mark.xfail(reason="fee shorthand parsed by Gemini, not _parse_fees")),
-        pytest.param("25 hazar", 25000,
-                     marks=pytest.mark.xfail(reason="fee shorthand parsed by Gemini, not _parse_fees")),
+        ("Rs.25000", 25000),
+        ("INR 50000", 50000),
+        # k notation (matrix row 16)
+        ("25k", 25000),
+        ("25K", 25000),
+        ("2.5k", 2500),
+        # Lakh notation (matrix row 17)
+        ("1.5L", 150000),
+        ("1.5 lakh", 150000),
+        ("2 lakh", 200000),
+        ("2 lakhs", 200000),
+        ("1.5 lac", 150000),
+        # Hindi / Hinglish hazaar (matrix row 19)
+        ("25 hazaar", 25000),
+        ("25 hazar", 25000),
+        ("25 hajaar", 25000),
+        ("25 hajar", 25000),
+        ("25 thousand", 25000),
+        # Crore for completeness
+        ("1cr", 10000000),
+        ("1.5 crore", 15000000),
     ])
     def test_parses_known_fee_forms(self, raw, expected):
         svc = InvoiceGenerationService()

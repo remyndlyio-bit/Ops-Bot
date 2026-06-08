@@ -362,9 +362,89 @@ class InvoiceGenerationService:
             logger.error("Failed to generate invoice PDF", exc_info=True)
             return None
 
+    # Multiplier table for fee shorthand parsing.
+    # English: k = thousand, L / lakh / lac = 100,000, cr / crore = 10,000,000.
+    # Hindi / Hinglish: hazaar / hazar / hajaar / hajar = thousand.
+    # Match order matters — longer suffixes first so "lakh" beats "l".
+    _FEE_SUFFIX_MULTIPLIERS = (
+        ("crore",   10_000_000),
+        ("cr",      10_000_000),
+        ("lakhs",   100_000),
+        ("lakh",    100_000),
+        ("lacs",    100_000),
+        ("lac",     100_000),
+        ("hazaar",  1_000),
+        ("hajaar",  1_000),
+        ("hazar",   1_000),
+        ("hajar",   1_000),
+        ("thousand",1_000),
+        # Single letters last — they should only match standalone.
+        ("l",       100_000),
+        ("k",       1_000),
+    )
+
     def _parse_fees(self, fees_str: str) -> float:
-        try:
-            clean = str(fees_str).replace("₹", "").replace("Rs", "").replace(",", "").strip()
-            return float(clean) if clean else 0.0
-        except ValueError:
+        """Parse a fee string into a numeric value.
+
+        Handles:
+          plain numbers:    "25000", "25,000", "25000.50"
+          currency prefix:  "₹25,000", "Rs 25,000", "Rs.25000"
+          k notation:       "25k", "25K", "2.5k"
+          lakh notation:    "1.5L", "1.5 lakh", "2 lakhs", "1.5 lac"
+          hazaar notation:  "25 hazaar", "25 hazar", "25 hajaar"
+          crore notation:   "1cr", "1.5 crore"
+
+        Returns 0.0 on any failure — callers downstream handle the
+        zero case gracefully (the row still saves, the fee just reads
+        as ₹0 until the user fixes it).
+
+        Tested by tests/test_scenarios_from_matrix.py::TestFeeParsing.
+        Adding a new shorthand = add a row to _FEE_SUFFIX_MULTIPLIERS +
+        add a test case. CI rejects regressions.
+        """
+        import re
+
+        if fees_str is None:
             return 0.0
+        if isinstance(fees_str, (int, float)):
+            return float(fees_str)
+
+        # Strip currency markers / commas / whitespace, lower-case for matching.
+        clean = (
+            str(fees_str)
+            .replace("₹", "")
+            .replace("Rs.", "")
+            .replace("Rs", "")
+            .replace("INR", "")
+            .replace(",", "")
+            .strip()
+            .lower()
+        )
+        if not clean:
+            return 0.0
+
+        # Fast path: pure numeric (with optional decimals).
+        try:
+            return float(clean)
+        except ValueError:
+            pass
+
+        # Shorthand path: <number> [optional space] <suffix>
+        # Try each suffix longest-first so 'lakh' beats 'l', 'hazaar' beats 'k'.
+        for suffix, multiplier in self._FEE_SUFFIX_MULTIPLIERS:
+            # \b around the suffix avoids matching "lakshmi" (contains 'l').
+            # For multi-letter suffixes, the \b handles word boundaries; for
+            # single-letter suffixes we require the suffix is at end-of-string.
+            if len(suffix) == 1:
+                pattern = rf"^\s*([\d]+(?:\.\d+)?)\s*{re.escape(suffix)}\s*$"
+            else:
+                pattern = rf"^\s*([\d]+(?:\.\d+)?)\s*{re.escape(suffix)}\s*$"
+            m = re.match(pattern, clean)
+            if m:
+                try:
+                    return float(m.group(1)) * multiplier
+                except ValueError:
+                    return 0.0
+
+        # Truly unparseable — return 0 and let the row save anyway.
+        return 0.0
