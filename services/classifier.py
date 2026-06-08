@@ -182,7 +182,12 @@ def _build_prompt(
         "INTENT DEFINITIONS:\n"
         "- READ_QUERY: user wants to see specific job(s) or fields.\n"
         '    examples: "show my last 5 jobs", "what was the last fee on Garnier",\n'
-        '              "who got invoices so far", "jobs older than 30 days"\n'
+        '              "who got invoices so far", "jobs older than 30 days",\n'
+        '              "list my clients", "i don\'t remember client names" → no filters,\n'
+        '                                                                   just return\n'
+        '                                                                   distinct clients\n'
+        '              "kiska invoice baki hai bhejna" / "pending invoices" / "yet to send"\n'
+        '                  → parameters.field=\'bill_sent\' (pending = not yet sent)\n'
         "    parameters: {client_name?, brand_name?, month?, year?, field?, time_range?}\n\n"
         "- READ_AGGREGATE: user wants count/sum/avg/min/max.\n"
         '    examples: "total billing this quarter", "how many jobs this month",\n'
