@@ -274,6 +274,17 @@ def _build_planner_prompt(
         "This is the precise time we emailed the invoice. NULL means we never sent it. "
         "Combine with the 'sent' predicate when filtering, but use bill_sent_at as the "
         "field/column when the user wants the time.\n"
+        "- 'pending invoice / invoice baki hai / kiska invoice baki / yet to send / "
+        "left to send / not yet sent / invoice bhejna baki / pending to bill / "
+        "haven't sent the invoice' → use a SINGLE filter "
+        "{\"bill_sent\": \"no\"}  (NOT a list, NOT poc_email). The SQL builder "
+        "knows this means 'bill_sent IS NULL OR not truthy' — which is exactly "
+        "the rows where we still need to email the invoice. DO NOT add "
+        "poc_email: null as a filter — that excludes the rows we want.\n"
+        "- HINGLISH vocabulary (commercial): 'baki' = remaining/pending, "
+        "'bhejna' = to send, 'kiska' = whose, 'kitna' = how much, "
+        "'kaunsa' = which, 'nahi bheja' = not sent, 'bhej diya' = sent, "
+        "'paisa aaya' = payment received, 'bakaya' = outstanding/unpaid.\n"
         "- 'unpaid', 'not paid', 'pending payment' → paid IS NULL OR LOWER(paid) "
         "IN ('no','false','unpaid','0','').\n"
         "- NEVER invent column names not in the schema. If you cannot map a concept "
@@ -520,6 +531,29 @@ def _build_filter_clause(col: str, val, use_ilike: bool = True) -> str:
             return f"{col} IS NOT NULL"
 
     if isinstance(val, list):
+        # Special case: bill_sent (and paid) with a falsy-marker list. The
+        # planner sometimes emits e.g. ["no", "false", "0", ""] to express
+        # 'not yet sent' / 'unpaid'. A literal IN would EXCLUDE the NULL rows
+        # — which are the ones we actually want — so route through the same
+        # "negative" predicate the single-value branch uses below.
+        _falsy_markers = {"no", "false", "0", "", "n", "not", "not sent",
+                          "pending", "unpaid", "outstanding", "is null", "null"}
+        _truthy_markers = {"yes", "true", "1", "t", "sent", "y", "paid"}
+        if col == "bill_sent" and any(str(v).lower().strip() in _falsy_markers for v in val):
+            return (
+                "(bill_sent IS NULL OR TRIM(COALESCE(bill_sent, '')) = '' "
+                "OR LOWER(bill_sent) NOT IN ('true', 't', 'yes', '1', 'sent'))"
+            )
+        if col == "bill_sent" and all(str(v).lower().strip() in _truthy_markers for v in val):
+            return (
+                "LOWER(COALESCE(bill_sent, '')) IN ('true', 't', 'yes', '1', 'sent') "
+                "AND poc_email IS NOT NULL AND TRIM(poc_email) <> ''"
+            )
+        if col == "paid" and any(str(v).lower().strip() in _falsy_markers for v in val):
+            return (
+                "(paid IS NULL OR TRIM(COALESCE(paid, '')) = '' "
+                "OR LOWER(paid) NOT IN ('true', 't', 'yes', '1', 'paid'))"
+            )
         quoted = ", ".join(_sql_quote(v) for v in val)
         return f"{col} IN ({quoted})"
 

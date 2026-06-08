@@ -4311,8 +4311,10 @@ class IntentService:
                             _cols = self._get_user_columns(data_user_id) if hasattr(self, "_get_user_columns") else []
                         except Exception:
                             _cols = []
-                        _suggest = self.gemini.suggest_for_empty_result(message, recent_columns=_cols)
-                        response = _suggest or "Nothing matched that exact filter. Try broadening your query — for example, drop a date range or check the client spelling."
+                        _suggest = self.gemini.suggest_for_empty_result(
+                            message, recent_columns=_cols, applied_sql=sanitized_sql or "",
+                        )
+                        response = _suggest or "Nothing matched that exact filter. Try a related query — for example, ask 'list my clients' or 'show unpaid jobs'."
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
                 self._update_sql_context(user_id, rows)

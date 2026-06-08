@@ -879,10 +879,13 @@ Output:"""
             logger.error(f"[GEMINI] is_invoice_action_request failed: {e}")
             return False
 
-    def suggest_for_empty_result(self, user_message: str, recent_columns: List[str] = None) -> str:
+    def suggest_for_empty_result(self, user_message: str, recent_columns: List[str] = None,
+                                  applied_sql: str = "") -> str:
         """
         Returns a short helpful suggestion when a query returned 0 rows.
         Should briefly say nothing matched and offer 1–2 concrete alternative queries.
+        Passes the actual SQL so the AI can see if the planner over-filtered
+        (a common cause of 0 rows when the user demonstrably has data).
         """
         self._ensure_initialized()
         if not self._initialized or not self.api_key:
@@ -890,18 +893,31 @@ Output:"""
         cols_hint = ""
         if recent_columns:
             cols_hint = f"\nAvailable filterable fields: {', '.join(recent_columns[:15])}"
+        sql_hint = ""
+        if applied_sql:
+            # Trim long SQL; the WHERE clause is what matters.
+            _trim = applied_sql.strip().replace("\n", " ")[:600]
+            sql_hint = (
+                f"\nThe planner generated this SQL (it may be over-restrictive):\n"
+                f"  {_trim}\n"
+                "If the WHERE has filters that seem too narrow for the user's question, "
+                "suggest dropping the restrictive one(s) or trying a related broader query."
+            )
         prompt = (
             "The user asked a question against their job/invoice database but the query returned no rows.\n"
-            "Write a short, professional reply (max 3 sentences, plain text, no markdown):\n"
-            "1. Tell them nothing matched their specific filter.\n"
-            "2. Suggest 1 or 2 concrete looser queries they could try (e.g. broaden a date range, drop a filter, check spelling of a client name).\n"
+            "Write a short, helpful reply (max 3 sentences, plain text, no markdown):\n"
+            "1. Acknowledge nothing matched. Be specific — name the kind of filter that was applied.\n"
+            "2. Suggest 1 or 2 concrete looser queries they could try. Prefer suggestions that are\n"
+            "   semantically close to what they asked (e.g. if they asked about 'pending invoices'\n"
+            "   and got 0, suggest 'show me unpaid jobs' or 'list jobs without invoice_date').\n"
+            "3. Never say 'broaden your date range' if no date range was applied — that confuses users.\n"
             "Use '•' for bullets if needed. Be confident and helpful, not apologetic.\n"
-            f"{cols_hint}\n\n"
+            f"{cols_hint}{sql_hint}\n\n"
             f"USER ASKED: {user_message}\n\n"
             "Your reply:"
         )
         try:
-            out = self._call_api(prompt, generation_config={"maxOutputTokens": 120, "temperature": 0.3})
+            out = self._call_api(prompt, generation_config={"maxOutputTokens": 160, "temperature": 0.3})
             return (out or "").strip()
         except Exception as e:
             logger.error(f"[GEMINI] suggest_for_empty_result failed: {e}")
