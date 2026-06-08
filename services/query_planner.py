@@ -515,7 +515,31 @@ _DATE_COLUMNS = {
 
 
 def _build_filter_clause(col: str, val, use_ilike: bool = True) -> str:
-    """Build a single filter condition."""
+    """Build a single filter condition.
+
+    Resolution order (each level falls through to the next if it returns None):
+      1. Column registry (services/columns/) — per-column handler. Owns all
+         special-cased columns (bill_sent, paid, poc_email, dates). Adding
+         a new column = add a module under services/columns/.
+      2. Generic handlers: NULL-string semantics, list IN-clauses, dict
+         operators, numeric/date literals, ILIKE fallback.
+
+    Tested by tests/test_planner_boundary.py — every past production bug
+    has a regression test there. If you add a new shape, add a test too.
+    """
+    # ── 1. Column registry takes precedence ───────────────────────────
+    try:
+        from services.columns import get as _col_get
+        spec = _col_get(col)
+        if spec is not None:
+            handler_sql = spec.filter_handler(val)
+            if handler_sql is not None:
+                return handler_sql
+            # else: handler explicitly fell through; continue to generic builder
+    except Exception:
+        # If the registry import fails at runtime (e.g. partial install),
+        # fall through to the legacy generic builder rather than crash.
+        pass
     # NULL handling — the planner sometimes emits {"col": null} or {"col": "IS
     # NOT NULL"} as a string to express "any value" / "has a value". Treat
     # both as IS NULL / IS NOT NULL SQL semantics instead of blindly wrapping

@@ -4637,7 +4637,11 @@ class IntentService:
         if result_rows:
             self._update_sql_context(user_id, result_rows)
             payload = build_clean_payload(result_rows, "select")
-            response = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
+            # _handle_disambiguation_reply has no conversation_history parameter
+            # (the caller is the form-step dispatcher, not process_request).
+            # Re-fetch from memory so the synth call has context for the reply.
+            _hist = self.memory.get_conversation_history(user_id)
+            response = self.gemini.synthesize_response(payload, message, conversation_history=_hist)
             if not response or not response.strip():
                 response = "Done! The selected record has been updated."
         else:

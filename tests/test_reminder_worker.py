@@ -303,11 +303,12 @@ class TestRun:
             "first_reminder_sent": None, "second_reminder_sent": None, "third_reminder_sent": None,
         }
         mock_db = MagicMock()
-        # First call = scan query, subsequent calls = mark sent
-        mock_db.execute_sql.side_effect = [
-            {"ok": True, "rows": [row]},
-            {"ok": True},  # mark_reminders_sent
-        ]
+        # Phase 1 scan, Phase 1 mark, Phase 2 audit scan (empty so no-op).
+        mock_db.execute_sql.side_effect = iter([
+            {"ok": True, "rows": [row]},   # Phase 1 scan
+            {"ok": True},                  # mark_reminders_sent
+            {"ok": True, "rows": []},      # Phase 2 audit scan (empty)
+        ])
         mock_tg = MagicMock()
         mock_wa = MagicMock()
         with patch("workers.reminder_worker.SupabaseService", return_value=mock_db), \
@@ -326,12 +327,15 @@ class TestRun:
             "first_reminder_sent": None, "second_reminder_sent": None, "third_reminder_sent": None,
         }
         mock_db = MagicMock()
-        mock_db.execute_sql.side_effect = [
-            {"ok": True, "rows": [row]},
-            {"ok": True},
-        ]
-        mock_tg = MagicMock()
+        # Phase 1 scan, Phase 1 mark, Phase 2 audit scan (empty so no-op).
+        mock_db.execute_sql.side_effect = iter([
+            {"ok": True, "rows": [row]},  # Phase 1 scan
+            {"ok": True},                 # mark_reminders_sent
+            {"ok": True, "rows": []},     # Phase 2 audit scan (empty)
+        ])
         mock_wa = MagicMock()
+        mock_wa.send_text_message.return_value = "test-sid"  # so chunked send returns True
+        mock_tg = MagicMock()
         with patch("workers.reminder_worker.SupabaseService", return_value=mock_db), \
              patch("workers.reminder_worker.TelegramService", return_value=mock_tg), \
              patch("workers.reminder_worker.WhatsAppService", return_value=mock_wa), \
