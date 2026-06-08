@@ -2598,6 +2598,13 @@ class IntentService:
                 _v2_enabled = os.getenv("FLOW_MACHINE_V2", "").strip().lower() in ("1", "true", "yes", "on")
             except Exception:
                 _v2_enabled = False
+            # Lift the verdict out of the v2 block so the legacy INVOICE_CHECK
+            # below can defer to it for high-confidence READ_QUERY / READ_AGGREGATE
+            # classifications. Without this, the legacy invoice keyword check
+            # silently overrode v2's correct call (e.g. for Hinglish "kiska
+            # invoice baki hai bhejna" — v2 said READ_QUERY but legacy said
+            # 'looks like invoice, ask which client').
+            _v2_verdict = None
             if _v2_enabled:
                 try:
                     # First: apply TTL — long-idle flow auto-resets so the user
@@ -2697,6 +2704,7 @@ class IntentService:
                                 schema_summary=_schema_summary,
                             )
                             if _verdict:
+                                _v2_verdict = _verdict  # lift for legacy override below
                                 _result = _v2_dispatch_idle(
                                     _verdict,
                                     intent_service=self,
@@ -3171,7 +3179,25 @@ class IntentService:
             # "how many invoices last month"). AI is far more reliable than keyword lists.
             is_retrieval = has_invoice_word
             if is_retrieval:
-                if not self.gemini.is_invoice_action_request(message):
+                # First-line guard: defer to the v2 classifier when it confidently
+                # called this a READ. The legacy invoice keyword check used to
+                # silently override v2 — that was the "kiska invoice baki hai
+                # bhejna" bug. v2 has full multilingual context + the column
+                # registry's semantic mappings; it should win on reads.
+                _v2_says_read = (
+                    _v2_verdict is not None
+                    and _v2_verdict.get("intent") in ("READ_QUERY", "READ_AGGREGATE")
+                    and float(_v2_verdict.get("confidence") or 0) >= 0.85
+                )
+                if _v2_says_read:
+                    logger.info(
+                        f"[INVOICE_CHECK] v2 classifier confidently said "
+                        f"{_v2_verdict.get('intent')} (conf={_v2_verdict.get('confidence')}) — "
+                        f"routing to query pipeline."
+                    )
+                    is_retrieval = False
+                    has_invoice_word = False
+                elif not self.gemini.is_invoice_action_request(message):
                     logger.info(f"[INVOICE_CHECK] AI rejected invoice routing for msg='{message[:80]}' — routing to query pipeline")
                     is_retrieval = False
                     has_invoice_word = False
