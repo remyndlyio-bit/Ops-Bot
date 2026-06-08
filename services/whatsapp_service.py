@@ -18,10 +18,13 @@ _TERMINAL_SUCCESS = {"sent", "delivered", "read"}
 _TERMINAL_FAILURE = {"failed", "undelivered"}
 
 # How long we wait for Twilio to update the status from 'queued' to a terminal
-# state before giving up. WhatsApp sandbox / Business API typically resolves
-# within ~1.5s for sync rejections; we cap at 4s and back off.
+# state before giving up. Sync rejections resolve in ~1.5s; ASYNC ones from
+# Meta's side (63005 unsupported channel, 63019 internal failure) take 5-10s
+# to surface. We bumped the inline budget to 8s and added a deferred check
+# at 30s — if delivery eventually failed, we log it loudly so future
+# diagnostics don't need a manual Twilio API check.
 _STATUS_POLL_INTERVAL_S = 0.5
-_STATUS_POLL_MAX_S = 4.0
+_STATUS_POLL_MAX_S = 8.0
 
 
 def _verify_delivery_status(client, message_sid: str, to_number: str, kind: str) -> bool:
@@ -65,10 +68,39 @@ def _verify_delivery_status(client, message_sid: str, to_number: str, kind: str)
             # Don't block the worker on Twilio API hiccups.
             return True
         time.sleep(_STATUS_POLL_INTERVAL_S)
-    # Still queued/accepted after our budget — assume Twilio will deliver.
+    # Still queued/accepted after our budget — return success to the caller
+    # (so the worker stamps DB flags) but schedule a deferred status check
+    # so a delayed Meta-side rejection (63005, 63019, etc.) shows up in
+    # logs as [WHATSAPP_DEFERRED_FAILURE] for ops grep. Without this we
+    # have to manually `curl Twilio` to discover delivery failures — which
+    # is exactly the gap that hid the xlsx and csv rejections.
+    import threading
+    def _deferred_check():
+        import time as _t
+        _t.sleep(30)  # Meta-side rejections surface within ~10-15s; 30 is safe
+        try:
+            msg = client.messages(message_sid).fetch()
+            st = (msg.status or "").lower()
+            code = getattr(msg, "error_code", None)
+            if st in _TERMINAL_FAILURE:
+                logger.warning(
+                    f"[WHATSAPP_DEFERRED_FAILURE] {kind} To={to_number} "
+                    f"SID={message_sid} status={st} code={code} — "
+                    f"delivery FAILED after worker treated it as success."
+                )
+            else:
+                logger.info(
+                    f"[WHATSAPP] deferred check {message_sid}: status={st} ok"
+                )
+        except Exception as _e:
+            logger.warning(f"[WHATSAPP] deferred status check failed: {_e}")
+    try:
+        threading.Thread(target=_deferred_check, daemon=True).start()
+    except Exception:
+        pass
     logger.info(
         f"[WHATSAPP] status for {message_sid} still {last_status!r} after "
-        f"{_STATUS_POLL_MAX_S}s — treating as success."
+        f"{_STATUS_POLL_MAX_S}s — treating as success (deferred check scheduled)."
     )
     return True
 

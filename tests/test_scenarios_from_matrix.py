@@ -136,6 +136,56 @@ class TestClientListFilter:
 
 
 # ── Matrix row 132 + 80: SQL builder hardening (Excel typo handling) ───
+class TestWhatsAppExportPicker:
+    """Regression for the 'CSV / xlsx delivered to WhatsApp, both rejected
+    by Twilio' bug class. The picker is the single source of truth for which
+    file we send over WhatsApp — if anything ever picks .csv or .xlsx when
+    a .pdf exists alongside, the tests below will fail in CI.
+
+    These are unit tests of the PICKING LOGIC, not of Twilio delivery.
+    True end-to-end delivery requires hitting the real Twilio API; tracked
+    separately. But this picker is the single place that decides the file
+    extension that gets sent, and that decision is what we got wrong twice."""
+
+    def test_picker_prefers_pdf_when_all_three_exist(self, tmp_path):
+        """The bug we shipped: picker chose .csv when a .pdf was right there."""
+        from utils.whatsapp_export import pick_whatsapp_export_path as _pick_whatsapp_export_path
+        # Create the three sibling files
+        base = str(tmp_path / "jobs_abc_123")
+        for ext in (".xlsx", ".csv", ".pdf"):
+            (tmp_path / f"jobs_abc_123{ext}").write_bytes(b"x")
+        picked = _pick_whatsapp_export_path(base + ".xlsx")
+        assert picked.endswith(".pdf"), (
+            f"WhatsApp MUST pick .pdf when available — Twilio rejects "
+            f".csv (63005) and .xlsx (63019). Picker returned: {picked}"
+        )
+
+    def test_picker_falls_back_to_csv_when_no_pdf(self, tmp_path):
+        from utils.whatsapp_export import pick_whatsapp_export_path as _pick_whatsapp_export_path
+        base = str(tmp_path / "jobs_abc_124")
+        for ext in (".xlsx", ".csv"):
+            (tmp_path / f"jobs_abc_124{ext}").write_bytes(b"x")
+        picked = _pick_whatsapp_export_path(base + ".xlsx")
+        # CSV is rejected by Twilio in practice; still preferred over xlsx
+        # (which is rejected even harder). The picker assumes PDF gen failed
+        # in this branch and we want the next-best option.
+        assert picked.endswith(".csv"), picked
+
+    def test_picker_falls_back_to_xlsx_when_nothing_else_exists(self, tmp_path):
+        from utils.whatsapp_export import pick_whatsapp_export_path as _pick_whatsapp_export_path
+        base = str(tmp_path / "jobs_abc_125")
+        (tmp_path / "jobs_abc_125.xlsx").write_bytes(b"x")
+        picked = _pick_whatsapp_export_path(base + ".xlsx")
+        assert picked.endswith(".xlsx"), picked
+
+    def test_picker_returns_original_when_no_files_exist(self, tmp_path):
+        """Don't silently swallow — let the send fail visibly so logs show why."""
+        from utils.whatsapp_export import pick_whatsapp_export_path as _pick_whatsapp_export_path
+        original = str(tmp_path / "nonexistent.xlsx")
+        picked = _pick_whatsapp_export_path(original)
+        assert picked == original
+
+
 class TestExcelExport:
     """Regression: WhatsApp couldn't deliver xlsx (Twilio 63019).
     Generator now writes both .xlsx and .csv at the same base path so

@@ -134,6 +134,9 @@ def _notify_user(platform: str, chat_id, user_id_str: str, msg: str):
         logger.warning(f"Failed to notify {platform} user: {e}")
 
 
+from utils.whatsapp_export import pick_whatsapp_export_path as _pick_whatsapp_export_path
+
+
 def _build_static_url(file_path: str) -> str:
     """Build a full publicly-fetchable URL for a file under output/ that Twilio
     can reach. BASE_URL may be set without a scheme (e.g.
@@ -574,22 +577,7 @@ async def _handle_bot_message(
         if platform == "telegram" and chat_id:
             await telegram_service.send_document(chat_id, excel_path, caption="")
         elif platform == "whatsapp":
-            # Twilio's WhatsApp channel is restrictive about media types:
-            #   xlsx → 63019 (Meta internal failure, silent reject)
-            #   csv  → 63005 (channel doesn't support this type)
-            #   pdf  → reliably accepted
-            # The generator writes .xlsx, .csv, AND .pdf at the same base
-            # path. We prefer PDF for WhatsApp; the data is the same.
-            base = excel_path[:-5] if excel_path.endswith(".xlsx") else excel_path
-            pdf_path = base + ".pdf"
-            csv_path = base + ".csv"
-            # Fallback order: PDF (preferred), CSV, xlsx (last resort)
-            for candidate in (pdf_path, csv_path, excel_path):
-                if os.path.exists(candidate):
-                    send_path = candidate
-                    break
-            else:
-                send_path = excel_path
+            send_path = _pick_whatsapp_export_path(excel_path)
             media_url = _build_static_url(send_path)
             logger.info(f"[WHATSAPP] Sending Excel export as {os.path.basename(send_path)}")
             whatsapp_service.send_media_message(to_number=user_id, body="", media_url=media_url)
