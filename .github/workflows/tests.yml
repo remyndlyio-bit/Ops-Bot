@@ -1,0 +1,55 @@
+name: tests
+
+# Runs the pytest suite on every push and pull request. This is the
+# regression net for the planner-output → SQL boundary, the column registry,
+# and every past production bug we've patched.
+#
+# If you're adding a new feature that touches services/query_planner.py,
+# services/classifier.py, or services/columns/, add a test under tests/
+# first. CI will reject the PR if the test fails — which is the point.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --quiet pytest
+
+      - name: Run tests
+        env:
+          # Test-time configuration — services use os.getenv so the values
+          # don't need to be valid, just present.
+          AI_KEY: "test_ai_key"
+          TWILIO_ACCOUNT_SID: "test_sid"
+          TWILIO_AUTH_TOKEN: "test_token"
+          TWILIO_WHATSAPP_NUMBER: "whatsapp:+10000000000"
+          BASE_URL: "https://ci.example.com"
+          RESEND_API: "test_resend"
+          RESEND_FROM_EMAIL: "ci@example.com"
+        run: |
+          python -m pytest tests/ -v --tb=short
