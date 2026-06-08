@@ -218,6 +218,84 @@ def _generate_jobs_excel(rows: list, user_id: str) -> str:
         logger.info(f"[EXCEL] Wrote sister CSV: {csv_path}")
     except Exception as _csv_err:
         logger.warning(f"[EXCEL] CSV sister write failed (xlsx still usable): {_csv_err}")
+
+    # Sister PDF — Twilio's WhatsApp channel only reliably accepts PDF for
+    # outbound documents. xlsx → 63019, csv → 63005 (channel doesn't support).
+    # main.py picks .pdf for WhatsApp.
+    try:
+        from fpdf import FPDF
+        pdf_path = path[:-5] + ".pdf"
+        pdf = FPDF(orientation="L", unit="mm", format="A4")  # landscape for wider table
+        pdf.set_auto_page_break(auto=True, margin=10)
+        pdf.add_page()
+        # Brand banner
+        pdf.set_fill_color(26, 26, 46)  # BRAND_COLOR
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.cell(0, 10, "Remyndly - Jobs Export", ln=1, align="C", fill=True)
+        pdf.ln(2)
+        # Column widths in mm — must sum ≤ 277 (A4 landscape printable width)
+        col_widths = [45, 40, 60, 30, 35, 35]
+        headers = [h for _, h in COLS]
+        # Header row
+        pdf.set_fill_color(45, 107, 228)  # HEADER_COLOR
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 10)
+        for i, h in enumerate(headers):
+            pdf.cell(col_widths[i], 8, h, border=1, align="C", fill=True)
+        pdf.ln(8)
+        # Data rows
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(20, 20, 20)
+        for ri, row in enumerate(rows):
+            # Alternating row colour
+            if ri % 2 == 0:
+                pdf.set_fill_color(238, 243, 252)  # ALT_COLOR
+                use_fill = True
+            else:
+                use_fill = False
+            cells = []
+            for field, _ in COLS:
+                if field == "_poc":
+                    poc_name  = (row.get("poc_name")  or "").strip()
+                    poc_email = (row.get("poc_email") or "").strip()
+                    if poc_name and poc_email:
+                        v = f"{poc_name} ({poc_email})"
+                    else:
+                        v = poc_name or poc_email or ""
+                elif field == "fees":
+                    raw = row.get("fees")
+                    try:
+                        v = f"Rs {int(float(raw)):,}" if raw is not None else ""
+                    except (ValueError, TypeError):
+                        v = str(raw) if raw else ""
+                elif field == "invoice_date":
+                    raw = row.get("invoice_date")
+                    if raw:
+                        try:
+                            from datetime import datetime as _dt
+                            v = _dt.strptime(str(raw)[:10], "%Y-%m-%d").strftime("%-d %b %Y")
+                        except Exception:
+                            v = str(raw)[:10]
+                    else:
+                        v = ""
+                else:
+                    raw = row.get(field)
+                    v = str(raw).strip() if raw is not None else ""
+                # fpdf2 has trouble with some Unicode — replace ₹ and other glyphs
+                v = v.replace("₹", "Rs ").replace("—", "-").replace("'", "'").replace("'", "'")
+                cells.append(v)
+            for i, v in enumerate(cells):
+                # Truncate to fit; the table is for at-a-glance, not exhaustive
+                max_chars = max(8, int(col_widths[i] / 1.8))
+                if len(v) > max_chars:
+                    v = v[:max_chars - 1] + "…"
+                pdf.cell(col_widths[i], 6, v, border=1, align="L", fill=use_fill)
+            pdf.ln(6)
+        pdf.output(pdf_path)
+        logger.info(f"[EXCEL] Wrote sister PDF: {pdf_path}")
+    except Exception as _pdf_err:
+        logger.warning(f"[EXCEL] PDF sister write failed (xlsx/csv still usable): {_pdf_err}")
     return path
 
 

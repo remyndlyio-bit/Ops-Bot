@@ -141,9 +141,13 @@ class TestExcelExport:
     Generator now writes both .xlsx and .csv at the same base path so
     the WhatsApp send path can pick CSV (universally supported)."""
 
-    def test_csv_is_written_alongside_xlsx(self, tmp_path, monkeypatch):
-        import shutil
-        # Redirect output/ to a temp dir for isolation
+    def test_csv_and_pdf_are_written_alongside_xlsx(self, tmp_path, monkeypatch):
+        """The generator writes .xlsx + .csv + .pdf at the same base path so
+        main.py can pick per-platform without re-generating:
+            Telegram → .xlsx
+            WhatsApp → .pdf  (Twilio rejects xlsx with 63019, csv with 63005;
+                              pdf is the only reliably-accepted document type)
+        """
         monkeypatch.chdir(tmp_path)
         (tmp_path / "output").mkdir(exist_ok=True)
 
@@ -158,17 +162,27 @@ class TestExcelExport:
         ]
         xlsx_path = _generate_jobs_excel(rows, "+919876543210")
         assert xlsx_path.endswith(".xlsx")
-        csv_path = xlsx_path[:-5] + ".csv"
-        # Sister CSV must exist next to the xlsx
-        assert os.path.exists(csv_path), f"sister CSV missing: {csv_path}"
+        base = xlsx_path[:-5]
+        csv_path = base + ".csv"
+        pdf_path = base + ".pdf"
+        # All three siblings must exist
+        assert os.path.exists(xlsx_path), f"xlsx missing: {xlsx_path}"
+        assert os.path.exists(csv_path),  f"sister CSV missing: {csv_path}"
+        assert os.path.exists(pdf_path),  f"sister PDF missing (WhatsApp uses this): {pdf_path}"
+
+        # CSV content sanity
         with open(csv_path, encoding="utf-8") as f:
             content = f.read()
-        # CSV must contain a banner row, header row, and our data
         assert "Remyndly" in content
         assert "Nike" in content
         assert "Garnier" in content
-        # Fee should be numeric
         assert "25000" in content
+
+        # PDF must be a non-empty PDF (starts with %PDF magic bytes)
+        with open(pdf_path, "rb") as f:
+            head = f.read(8)
+        assert head.startswith(b"%PDF-"), f"PDF magic missing in {pdf_path}"
+        assert os.path.getsize(pdf_path) > 500  # at least a few hundred bytes of real content
 
 
 class TestNonStandardInputs:
