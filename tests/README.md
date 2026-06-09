@@ -1,6 +1,6 @@
 # Remyndly Test Suite — the Product Baseline
 
-**~348 tests across 7 files. CI fails the build on any unexpected failure.**
+**~352 tests across 8 files. CI fails the build on any unexpected failure.**
 
 This file is the contract: every test below is a behaviour the product
 guarantees. Adding a feature is fine; breaking one of these is not.
@@ -131,6 +131,16 @@ enumerated and asserted to collapse to the SAME `CanonicalFilter`.
 
 See `PATH_3.md` at the repo root for the architecture write-up and
 Phase 3b roadmap.
+
+### `tests/test_plan_retry.py` — 4 tests (Path 3 Phase 3b)
+The strict-mode retry contract. When the canonical filter validator
+rejects a plan, the LLM gets ONE chance to self-correct using the
+typed error feedback. Second failure → clarification, not broken SQL.
+
+- Invalid → retry valid → SQL is produced from the corrected plan.
+- Invalid → invalid → friendly clarification, sql is None.
+- STRICT_PLAN_VALIDATION=0 reverts to shadow behaviour (escape hatch).
+- Valid plan on first try → Gemini called exactly once (no spurious retry).
 
 ### `tests/test_reminder_worker.py` — 34 tests
 

@@ -195,6 +195,7 @@ def _build_planner_prompt(
     allowed_columns: List[str],
     conversation_history: Optional[List[Dict[str, str]]] = None,
     date_column: Optional[str] = None,
+    retry_feedback: Optional[str] = None,
 ) -> str:
     today = date.today().isoformat()
     columns_list = ", ".join(sorted(allowed_columns)[:50])
@@ -329,7 +330,14 @@ def _build_planner_prompt(
         "- For create: extract ALL mentioned fields into values dict.\n"
         "- 'k' means thousands (25k=25000), 'L'/'lac' means 100000 (1.5L=150000).\n\n"
         f"{context_section}"
-        f"User message: {message}\n\n"
+        + (
+            "RETRY FEEDBACK — your previous attempt was rejected by the\n"
+            "canonical filter validator. Fix the listed problems and\n"
+            "return a corrected plan using ONLY documented filter shapes:\n"
+            f"{retry_feedback}\n\n"
+            if retry_feedback else ""
+        )
+        + f"User message: {message}\n\n"
         "Return ONLY valid JSON."
     )
 
@@ -342,14 +350,21 @@ def build_operation_plan(
     conversation_history: Optional[List[Dict[str, str]]] = None,
     date_column: Optional[str] = None,
     gemini_service=None,
+    retry_feedback: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Stage 2: Call LLM to produce structured operation plan."""
+    """Stage 2: Call LLM to produce structured operation plan.
+
+    `retry_feedback`, when set, is the human-readable error from
+    Plan.from_raw on the previous attempt. Injected into the prompt so
+    the planner can self-correct without the user ever seeing the bug.
+    Used by execute_query_plan's one-shot retry path.
+    """
     if not gemini_service:
         return {"_error": "Gemini service not available."}
 
     prompt = _build_planner_prompt(
         message, operation, schema_description, allowed_columns,
-        conversation_history, date_column,
+        conversation_history, date_column, retry_feedback,
     )
     try:
         raw = gemini_service._call_api(prompt, generation_config={
@@ -905,31 +920,68 @@ def execute_query_plan(
     plan = resolve_rows(plan, user_id, supabase_service, conversation_context)
     logger.info(f"[PIPELINE] Stage 3 resolved: {json.dumps(plan)[:200]}")
 
-    # ── Path 3: Typed Plan validation ──────────────────────────────
-    # Phase 3a (shadow mode): validate against canonical filter types,
-    # log any value the registry cannot normalise as
-    # [PLAN_VALIDATOR_SHADOW]. We do NOT yet reject — the legacy SQL
-    # builder still runs. When STRICT_PLAN_VALIDATION is on, we DO
-    # reject and (Phase 3b) trigger an LLM retry. The flag lets us
-    # observe real production traffic for ~24h before flipping.
+    # ── Path 3: Typed Plan validation (Phase 3b — STRICT + RETRY) ──
+    # Every plan is validated against the typed CanonicalFilter contract.
+    # On the first failure we re-prompt the planner with the typed error
+    # feedback ('column X: value Y is not a recognised shape'). The
+    # planner gets exactly ONE chance to self-correct — second failure
+    # surfaces as a clarification to the user instead of shipping a
+    # wrong SQL query.
+    #
+    # Escape hatch: STRICT_PLAN_VALIDATION=0 reverts to shadow mode
+    # (log only, no reject, no retry). Use ONLY for emergency rollback
+    # if a planner regression starts flooding rejections.
+    _strict = os.getenv("STRICT_PLAN_VALIDATION", "1").lower() not in ("0", "false", "no", "off")
     try:
         from services.plan import Plan as _TypedPlan
         plan_result = _TypedPlan.from_raw(plan, allowed_columns)
         if plan_result.errors:
             for _e in plan_result.errors:
                 logger.warning(
-                    f"[PLAN_VALIDATOR_SHADOW] column={_e.column!r} "
+                    f"[PLAN_VALIDATOR] column={_e.column!r} "
                     f"raw={_e.raw_value!r} reason={_e.reason}"
                 )
-            if os.getenv("STRICT_PLAN_VALIDATION", "").lower() in ("1", "true", "yes"):
-                return {
-                    "sql": None, "plan": plan, "classification": classification,
-                    "clarification": None,
-                    "_error": "Plan validation failed: "
-                              + "; ".join(e.reason for e in plan_result.errors),
-                }
+            if _strict:
+                feedback = plan_result.feedback_for_retry()
+                logger.info(f"[PLAN_VALIDATOR] retrying with feedback: {feedback[:200]}")
+                retry_plan = build_operation_plan(
+                    message, operation, schema_description, allowed_columns,
+                    conversation_history, date_column, gemini_service,
+                    retry_feedback=feedback,
+                )
+                if retry_plan.get("_error"):
+                    logger.warning(f"[PLAN_VALIDATOR] retry LLM error: {retry_plan['_error']}")
+                else:
+                    retry_plan = resolve_rows(
+                        retry_plan, user_id, supabase_service, conversation_context,
+                    )
+                    retry_result = _TypedPlan.from_raw(retry_plan, allowed_columns)
+                    if retry_result.valid:
+                        logger.info("[PLAN_VALIDATOR] retry succeeded")
+                        plan = retry_plan
+                    else:
+                        # Second failure — bail to clarification rather than
+                        # shipping known-wrong SQL.
+                        for _e in retry_result.errors:
+                            logger.warning(
+                                f"[PLAN_VALIDATOR] retry STILL invalid: "
+                                f"column={_e.column!r} raw={_e.raw_value!r}"
+                            )
+                        return {
+                            "sql": None, "plan": retry_plan,
+                            "classification": classification,
+                            "clarification": (
+                                "I couldn't quite work out which records you "
+                                "meant — could you rephrase that? (e.g. say "
+                                "'sent invoices last month' instead of a "
+                                "specific date phrase.)"
+                            ),
+                            "_error": None,
+                        }
     except Exception as _e:
-        logger.warning(f"[PLAN_VALIDATOR_SHADOW] internal error: {_e}")
+        # Defensive — if Path 3 itself crashes, fall through to the legacy
+        # builder rather than break the request. Surfaced loudly in logs.
+        logger.error(f"[PLAN_VALIDATOR] internal error: {_e}")
 
     # Column Validation
     valid, errors = validate_plan_columns(plan, allowed_columns)

@@ -41,7 +41,46 @@ Path 3 says that.
 3. **No behaviour change.** The legacy SQL builder still runs. Shipping
    this commit cannot break anything in production.
 
-## Phase 3b — next session
+## Phase 3b — LANDED
+
+Strict mode is **on by default** (`STRICT_PLAN_VALIDATION=1`). The
+shadow-mode escape hatch remains: `STRICT_PLAN_VALIDATION=0` reverts to
+log-only behaviour for emergency rollback.
+
+### What strict mode does
+
+1. After the planner emits a raw plan, `Plan.from_raw` validates every
+   filter value against the canonical types.
+2. **First failure**: re-call the planner ONCE with
+   `PlanResult.feedback_for_retry()` injected into the prompt. The
+   planner sees exactly which column / value / reason failed and
+   produces a corrected plan.
+3. **Retry succeeds** → continue to SQL with the corrected plan. User
+   never sees the bug; they get the right answer.
+4. **Retry fails too** → return a friendly clarification instead of
+   shipping known-wrong SQL. The user sees:
+   *"I couldn't quite work out which records you meant — could you
+   rephrase that?"*
+
+### Tests covering the contract
+
+`tests/test_plan_retry.py` (4 tests):
+- Invalid → retry → valid → SQL produced (the happy retry path)
+- Invalid → invalid → clarification (the exhaustion path)
+- Flag off → no retry, legacy path runs (the escape hatch)
+- Valid first try → no retry (Gemini called exactly once)
+
+### Production indicator
+
+Grep logs for:
+- `[PLAN_VALIDATOR]` — every rejection with the offending column + raw
+  value + reason. Each line is one of:
+  * A new variant we should add to the centralised normaliser
+  * A planner regression we want to investigate
+- `[PLAN_VALIDATOR] retry succeeded` — the bug never reached the user
+- `[PLAN_VALIDATOR] retry STILL invalid` — user got a clarification
+
+## Phase 3c — future cleanup
 
 1. **Flip strict mode.** Set `STRICT_PLAN_VALIDATION=1` after observing
    shadow-mode logs for 24h. Any unanticipated shape is now a hard
