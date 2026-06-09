@@ -298,7 +298,10 @@ def _build_planner_prompt(
         f"- Date column: '{dc}'\n"
         f"{precomputed_ranges}"
         "- 'all time', 'overall', no period → time_range: null.\n"
-        "- 'latest', 'most recent', 'last job' → no time_range; metric:null, column:null, limit:1, order:'desc' (return full record, not a single field).\n\n"
+        "- 'latest', 'most recent', 'last job' → no time_range; metric:null, column:null, limit:1, order:'desc' (return full record, not a single field).\n"
+        "- Vague/unresolvable date references ('around then', 'that time', 'at that point', 'then', "
+        "'around that period') with NO prior date in conversation → set confidence:'low' and "
+        "clarification_question:'Could you specify the date or period? (e.g. \"last month\" or \"March 2026\")'.\n\n"
         "CONTEXT RESOLUTION:\n"
         "- 'this job', 'that client', 'these' → resolve from recent conversation.\n"
         "- 'sum of these', 'total of those' → extract items from assistant's last message.\n"
@@ -760,14 +763,26 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
 
     # WHERE clause
     where = [f"user_id = {_sql_quote(user_id)}", '("isDeleted" IS NOT TRUE)']
+    # When both bill_sent (truthy) and poc_email (null/IS NULL) are in the filters
+    # the bill_sent handler auto-adds "poc_email IS NOT NULL" which contradicts the
+    # explicit poc_email IS NULL filter. Detect this and strip the auto-guard.
+    _poc_email_val = filters.get("poc_email")
+    _poc_is_null_filter = (
+        _poc_email_val is None
+        or (isinstance(_poc_email_val, str) and _poc_email_val.strip().upper() in ("IS NULL", "NULL", ""))
+    )
     for col, val in filters.items():
         if col.startswith("_"):
             continue
-        # isDeleted is already enforced via ("isDeleted" IS NOT TRUE); skip planner-supplied
-        # duplicates that would generate broken SQL (lowercase isdeleted column).
         if col.lower() == "isdeleted":
             continue
-        where.append(_build_filter_clause(col, val))
+        clause = _build_filter_clause(col, val)
+        # When poc_email IS NULL is an explicit filter, strip the auto-added
+        # "AND poc_email IS NOT NULL" that the bill_sent truthy handler appends —
+        # it would make the WHERE a contradiction and return 0 rows.
+        if col == "bill_sent" and _poc_is_null_filter and "poc_email IS NOT NULL" in clause:
+            clause = clause.split("AND poc_email IS NOT NULL")[0].strip().rstrip("AND").strip()
+        where.append(clause)
     where.extend(_time_range_conditions(plan, dc))
     where_str = " AND ".join(where)
 

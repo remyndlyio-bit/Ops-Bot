@@ -2823,7 +2823,10 @@ class IntentService:
 
             # Handle pending disambiguation reply (user selecting a specific row by number)
             if user_mem.get("pending_disambiguation"):
-                return self._handle_disambiguation_reply(user_id, message, user_mem["pending_disambiguation"])
+                _disambig_result = self._handle_disambiguation_reply(user_id, message, user_mem["pending_disambiguation"])
+                if _disambig_result is not None:
+                    return _disambig_result
+                # None means the handler detected a new query and cleared state — fall through
 
             # Handle compound intent follow-up ("Yes" after "You also mentioned: ...")
             if user_mem.get("awaiting_compound_response"):
@@ -4748,6 +4751,17 @@ class IntentService:
 
         num_match = re.search(r'\b(\d+)\b', message)
         if not num_match:
+            # If the message is clearly a new query (ends with ?, starts with a question
+            # word) — clear disambiguation and fall through so the user isn't trapped.
+            _starts_with_query_word = any(
+                msg.startswith(w + " ") or msg == w
+                for w in ("who", "what", "show", "list", "how", "when", "which", "get", "find",
+                          "kiska", "kitne", "kitna", "kaunsa", "kya")
+            )
+            _new_query_signals = "?" in message or _starts_with_query_word
+            if _new_query_signals:
+                self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
+                return None  # fall through to normal pipeline
             response = "Please reply with a number to select the record, 'all' to delete every match, or 'cancel' to abort."
             self._store_conversation(user_id, message, response)
             return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
