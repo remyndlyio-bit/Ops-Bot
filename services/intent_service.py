@@ -2867,6 +2867,12 @@ class IntentService:
             _msg_l = message.strip().lower()
             _has_modify_verb = any(_msg_l.startswith(t) for t in _MODIFY_TRIGGERS) or _msg_l in _MODIFY_EQUALS
             _awaiting_modify = bool(user_mem.get("awaiting_modify_field"))
+            # Allow user to escape the modify state with standard cancel words.
+            if _awaiting_modify and _msg_l in ("cancel", "stop", "quit", "exit", "nevermind", "nvm", "no", "abort", "skip"):
+                self.memory.update_user_memory(user_id, {"awaiting_modify_field": False, "modify_row_id": None})
+                response = "No problem, cancelled. What else can I help with?"
+                self._store_conversation(user_id, message, response)
+                return {"operation": "modify_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
             if _has_modify_verb or _awaiting_modify:
                 _resp = self._handle_modify_intent(user_id, message, user_mem)
                 if _resp is not None:
@@ -2997,6 +3003,13 @@ class IntentService:
 
             # 0b3. "update bank details" — ask user for details in a specific format
             msg_lower = message.strip().lower()
+            # Direct one-shot bank details: "My account is HDFC 1234 IFSC HDFC0001234, UPI x@y"
+            _has_bank_inline = (
+                ("my account" in msg_lower or "account number" in msg_lower)
+                and ("ifsc" in msg_lower or "upi" in msg_lower or "account is" in msg_lower)
+            )
+            if _has_bank_inline:
+                return self._handle_bank_details_response(user_id, message)
             if any(t in msg_lower for t in self._UPDATE_BANK_TRIGGERS):
                 return self._prompt_bank_details_format(user_id, message)
 
@@ -3285,6 +3298,10 @@ class IntentService:
                     and _v2_verdict.get("intent") in ("READ_QUERY", "READ_AGGREGATE")
                     and float(_v2_verdict.get("confidence") or 0) >= 0.85
                 )
+                _v2_says_invoice = (
+                    _v2_verdict is not None
+                    and _v2_verdict.get("intent") == "WRITE_INVOICE"
+                )
                 if _v2_says_read:
                     logger.info(
                         f"[INVOICE_CHECK] v2 classifier confidently said "
@@ -3293,6 +3310,11 @@ class IntentService:
                     )
                     is_retrieval = False
                     has_invoice_word = False
+                elif _v2_says_invoice:
+                    # v2 already confirmed this is an invoice action — trust it and skip
+                    # the redundant is_invoice_action_request LLM call, which has been
+                    # returning False for valid invoice phrases (Acme, शोभा, typos).
+                    logger.info(f"[INVOICE_CHECK] v2 confirmed WRITE_INVOICE — skipping secondary AI check")
                 elif not self.gemini.is_invoice_action_request(message):
                     logger.info(f"[INVOICE_CHECK] AI rejected invoice routing for msg='{message[:80]}' — routing to query pipeline")
                     is_retrieval = False
