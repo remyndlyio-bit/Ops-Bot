@@ -3340,8 +3340,50 @@ class IntentService:
                     has_invoice_word = False
             logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
             if is_retrieval:
-                schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
-                intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
+                # For definite invoice actions (generate/create/send + invoice word), skip
+                # parse_user_intent — it sometimes returns GEMINI_ERROR and silently falls
+                # through to the query pipeline. Instead extract client and month with a
+                # lightweight regex pass, then fall back to parse_user_intent only when that
+                # doesn't yield a client name.
+                if _invoice_action_definite:
+                    _direct_month = None
+                    _direct_client = None
+                    _month_names = {
+                        "january": 1, "february": 2, "march": 3, "april": 4,
+                        "may": 5, "june": 6, "july": 7, "august": 8,
+                        "september": 9, "october": 10, "november": 11, "december": 12,
+                        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
+                        "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+                    }
+                    for _mn, _mv in _month_names.items():
+                        if f" {_mn}" in msg_lower or msg_lower.endswith(_mn):
+                            _direct_month = _mv
+                            break
+                    # Extract client name: text between "for" and the month/end
+                    _for_match = re.search(
+                        r'\bfor\s+(.+?)(?:\s+for\s+|\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*|$)',
+                        msg_lower, re.IGNORECASE
+                    )
+                    if _for_match:
+                        _direct_client = _for_match.group(1).strip().title()
+                    if _direct_client:
+                        intent_result = {
+                            "operation": "ACTION_TRIGGER",
+                            "parameters": {"client_name": _direct_client, "month": None, "year": None},
+                            "confidence": 0.95,
+                            "clarification_question": None,
+                        }
+                        # Override month from regex
+                        if _direct_month:
+                            intent_result["parameters"]["month"] = list(_month_names.keys())[
+                                list(_month_names.values()).index(_direct_month)].capitalize()
+                        logger.info(f"[INVOICE_SHORTCUT] Direct extract: client={_direct_client!r} month={_direct_month}")
+                    else:
+                        schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
+                        intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
+                else:
+                    schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
+                    intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
                 params = intent_result.get("parameters", {})
                 # If the intent parser asked for clarification, surface that question
                 # — but only when the existing flow can't handle it. Missing month or
