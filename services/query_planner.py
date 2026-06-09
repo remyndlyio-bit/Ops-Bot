@@ -11,6 +11,7 @@ Pipeline:
 """
 
 import json
+import os
 import re
 from datetime import date
 from typing import Dict, Any, List, Optional, Tuple
@@ -903,6 +904,32 @@ def execute_query_plan(
     # Stage 3: Row Resolver
     plan = resolve_rows(plan, user_id, supabase_service, conversation_context)
     logger.info(f"[PIPELINE] Stage 3 resolved: {json.dumps(plan)[:200]}")
+
+    # ── Path 3: Typed Plan validation ──────────────────────────────
+    # Phase 3a (shadow mode): validate against canonical filter types,
+    # log any value the registry cannot normalise as
+    # [PLAN_VALIDATOR_SHADOW]. We do NOT yet reject — the legacy SQL
+    # builder still runs. When STRICT_PLAN_VALIDATION is on, we DO
+    # reject and (Phase 3b) trigger an LLM retry. The flag lets us
+    # observe real production traffic for ~24h before flipping.
+    try:
+        from services.plan import Plan as _TypedPlan
+        plan_result = _TypedPlan.from_raw(plan, allowed_columns)
+        if plan_result.errors:
+            for _e in plan_result.errors:
+                logger.warning(
+                    f"[PLAN_VALIDATOR_SHADOW] column={_e.column!r} "
+                    f"raw={_e.raw_value!r} reason={_e.reason}"
+                )
+            if os.getenv("STRICT_PLAN_VALIDATION", "").lower() in ("1", "true", "yes"):
+                return {
+                    "sql": None, "plan": plan, "classification": classification,
+                    "clarification": None,
+                    "_error": "Plan validation failed: "
+                              + "; ".join(e.reason for e in plan_result.errors),
+                }
+    except Exception as _e:
+        logger.warning(f"[PLAN_VALIDATOR_SHADOW] internal error: {_e}")
 
     # Column Validation
     valid, errors = validate_plan_columns(plan, allowed_columns)

@@ -72,9 +72,21 @@ COLUMN paid (text, set when invoice is paid; NULL or empty = unpaid):
 """
 
 
+def normalize_filter(val: Any):
+    """Path 3 normaliser — collapse every variant into BoolCheck."""
+    from services.plan import BoolCheck
+    decision = _classify(val)
+    if decision is True:
+        return BoolCheck(truthy=True)
+    if decision is False:
+        return BoolCheck(truthy=False)
+    return None
+
+
 register(ColumnSpec(
     name="paid",
     semantic=__doc__ or "",
     prompt_fragment=PROMPT_FRAGMENT,
     filter_handler=filter_handler,
+    normalize_filter=normalize_filter,
 ))

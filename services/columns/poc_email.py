@@ -54,9 +54,29 @@ COLUMN poc_email (text, client contact email; NULL = no email on file):
 """
 
 
+def normalize_filter(val: Any):
+    """Path 3 normaliser. poc_email has THREE legitimate canonical
+    forms: NullCheck(True), NullCheck(False), TextMatch(addr). Anything
+    else returns None so the planner gets a NormalisationError instead
+    of a silent broken predicate."""
+    from services.plan import NullCheck, TextMatch
+    if val is None:
+        return NullCheck(is_null=True)
+    if isinstance(val, str):
+        _v = val.strip().lower().replace(" ", "_")
+        if _v in ("is_null", "null", "isnull", ""):
+            return NullCheck(is_null=True)
+        if _v in ("is_not_null", "not_null", "isnotnull", "any", "*"):
+            return NullCheck(is_null=False)
+        # Real address (or partial) — text match.
+        return TextMatch(value=val)
+    return None
+
+
 register(ColumnSpec(
     name="poc_email",
     semantic=__doc__ or "",
     prompt_fragment=PROMPT_FRAGMENT,
     filter_handler=filter_handler,
+    normalize_filter=normalize_filter,
 ))

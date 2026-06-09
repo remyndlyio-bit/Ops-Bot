@@ -55,9 +55,16 @@ _REGISTRY: Dict[str, "ColumnSpec"] = {}
 
 
 class ColumnSpec:
-    """Everything we know about a single column."""
+    """Everything we know about a single column.
 
-    __slots__ = ("name", "semantic", "prompt_fragment", "filter_handler")
+    `normalize_filter` (Path 3) is OPTIONAL. When set, services/plan.py
+    consults it to map raw planner output → CanonicalFilter for this
+    column. When None, the generic normaliser in services/plan.py handles
+    it. Both paths converge on the same canonical filter types, so the
+    SQL emitter sees one shape regardless of which path produced it."""
+
+    __slots__ = ("name", "semantic", "prompt_fragment",
+                 "filter_handler", "normalize_filter")
 
     def __init__(
         self,
@@ -65,11 +72,13 @@ class ColumnSpec:
         semantic: str,
         prompt_fragment: str,
         filter_handler: ColumnHandler,
+        normalize_filter: Optional[Callable[[Any], Any]] = None,
     ):
         self.name = name
         self.semantic = semantic
         self.prompt_fragment = prompt_fragment
         self.filter_handler = filter_handler
+        self.normalize_filter = normalize_filter
 
 
 def register(spec: ColumnSpec) -> None:

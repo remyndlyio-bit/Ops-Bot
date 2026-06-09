@@ -32,9 +32,13 @@ from services.columns import ColumnSpec, register
 
 
 _TRUTHY_TOKENS = {"yes", "true", "t", "1", "sent", "y", "paid"}
+# Multi-word tokens MUST appear in BOTH space and underscore form because
+# `_classify` normalises the input via `replace(" ", "_")` before lookup.
 _FALSY_TOKENS = {
-    "no", "false", "0", "", "n", "not", "not sent",
-    "pending", "unpaid", "outstanding", "is null", "null",
+    "no", "false", "0", "", "n", "not",
+    "not sent", "not_sent",
+    "pending", "unpaid", "outstanding",
+    "is null", "is_null", "null",
 }
 
 _SQL_TRUTHY = (
@@ -114,9 +118,24 @@ COLUMN bill_sent (text, set on actual invoice-email delivery; NULL = not sent ye
 """
 
 
+def normalize_filter(val: Any):
+    """Path 3 normaliser: collapse every shape into a BoolCheck.
+    Returns None when the value is genuinely ambiguous — the planner
+    boundary will surface this as a NormalisationError so the LLM can
+    correct it instead of producing a wrong answer silently."""
+    from services.plan import BoolCheck
+    decision = _classify(val)
+    if decision is True:
+        return BoolCheck(truthy=True)
+    if decision is False:
+        return BoolCheck(truthy=False)
+    return None
+
+
 register(ColumnSpec(
     name="bill_sent",
     semantic=__doc__ or "",
     prompt_fragment=PROMPT_FRAGMENT,
     filter_handler=filter_handler,
+    normalize_filter=normalize_filter,
 ))

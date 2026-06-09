@@ -60,6 +60,38 @@ DATE / TIMESTAMP COLUMNS (job_date, invoice_date, payment_date, due_date,
 """
 
 
+def _normalize(val: Any):
+    """Path 3 normaliser. Allowed canonical forms for date columns:
+    NullCheck, Equality (date literal), Comparison. NEVER TextMatch —
+    that would map to ILIKE and Postgres rejects ILIKE on date types.
+    Junk values return None so the planner gets a NormalisationError."""
+    from services.plan import NullCheck, Equality, Comparison
+    import re as _re
+
+    if val is None:
+        return NullCheck(is_null=True)
+    if isinstance(val, str):
+        _v = val.strip().lower().replace(" ", "_")
+        if _v in ("is_null", "null", "isnull", ""):
+            return NullCheck(is_null=True)
+        if _v in ("is_not_null", "not_null", "isnotnull", "any", "*"):
+            return NullCheck(is_null=False)
+        # Operator-prefixed: "< 2026-03-14"
+        m = _re.match(r"^(<=|>=|!=|<|>|=)\s*(.+)$", val.strip())
+        if m:
+            return Comparison(op=m.group(1), value=m.group(2).strip())
+        # Bare ISO date
+        if _re.match(r"^\d{4}-\d{2}-\d{2}$", val.strip()):
+            return Equality(value=val.strip())
+        return None  # junk — let validator surface it
+    if isinstance(val, dict) and "operator" in val and "value" in val:
+        op = val["operator"]
+        if op in ("<", "<=", ">", ">=", "=", "!="):
+            return Comparison(op=op, value=val["value"])
+        return None
+    return None
+
+
 # Register each date column with the same handler factory
 for _col in _DATE_COLUMNS:
     register(ColumnSpec(
@@ -67,6 +99,7 @@ for _col in _DATE_COLUMNS:
         semantic=__doc__ or "",
         prompt_fragment="",  # one shared fragment exported below
         filter_handler=_make_handler(_col),
+        normalize_filter=_normalize,
     ))
 
 

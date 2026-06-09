@@ -1,6 +1,6 @@
 # Remyndly Test Suite — the Product Baseline
 
-**237 tests across 6 files. CI fails the build on any unexpected failure.**
+**~348 tests across 7 files. CI fails the build on any unexpected failure.**
 
 This file is the contract: every test below is a behaviour the product
 guarantees. Adding a feature is fine; breaking one of these is not.
@@ -109,6 +109,28 @@ Derived from the Intent Test Matrix Excel.
   → False.
 - **TestSendInvoiceEmail (3)** — False when PDF missing; subject has
   client+month.
+
+### `tests/test_plan_model.py` — ~70 tests (Path 3)
+The architectural contract that eliminates the "AI emitted a shape we
+didn't anticipate" bug class. Every semantic concept (NULL, NOT NULL,
+"sent", "not sent", "paid", "unpaid") has ALL plausible variants
+enumerated and asserted to collapse to the SAME `CanonicalFilter`.
+
+- **TestGenericNullNormalisation (~30)** — Every whitespace / case /
+  underscore variant of NULL and NOT NULL collapses identically.
+- **TestBillSentNormalisation (~22)** — Truthy / falsy variants;
+  list shapes; `not_null` underscore.
+- **TestPaidNormalisation (~13)** — Mirror of bill_sent.
+- **TestPocEmailNormalisation (~12)** — NullCheck / TextMatch.
+- **TestDateColumnNormalisation (~9)** — Equality / Comparison /
+  NullCheck only — junk values return None (never ILIKE).
+- **TestGenericFallback (4)** — Numeric / list / text / operator.
+- **TestPlanFromRaw (6)** — End-to-end validation contract.
+- **TestCrossVariantConsistency (4)** — Set-equality lemmas: every
+  variant of the same concept collapses to ONE canonical form.
+
+See `PATH_3.md` at the repo root for the architecture write-up and
+Phase 3b roadmap.
 
 ### `tests/test_reminder_worker.py` — 34 tests
 
