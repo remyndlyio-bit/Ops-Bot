@@ -98,7 +98,7 @@ def build_clean_payload(rows: List[Dict], operation: str = "select") -> Dict[str
                 return {
                     "type": "aggregate",
                     "data": {"result": 0},
-                    "note": "No matching records for the requested filter / period — total is 0.",
+                    "note": "zero",
                 }
             return {"type": "aggregate", "data": {"result": agg_val}}
 

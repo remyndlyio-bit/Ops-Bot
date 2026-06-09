@@ -201,8 +201,8 @@ class GeminiService:
             "  the SQL pipeline ALREADY DID THE COUNTING. State the number plainly. Never refuse, never\n"
             "  say 'I can't tell you' or 'I don't track that' — the count IS the answer. Examples:\n"
             "    type=aggregate, data.result=5  → 'You've sent invoices to 5 clients so far.'\n"
-            "    type=aggregate, data.result=0  → 'No invoices have been sent yet.'\n"
-            "    (with a 'note' field present) → use the note as the framing\n"
+            "    type=aggregate, data.result=0, note='zero'  → '₹0 for that period.' or 'No jobs found for that filter.' — be specific about what the user asked; keep it short.\n"
+            "    type=aggregate, data.result=0 (for a count query) → 'No matching records.' — brief, don't pad.\n"
             "  Refusing when the DB returned a number is a bug we've shipped before — don't repeat it.\n"
         )
 
@@ -692,11 +692,12 @@ Return ONLY JSON: {{"send_to_client": true}} or {{"send_to_client": false}}"""
 Today's date is {today}. Use this to resolve relative dates (e.g. "10 Feb" = {today[:4]}-02-10, "yesterday" = the day before today).
 
 Return ONLY valid JSON with these keys:
-- "job_date": ISO date string "YYYY-MM-DD" or null
+- "job_date": ISO date string "YYYY-MM-DD" or null (if not mentioned, set null — caller will default to today)
 - "brand_name": The brand or product name (e.g. "Bridgestone", "Xiaomi") or null
 - "client_name": The production house, agency, or client entity (e.g. "The Good Take", "Leo Burnett") or null
 - "job_description_details": What was done — film type, deliverables, role, duration (e.g. "Master film 30 sec + 4 cutdowns") or null
 - "fees": Numeric amount in integer (e.g. "25k" = 25000, "1.5L" = 150000, "2000" = 2000) or null
+- "paid": "true" if the user says 'paid', 'already paid', 'payment done', 'payment received', 'ho gaya', 'paisa aa gaya'; "false" if 'unpaid', 'pending', 'not paid'; null if not mentioned
 - "poc_name": The point-of-contact person's name at the client (e.g. "Rohan Mehta") or null
 - "poc_email": The point-of-contact email address (e.g. "rohan@studio.com") or null
 - "notes": Any additional info that doesn't fit above, or null

@@ -1400,25 +1400,7 @@ class IntentService:
                 return self._show_smart_capture_confirmation(user_id, extracted)
 
         if msg in ("yes", "y", "save", "confirm", "done", "ok", "okay", "sure"):
-            # Block save when poc_email is missing — it's mandatory because every
-            # invoice send needs a deliverable address. Loop back with a clear
-            # email-only re-prompt so the user knows what to type next.
-            if not extracted.get("poc_email"):
-                response = (
-                    "Almost there — I need the POC email before saving "
-                    "(e.g. 'rohan@thegoodtake.com'). It's required so we can "
-                    "email the invoice later. Reply with just the email."
-                )
-                form["values"] = extracted
-                self.memory.start_form(user_id, [], form_override=form)
-                self._store_conversation(user_id, message, response)
-                return {
-                    "operation": "smart_capture_email_required",
-                    "response": response,
-                    "trigger_invoice": False,
-                    "invoice_data": {},
-                }
-            # Save to database
+            # Save to database — POC fields are optional
             return self._save_smart_capture_job(user_id, extracted)
 
         elif msg in ("edit", "change", "modify", "fix", "no"):
@@ -1518,6 +1500,7 @@ class IntentService:
             "client_name": "client_name",
             "job_description_details": "job_description_details",
             "fees": "fees",
+            "paid": "paid",
             "poc_name": "poc_name",
             "poc_email": "poc_email",
             "notes": "notes",
@@ -1571,6 +1554,7 @@ class IntentService:
             ("job_date", "Date"),
             ("job_description_details", "Details"),
             ("fees", "Fees"),
+            ("paid", "Payment"),
             ("poc_name", "POC name"),
             ("poc_email", "POC email"),
             ("notes", "Notes"),
@@ -1580,38 +1564,11 @@ class IntentService:
             if val is not None:
                 if key == "fees":
                     val = f"₹{val:,}" if isinstance(val, (int, float)) else val
+                elif key == "paid":
+                    val = "Paid ✅" if str(val).lower() in ("true", "yes", "1") else "Unpaid"
                 lines.append(f"{label}: {val}")
 
-        # Tailored prompt based on what's still missing.
-        # poc_email is REQUIRED — no "save without" option. poc_name is optional
-        # at this card (the bot will fall back to brand/client name on invoice
-        # if the user explicitly skips it later).
-        _missing_email = not extracted.get("poc_email")
-        _missing_name  = not extracted.get("poc_name")
-
-        if _missing_email and _missing_name:
-            lines.append(
-                "\nStill need:\n"
-                "• POC name (e.g. 'Rohan Mehta')\n"
-                "• POC email (e.g. 'rohan@thegoodtake.com') — required for invoicing.\n"
-                "Reply with both in one message."
-            )
-            lines.append("\n(Saving needs the email — 'Yes' will be rejected until it's filled.)")
-        elif _missing_email:
-            lines.append(
-                "\nOne more thing — I need the POC email "
-                "(e.g. 'rohan@thegoodtake.com'). It's required so we can email "
-                "the invoice later."
-            )
-            lines.append("\n(Reply with the email — 'Yes' will be rejected until it's filled.)")
-        elif _missing_name:
-            lines.append(
-                "\n(Missing: POC name — reply with the name, "
-                "or 'Yes' to save and we'll use the brand/client name on the invoice.)"
-            )
-            lines.append("\nSave this job? (Yes / Edit)")
-        else:
-            lines.append("\nSave this job? (Yes / Edit)")
+        lines.append("\nSave this job? (Yes / Edit)")
         response = "\n".join(lines)
 
         # Store in form state for confirmation
@@ -1706,10 +1663,14 @@ class IntentService:
             self._store_conversation(user_id, content, response)
             return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Check required fields — POC name AND POC email are mandatory.
-        # Email is required because every invoice send needs a deliverable address;
-        # without it the invoice flow stalls asking for one later. Catch it up-front.
-        required = ["brand_name", "job_date", "job_description_details", "poc_name", "poc_email"]
+        # Default job_date to today if not extracted
+        if not extracted.get("job_date"):
+            from datetime import date as _date
+            extracted["job_date"] = _date.today().isoformat()
+
+        # Check required fields — brand, date, and description are mandatory.
+        # POC fields are optional: user can add them later or skip if not needed.
+        required = ["brand_name", "job_description_details"]
         missing = [f for f in required if not extracted.get(f)]
 
         if missing:
@@ -4533,11 +4494,11 @@ class IntentService:
 
         # "how many jobs" / "count" / "total jobs"
         if re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of)\b.*\b(jobs?|entr(?:y|ies)?|records?|work)\b', msg):
-            return f"SELECT COUNT(*) AS total_jobs FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
+            return f"SELECT COUNT(*) AS result FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
 
         # "total fees" / "total earnings" / "sum of fees"
         if re.search(r'\b(total|sum|overall)\b.*\b(fees?|earnings?|income|revenue|billing)\b', msg):
-            return f"SELECT SUM(fees) AS total_fees FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
+            return f"SELECT SUM(fees) AS result FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
 
         # "show all jobs" / "list jobs" / "my jobs"
         if re.search(r'\b(show|list|all|my)\b.*\b(jobs?|entr(?:y|ies)?|records?|work)\b', msg):
