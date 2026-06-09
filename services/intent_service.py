@@ -3290,6 +3290,22 @@ class IntentService:
             # (e.g. "jobs with invoice_date older than 60 days", "show unpaid invoices",
             # "how many invoices last month"). AI is far more reliable than keyword lists.
             is_retrieval = has_invoice_word
+            # Hard-keyword shortcut: if the message starts with a clear action verb
+            # followed by "invoice/bill/invoce/etc.", it is unambiguously an invoice
+            # action regardless of what any downstream AI classifier says. This prevents
+            # v2 READ_QUERY over-triggering on "Generate invoice for X for March".
+            _ACTION_VERBS = ("generate", "genrate", "generat", "create", "make", "build",
+                             "prepare", "send", "share", "email", "mail", "give", "get",
+                             "download", "fetch", "show me the invoice", "regenerate")
+            _invoice_action_definite = (
+                has_invoice_word
+                and (
+                    any(msg_lower.startswith(v) for v in _ACTION_VERBS)
+                    or any(f"{v} invoice" in msg_lower or f"{v} bill" in msg_lower
+                           or any(f"{v} {t}" in msg_lower for t in _INVOICE_TYPOS)
+                           for v in _ACTION_VERBS)
+                )
+            )
             if is_retrieval:
                 # First-line guard: defer to the v2 classifier when it confidently
                 # called this a READ. The legacy invoice keyword check used to
@@ -3297,7 +3313,8 @@ class IntentService:
                 # bhejna" bug. v2 has full multilingual context + the column
                 # registry's semantic mappings; it should win on reads.
                 _v2_says_read = (
-                    _v2_verdict is not None
+                    not _invoice_action_definite  # never downgrade a clear action verb
+                    and _v2_verdict is not None
                     and _v2_verdict.get("intent") in ("READ_QUERY", "READ_AGGREGATE")
                     and float(_v2_verdict.get("confidence") or 0) >= 0.85
                 )
@@ -3313,11 +3330,10 @@ class IntentService:
                     )
                     is_retrieval = False
                     has_invoice_word = False
-                elif _v2_says_invoice:
-                    # v2 already confirmed this is an invoice action — trust it and skip
-                    # the redundant is_invoice_action_request LLM call, which has been
-                    # returning False for valid invoice phrases (Acme, शोभा, typos).
-                    logger.info(f"[INVOICE_CHECK] v2 confirmed WRITE_INVOICE — skipping secondary AI check")
+                elif _invoice_action_definite or _v2_says_invoice:
+                    # Clear action verb or v2 confirmed WRITE_INVOICE — skip the
+                    # redundant is_invoice_action_request LLM call.
+                    logger.info(f"[INVOICE_CHECK] definite={_invoice_action_definite} v2_invoice={_v2_says_invoice} — skipping secondary AI check")
                 elif not self.gemini.is_invoice_action_request(message):
                     logger.info(f"[INVOICE_CHECK] AI rejected invoice routing for msg='{message[:80]}' — routing to query pipeline")
                     is_retrieval = False
