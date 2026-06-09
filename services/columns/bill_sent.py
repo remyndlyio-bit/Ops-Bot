@@ -49,18 +49,22 @@ _SQL_NOT_SENT = (
 
 def _classify(val: Any) -> Optional[bool]:
     """Reduce ANY value the AI might send into True (sent), False (not
-    sent), or None (couldn't tell — caller should fall through)."""
+    sent), or None (couldn't tell — caller should fall through).
+    Normalises 'not_null' / 'is_not_null' (underscore variants) the way
+    the planner sometimes emits them."""
     if val is None:
         return False  # treated as "not sent" — what 'bill_sent: null' means semantically
     if isinstance(val, str):
-        _v = val.strip().lower()
-        if _v in ("is null", "null"):
+        _v = val.strip().lower().replace(" ", "_")  # normalize spaces & underscores
+        if _v in ("is_null", "null"):
             return False
-        if _v in ("is not null", "not null", "any", "*"):
+        if _v in ("is_not_null", "not_null", "isnotnull", "any", "*"):
             return True
-        if _v in _TRUTHY_TOKENS:
+        # Strip underscores for token comparisons below (tokens are word-form)
+        _vt = _v.replace("_", "")
+        if _vt in _TRUTHY_TOKENS or _v in _TRUTHY_TOKENS:
             return True
-        if _v in _FALSY_TOKENS:
+        if _vt in _FALSY_TOKENS or _v in _FALSY_TOKENS:
             return False
         return None
     if isinstance(val, list):

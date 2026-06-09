@@ -24,14 +24,23 @@ def filter_handler(val: Any) -> Optional[str]:
     """poc_email is intentionally minimal — most queries don't filter on it,
     and the planner has a history of adding unsolicited NULL filters here
     that exclude deliverable rows. We only handle the explicit forms.
+
+    All variants of the "exists" / "doesn't exist" intent are normalized:
+        "is null", "null", "isnull"           → IS NULL
+        "is not null", "not null", "not_null" → IS NOT NULL
+        "isnotnull", "is_not_null"            → IS NOT NULL
+        "any", "*"                            → IS NOT NULL
+    Underscore variants matter — the planner has been seen emitting
+    {"poc_email": "not_null"} which used to fall through and produce
+    `poc_email ILIKE 'not_null'` (matches nothing).
     """
     if val is None:
         return "(poc_email IS NULL OR TRIM(poc_email) = '')"
     if isinstance(val, str):
-        _v = val.strip().lower()
-        if _v in ("is null", "null", ""):
+        _v = val.strip().lower().replace(" ", "_")  # normalize spaces & underscores
+        if _v in ("is_null", "null", "isnull", ""):
             return "(poc_email IS NULL OR TRIM(poc_email) = '')"
-        if _v in ("is not null", "not null", "any", "*"):
+        if _v in ("is_not_null", "not_null", "isnotnull", "any", "*"):
             return "(poc_email IS NOT NULL AND TRIM(poc_email) <> '')"
     return None  # fall through to generic ILIKE for actual address matches
 

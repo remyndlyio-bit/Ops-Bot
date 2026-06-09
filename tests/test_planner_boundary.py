@@ -117,6 +117,15 @@ class TestBillSent:
             sql = _build_filter_clause("bill_sent", val)
             assert "ILIKE" not in sql, f"ILIKE leaked for val={val!r}: {sql}"
 
+    def test_underscore_variants_recognised(self):
+        """Regression: planner sometimes emits 'not_null' / 'is_not_null'
+        with underscores instead of spaces. Both variants must map to the
+        truthy-bill_sent predicate."""
+        for variant in ("not_null", "is_not_null", "NOT_NULL"):
+            sql = _build_filter_clause("bill_sent", variant)
+            assert "ILIKE" not in sql, f"ILIKE leaked for {variant!r}: {sql}"
+            assert "poc_email" in sql or "IS NOT NULL" in sql, f"{variant!r} should mean sent: {sql}"
+
 
 # ════════════════════════════════════════════════════════════════════════
 # paid — same shape as bill_sent
@@ -221,6 +230,18 @@ class TestPocEmail:
     def test_is_not_null_explicit(self):
         sql = _build_filter_clause("poc_email", "IS NOT NULL")
         assert "IS NOT NULL" in sql
+
+    def test_not_null_underscore_variant(self):
+        """Regression (2026-06-09): planner emitted {poc_email: 'not_null'}
+        (underscore variant). Old registry only recognised 'not null' (space)
+        and fell through to ILIKE 'not_null' — matched nothing, COUNT
+        returned 0, synthesizer told the user 'I can't tell you'. Both
+        the underscore and space variants must map to IS NOT NULL."""
+        from services.query_planner import _build_filter_clause
+        for variant in ("not_null", "is_not_null", "isnotnull", "NOT_NULL", "Not_Null"):
+            sql = _build_filter_clause("poc_email", variant)
+            assert "IS NOT NULL" in sql, f"variant {variant!r} → {sql}"
+            assert "ILIKE" not in sql, f"ILIKE leaked for {variant!r}: {sql}"
 
     def test_actual_email_uses_ilike(self):
         """When the user IS searching for a specific email substring,

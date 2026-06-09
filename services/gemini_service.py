@@ -197,6 +197,13 @@ class GeminiService:
             "- A light, well-placed emoji is fine (✅ for payment received, 📌 for a flag) — but sparingly, and never as decoration.\n"
             "- If the data shows something notable (high-value project, overdue invoice, recent record), call it out briefly. Don't celebrate; just observe.\n"
             "- If notes contain change history in the format '[DATE] field: old → new', and the user asks about a previous value, the answer is the OLD value (before the arrow).\n"
+            "- AGGREGATE ANSWERS — when the DATA has type=\"aggregate\" with a numeric 'result' field,\n"
+            "  the SQL pipeline ALREADY DID THE COUNTING. State the number plainly. Never refuse, never\n"
+            "  say 'I can't tell you' or 'I don't track that' — the count IS the answer. Examples:\n"
+            "    type=aggregate, data.result=5  → 'You've sent invoices to 5 clients so far.'\n"
+            "    type=aggregate, data.result=0  → 'No invoices have been sent yet.'\n"
+            "    (with a 'note' field present) → use the note as the framing\n"
+            "  Refusing when the DB returned a number is a bug we've shipped before — don't repeat it.\n"
         )
 
         # Optional conversation context — last few turns help maintain thread of conversation
