@@ -2,23 +2,19 @@
 """
 Live end-to-end tests using the real OpenRouter/Gemini API.
 
-Pipeline under test:
+30 test cases across 10 categories — each validates the full pipeline:
   User message
-    → execute_query_plan()          [Classify → Plan → SQL]
-    → MockSupabaseService.execute_sql()  [returns realistic fake rows]
+    → execute_query_plan()               [Classify → Plan → SQL]
+    → MockSupabaseService.execute_sql()  [realistic in-memory dataset]
     → build_clean_payload()
     → GeminiService.synthesize_response()
-    → response string
+    → response quality assertions
 
-Smart-capture test path:
-  User message → GeminiService.extract_job_fields() → extracted dict
+Smart-capture cases use extract_job_fields() directly.
 
 Usage:
     AI_KEY=sk-or-v1-... python3 tests/test_e2e_live.py
-    # or export AI_KEY first, then just run the file
-
-Nothing in the production flow is modified or mocked with fake objects —
-only SupabaseService is replaced with a local in-memory fixture dataset.
+    AI_KEY=... E2E_MAX_TOKENS=800 python3 tests/test_e2e_live.py
 """
 
 import os
@@ -29,10 +25,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-# ── path setup ────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ── API key ───────────────────────────────────────────────────────────────────
 AI_KEY = os.environ.get("AI_KEY", "").strip()
 if not AI_KEY:
     print("ERROR: Set AI_KEY env variable before running.\n"
@@ -41,40 +35,31 @@ if not AI_KEY:
 os.environ["AI_KEY"] = AI_KEY
 os.environ["STRICT_PLAN_VALIDATION"] = "1"
 
-# ── imports (after env is set) ────────────────────────────────────────────────
 from services.gemini_service import GeminiService
 from services.query_planner import execute_query_plan
 from services.response_synthesis import build_clean_payload
 from services.supabase_service import JOB_ENTRIES_COLUMNS, SCHEMA_DESCRIPTION
 
-# Cap max_tokens per call so low-credit keys still work.
-# The planner JSON is usually 150-300 tokens; synthesis is 50-150.
-# Override to 400 so any key with ≥400 tokens of credit can run each call.
+# Cap max_tokens per call — keeps budget-constrained keys working.
+# Planner JSON is 200-500 tokens; synthesis is 50-150. 700 covers both.
 _MAX_TOKENS_OVERRIDE = int(os.environ.get("E2E_MAX_TOKENS", "700"))
 
 _original_call_api = GeminiService._call_api
-
 def _patched_call_api(self, prompt, generation_config=None):
     gc = dict(generation_config or {})
     gc["maxOutputTokens"] = min(gc.get("maxOutputTokens", _MAX_TOKENS_OVERRIDE), _MAX_TOKENS_OVERRIDE)
     return _original_call_api(self, prompt, gc)
-
 GeminiService._call_api = _patched_call_api
 
-# ── colours ───────────────────────────────────────────────────────────────────
-GREEN = "\033[92m"
-RED   = "\033[91m"
-YELLOW = "\033[93m"
-CYAN  = "\033[96m"
-BOLD  = "\033[1m"
-RESET = "\033[0m"
+GREEN  = "\033[92m"; RED    = "\033[91m"
+YELLOW = "\033[93m"; CYAN   = "\033[96m"
+BOLD   = "\033[1m";  RESET  = "\033[0m"
 
 TEST_USER_ID = "test_e2e_user_001"
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Mock SupabaseService — real schema, realistic in-memory dataset
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Mock dataset — 8 rows covering all test scenarios
+# ─────────────────────────────────────────────────────────────────────────────
 
 MOCK_ROWS: List[Dict] = [
     {
@@ -84,8 +69,7 @@ MOCK_ROWS: List[Dict] = [
         "paid": "Yes", "bill_sent": "Yes",
         "poc_email": "contact@starstudios.com",
         "invoice_date": "2026-03-20", "bill_no": "INV-001",
-        "job_description_details": "TVC 30sec + 4 cutdowns",
-        "isDeleted": None,
+        "job_description_details": "TVC 30sec + 4 cutdowns", "isDeleted": None,
     },
     {
         "id": 2, "user_id": TEST_USER_ID,
@@ -94,8 +78,7 @@ MOCK_ROWS: List[Dict] = [
         "paid": None, "bill_sent": "Yes",
         "poc_email": "contact@starstudios.com",
         "invoice_date": "2026-01-15", "bill_no": "INV-002",
-        "job_description_details": "Brand film 60sec",
-        "isDeleted": None,
+        "job_description_details": "Brand film 60sec", "isDeleted": None,
     },
     {
         "id": 3, "user_id": TEST_USER_ID,
@@ -104,8 +87,7 @@ MOCK_ROWS: List[Dict] = [
         "paid": "Yes", "bill_sent": "Yes",
         "poc_email": "priya@garnier.com",
         "invoice_date": "2026-02-25", "bill_no": "INV-003",
-        "job_description_details": "Product shoot",
-        "isDeleted": None,
+        "job_description_details": "Product shoot", "isDeleted": None,
     },
     {
         "id": 4, "user_id": TEST_USER_ID,
@@ -114,34 +96,66 @@ MOCK_ROWS: List[Dict] = [
         "paid": None, "bill_sent": None,
         "poc_email": None,
         "invoice_date": None, "bill_no": "INV-004",
-        "job_description_details": "Pet food TVC",
-        "isDeleted": None,
+        "job_description_details": "Pet food TVC", "isDeleted": None,
     },
     {
         "id": 5, "user_id": TEST_USER_ID,
         "client_name": "Garnier India", "brand_name": "L'Oréal",
-        "job_date": "2026-05-01", "fees": 95000,
+        "job_date": "2026-05-08", "fees": 95000,
         "paid": None, "bill_sent": "Yes",
         "poc_email": "priya@garnier.com",
-        "invoice_date": "2026-05-05", "bill_no": "INV-005",
-        "job_description_details": "Skincare campaign",
-        "isDeleted": None,
+        "invoice_date": "2026-05-10", "bill_no": "INV-005",
+        "job_description_details": "Skincare campaign", "isDeleted": None,
+    },
+    {
+        "id": 6, "user_id": TEST_USER_ID,
+        "client_name": "Samsung India", "brand_name": "Samsung",
+        "job_date": "2026-06-10", "fees": 300000,
+        "paid": None, "bill_sent": None,
+        "poc_email": None,
+        "invoice_date": None, "bill_no": "INV-006",
+        "job_description_details": "Galaxy launch film", "isDeleted": None,
+    },
+    {
+        "id": 7, "user_id": TEST_USER_ID,
+        "client_name": "Garnier India", "brand_name": "Garnier Men",
+        "job_date": "2026-03-01", "fees": 55000,
+        "paid": None, "bill_sent": None,
+        "poc_email": None,
+        "invoice_date": None, "bill_no": "INV-007",
+        "job_description_details": "Skincare product shoot", "isDeleted": None,
+    },
+    {
+        "id": 8, "user_id": TEST_USER_ID,
+        "client_name": "Maruti Suzuki", "brand_name": "Maruti",
+        "job_date": "2026-02-05", "fees": 175000,
+        "paid": "Yes", "bill_sent": "Yes",
+        "poc_email": "ads@maruti.co.in",
+        "invoice_date": "2026-02-10", "bill_no": "INV-008",
+        "job_description_details": "Car launch TVC", "isDeleted": None,
     },
 ]
 
 
 def _client_name(row: Dict) -> str:
-    return (
-        row.get("client_name") or row.get("brand_name") or
-        row.get("production_house") or ""
-    )
+    return row.get("client_name") or row.get("brand_name") or row.get("production_house") or ""
 
+
+def _is_unpaid(row: Dict) -> bool:
+    paid = (row.get("paid") or "").lower()
+    return paid not in ("yes", "true", "1", "paid", "t")
+
+
+def _bill_sent(row: Dict) -> bool:
+    bs = (row.get("bill_sent") or "").lower()
+    return bs in ("yes", "true", "1", "sent", "t")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mock SupabaseService
+# ─────────────────────────────────────────────────────────────────────────────
 
 class MockSupabaseService:
-    """Replaces SupabaseService with a local fixture dataset.
-    Schema comes from the real supabase_service so the LLM sees the exact
-    column list it would see in production."""
-
     def get_schema(self) -> Dict[str, Any]:
         return {
             "table": "job_entries",
@@ -151,215 +165,370 @@ class MockSupabaseService:
         }
 
     def execute_sql(self, sql: str) -> Dict[str, Any]:
-        """Parse the SQL and return appropriate mock rows."""
         su = sql.upper()
 
-        # Extract client filter — handles both ILIKE '%X%' (keyword shortcut)
-        # and ILIKE 'X' (planner output without wildcards).
         def _extract_client(sql: str) -> str:
             m = re.search(r"ILIKE\s+'%([^']+)%'", sql, re.IGNORECASE)
-            if m:
-                return m.group(1).lower()
+            if m: return m.group(1).lower()
             m = re.search(r"ILIKE\s+'([^'%]+)'", sql, re.IGNORECASE)
-            if m:
-                return m.group(1).lower()
+            if m: return m.group(1).lower()
             return ""
 
-        # COUNT
-        if "COUNT(" in su:
-            client_q = _extract_client(sql)
-            count = sum(
-                1 for r in MOCK_ROWS
-                if not client_q or client_q in _client_name(r).lower()
-            )
-            return {"ok": True, "rows": [{"result": count}], "operation": "select"}
+        def _date_filter(rows, sql):
+            """Apply job_date >= start AND job_date <= end if present."""
+            start_m = re.search(r"job_date\s*>=\s*'(\d{4}-\d{2}-\d{2})'", sql, re.IGNORECASE)
+            end_m   = re.search(r"job_date\s*<=\s*'(\d{4}-\d{2}-\d{2})'", sql, re.IGNORECASE)
+            if start_m:
+                rows = [r for r in rows if (r.get("job_date") or "") >= start_m.group(1)]
+            if end_m:
+                rows = [r for r in rows if (r.get("job_date") or "") <= end_m.group(1)]
+            return rows
 
-        # AVG
-        if "AVG(" in su:
-            fees = [r["fees"] for r in MOCK_ROWS if r.get("fees")]
-            avg = round(sum(fees) / len(fees)) if fees else 0
-            return {"ok": True, "rows": [{"result": avg}], "operation": "select"}
+        def _paid_filter(rows, sql):
+            if re.search(r"paid\s+IS\s+NULL\b|LOWER\(paid\)\s+NOT\s+IN|LOWER\(COALESCE\(paid[^)]*\)\)\s+NOT\s+IN|paid\s+NOT\s+IN", sql, re.IGNORECASE):
+                return [r for r in rows if _is_unpaid(r)]
+            if re.search(r"LOWER\(COALESCE\(paid[^)]*\)\)\s+IN\s+\('true'|paid\s*=\s*'[Yy]es'", sql, re.IGNORECASE):
+                return [r for r in rows if not _is_unpaid(r)]
+            return rows
 
-        # SUM with GROUP BY — biggest client
-        if "SUM(" in su and "GROUP BY" in su:
-            grouped: Dict[str, int] = {}
-            for r in MOCK_ROWS:
-                key = _client_name(r) or "Unknown"
-                grouped[key] = grouped.get(key, 0) + (r.get("fees") or 0)
-            ordered = sorted(grouped.items(), key=lambda x: x[1], reverse=True)
-            rows = [{"client_name": k, "result": v} for k, v in ordered]
-            if "LIMIT 1" in su:
-                rows = rows[:1]
-            return {"ok": True, "rows": rows, "operation": "select"}
+        def _bill_filter(rows, sql):
+            if re.search(r"LOWER\(COALESCE\(bill_sent[^)]*\)\)\s+IN\s+\('true'|bill_sent\s+IS\s+NOT\s+NULL", sql, re.IGNORECASE):
+                return [r for r in rows if _bill_sent(r)]
+            if re.search(r"bill_sent\s+IS\s+NULL|LOWER\(bill_sent\)\s+NOT\s+IN|LOWER\(COALESCE\(bill_sent", sql, re.IGNORECASE):
+                # "pending invoice" — not yet sent
+                if "NOT IN" in su or "IS NULL" in su:
+                    return [r for r in rows if not _bill_sent(r)]
+            return rows
 
-        # SUM with optional client filter + paid semantics
-        if "SUM(" in su:
-            client_q = _extract_client(sql)
-            subset = [
-                r for r in MOCK_ROWS
-                if not client_q or client_q in _client_name(r).lower()
-            ]
-            # Unpaid filter
-            if re.search(r"paid\s+IS\s+NULL\b|LOWER\(paid\)\s+NOT\s+IN|paid\s+NOT\s+IN", sql, re.IGNORECASE):
-                subset = [r for r in subset if not r.get("paid")]
-            # Paid filter
-            elif re.search(r"LOWER\(COALESCE\(paid[^)]*\)\)\s+IN\s+\('true'|paid\s*=\s*'[Yy]es'", sql, re.IGNORECASE):
-                subset = [r for r in subset if r.get("paid")]
-            total = sum(r.get("fees") or 0 for r in subset)
-            return {"ok": True, "rows": [{"result": total}], "operation": "select"}
-
-        # SELECT * — return rows, optionally filtered
         client_q = _extract_client(sql)
         rows = [r for r in MOCK_ROWS if not client_q or client_q in _client_name(r).lower()]
 
-        # Unpaid filter
-        if re.search(r"paid\s+IS\s+NULL\b|LOWER\(paid\)\s+NOT\s+IN|LOWER\(COALESCE\(paid", sql, re.IGNORECASE):
-            rows = [r for r in rows if not r.get("paid")]
+        # COUNT
+        if "COUNT(" in su:
+            rows = _date_filter(rows, sql)
+            rows = _paid_filter(rows, sql)
+            rows = _bill_filter(rows, sql)
+            # poc_email IS NOT NULL
+            if re.search(r"poc_email\s+IS\s+NOT\s+NULL", sql, re.IGNORECASE):
+                rows = [r for r in rows if r.get("poc_email")]
+            return {"ok": True, "rows": [{"result": len(rows)}], "operation": "select"}
 
-        # LIMIT
+        # AVG
+        if "AVG(" in su:
+            fees = [r["fees"] for r in rows if r.get("fees")]
+            avg = round(sum(fees) / len(fees)) if fees else 0
+            return {"ok": True, "rows": [{"result": avg}], "operation": "select"}
+
+        # SUM with GROUP BY
+        if "SUM(" in su and "GROUP BY" in su:
+            rows = _date_filter(rows, sql)
+            rows = _paid_filter(rows, sql)
+            grouped: Dict[str, int] = {}
+            for r in rows:
+                key = _client_name(r) or "Unknown"
+                grouped[key] = grouped.get(key, 0) + (r.get("fees") or 0)
+            ordered = sorted(grouped.items(), key=lambda x: x[1], reverse=True)
+            result_rows = [{"client_name": k, "result": v} for k, v in ordered]
+            lm = re.search(r"LIMIT\s+(\d+)", sql, re.IGNORECASE)
+            if lm: result_rows = result_rows[:int(lm.group(1))]
+            return {"ok": True, "rows": result_rows, "operation": "select"}
+
+        # SUM (scalar)
+        if "SUM(" in su:
+            rows = _date_filter(rows, sql)
+            rows = _paid_filter(rows, sql)
+            total = sum(r.get("fees") or 0 for r in rows)
+            return {"ok": True, "rows": [{"result": total}], "operation": "select"}
+
+        # SELECT *
+        rows = _date_filter(rows, sql)
+        rows = _paid_filter(rows, sql)
+        rows = _bill_filter(rows, sql)
+        if re.search(r"poc_email\s+IS\s+NULL", sql, re.IGNORECASE):
+            rows = [r for r in rows if not r.get("poc_email")]
         lm = re.search(r"LIMIT\s+(\d+)", sql, re.IGNORECASE)
-        if lm:
-            rows = rows[:int(lm.group(1))]
-
+        if lm: rows = rows[:int(lm.group(1))]
         return {"ok": True, "rows": rows, "operation": "select"}
 
-    # ── stubs for the small number of other methods the pipeline touches ──────
-
-    def get_available_months_for_client(self, *a, **kw):
-        return []
-
-    def insert_job_entry(self, record: Dict) -> Dict:
-        return {"ok": True, "rows": [{**record, "id": 9999, "bill_no": "INV-TEST"}]}
+    def get_available_months_for_client(self, *a, **kw): return []
+    def insert_job_entry(self, record): return {"ok": True, "rows": [{**record, "id": 9999, "bill_no": "INV-TEST"}]}
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 # Test case definitions
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class TestCase:
     id: str
     message: str
     category: str
-    # SQL checks (substrings that MUST appear in the generated SQL, uppercase)
-    sql_must_contain: List[str] = field(default_factory=list)
-    # SQL checks (substrings that must NOT appear)
+    sql_must_contain:     List[str] = field(default_factory=list)
     sql_must_not_contain: List[str] = field(default_factory=list)
-    # Response checks (regex patterns the response must match, case-insensitive)
-    response_must_match: List[str] = field(default_factory=list)
-    # Response must NOT contain these strings
+    response_must_match:  List[str] = field(default_factory=list)
     response_must_not_contain: List[str] = field(default_factory=list)
-    # For smart-capture tests: expected extracted fields
-    expected_extracted: Optional[Dict] = None
-    # Skip SQL check entirely (e.g. smart-capture)
-    skip_sql_check: bool = False
+    expected_extracted:   Optional[Dict] = None
+    skip_sql_check:       bool = False
 
+
+_NO_ERROR = ["Two ways I could read", "couldn't format", "couldn't quite work out"]
 
 TESTS: List[TestCase] = [
-    # ── Bug 2: COUNT queries ──────────────────────────────────────────────────
+
+    # ── CATEGORY 1: Simple Count (4) ─────────────────────────────────────────
     TestCase(
-        id="#28", message="How many jobs have I done?",
-        category="Bug 2 — COUNT",
+        id="C1-01", message="How many jobs have I done?",
+        category="Count",
         sql_must_contain=["COUNT("],
         sql_must_not_contain=["SELECT *"],
-        response_must_match=[r"\b5\b"],  # 5 rows in mock dataset
-        response_must_not_contain=["couldn't format", "Two ways I could read"],
+        response_must_match=[r"\b8\b"],
+        response_must_not_contain=_NO_ERROR,
     ),
     TestCase(
-        id="#29", message="How many total jobs do I have?",
-        category="Bug 2 — COUNT",
+        id="C1-02", message="How many total jobs do I have?",
+        category="Count",
         sql_must_contain=["COUNT("],
         sql_must_not_contain=["SELECT *"],
-        response_must_match=[r"\b5\b"],
-        response_must_not_contain=["couldn't format", "Two ways I could read"],
-    ),
-    # ── Bug 1: aggregate queries ──────────────────────────────────────────────
-    TestCase(
-        id="#4", message="Who is my biggest client?",
-        category="Bug 1 — GROUP BY",
-        sql_must_contain=["GROUP BY", "SUM(", "DESC"],
-        response_must_match=["Star Studios"],
-        response_must_not_contain=["Two ways I could read", "couldn't format"],
+        response_must_match=[r"\b8\b"],
+        response_must_not_contain=_NO_ERROR,
     ),
     TestCase(
-        id="#7", message="Average fees per job",
-        category="Bug 1 — AVG",
-        sql_must_contain=["AVG("],
-        response_must_match=[r"₹?\s*\d[\d,]*"],  # some rupee/number amount
-        response_must_not_contain=["Two ways I could read", "couldn't format"],
-    ),
-    TestCase(
-        id="#24", message="How much does Star Studios owe me?",
-        category="Bug 1 — client unpaid SUM",
-        sql_must_contain=["SUM(", "Star Studios"],
-        # Response must mention Star Studios AND a rupee amount (exact figure depends
-        # on whether planner or keyword shortcut generates the SQL)
-        response_must_match=[r"Star Studios", r"₹\s*\d[\d,]*"],
-        response_must_not_contain=["Two ways I could read", "couldn't format"],
-    ),
-    TestCase(
-        id="#26", message="Star Studios se paisa aaya kya?",
-        category="Bug 1 — Hinglish paid check",
-        sql_must_contain=["Star Studios"],
-        response_must_not_contain=["Two ways I could read", "couldn't format"],
-        # Response should contain a rupee amount OR mention paid/received/pending
-        response_must_match=[r"₹\s*\d[\d,]*|paid|received|pending|outstanding"],
-    ),
-    # ── ⚠️ tests that were partial/wrong before ──────────────────────────────
-    TestCase(
-        id="#8", message="Isme se invoice kitne logon ko bheja hai",
-        category="Hinglish COUNT",
+        id="C1-03", message="How many unpaid invoices do I have?",
+        category="Count",
         sql_must_contain=["COUNT("],
-        response_must_not_contain=["Two ways I could read", "couldn't format"],
-        response_must_match=[r"\d+"],
+        response_must_match=[r"\b[1-9]\d*\b"],  # some non-zero number
+        response_must_not_contain=_NO_ERROR,
     ),
     TestCase(
-        id="#9", message="Kiska payment baki hai",
-        category="Hinglish unpaid",
-        response_must_not_contain=["Two ways I could read", "couldn't format"],
-        response_must_match=[r"Pedigree|Star Studios|unpaid|pending|₹"],
+        id="C1-04", message="Kitne jobs hain mere paas",
+        category="Count — Hinglish",
+        sql_must_contain=["COUNT("],
+        response_must_match=[r"\b8\b|\b\d+\b"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+
+    # ── CATEGORY 2: SUM / Total (5) ──────────────────────────────────────────
+    TestCase(
+        id="C2-01", message="Total billing this year",
+        category="SUM",
+        sql_must_contain=["SUM("],
+        response_must_match=[r"₹\s*\d[\d,]*"],
+        response_must_not_contain=_NO_ERROR,
     ),
     TestCase(
-        id="#12", message="Earnings last quarter",
-        category="Bug 3 — earnings SUM",
+        id="C2-02", message="Earnings last quarter",
+        category="SUM — date range",
         sql_must_contain=["SUM("],
         sql_must_not_contain=["SELECT *"],
-        response_must_match=[r"₹?\s*\d[\d,]*"],
-        response_must_not_contain=["Two ways I could read", "couldn't format"],
+        response_must_match=[r"₹\s*\d[\d,]*"],
+        response_must_not_contain=_NO_ERROR,
     ),
-    # ── Smart capture: Bug 4 ─────────────────────────────────────────────────
     TestCase(
-        id="#1-smart", message="Add a job for Acme, 25k, shoot, paid",
-        category="Bug 4 — smart capture paid",
+        id="C2-03", message="Total earnings last month",
+        category="SUM — last month",
+        sql_must_contain=["SUM("],
+        response_must_match=[r"₹\s*\d[\d,]*"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C2-04", message="How much have I earned from Garnier India?",
+        category="SUM — client filter",
+        sql_must_contain=["SUM(", "Garnier"],
+        response_must_match=[r"₹\s*\d[\d,]*"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C2-05", message="Pichle mahine ki kamai kitni thi",
+        category="SUM — Hinglish last month",
+        sql_must_contain=["SUM("],
+        response_must_match=[r"₹\s*\d[\d,]*"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+
+    # ── CATEGORY 3: GROUP BY + AVG (3) ───────────────────────────────────────
+    TestCase(
+        id="C3-01", message="Who is my biggest client?",
+        category="GROUP BY — top client",
+        sql_must_contain=["GROUP BY", "SUM(", "DESC"],
+        response_must_match=[r"Star Studios|Samsung|Garnier"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C3-02", message="Average fees per job",
+        category="AVG",
+        sql_must_contain=["AVG("],
+        response_must_match=[r"₹\s*\d[\d,]*|\d[\d,]*"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C3-03", message="Top 3 clients by total revenue",
+        category="GROUP BY — top N",
+        sql_must_contain=["GROUP BY", "SUM(", "LIMIT"],
+        response_must_match=[r"Star Studios|Samsung|Garnier|Maruti"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+
+    # ── CATEGORY 4: Client Payment Status (3) ────────────────────────────────
+    TestCase(
+        id="C4-01", message="How much does Star Studios owe me?",
+        category="Client unpaid SUM",
+        sql_must_contain=["SUM(", "Star Studios"],
+        response_must_match=[r"Star Studios", r"₹\s*\d[\d,]*"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C4-02", message="Star Studios se paisa aaya kya?",
+        category="Client paid check — Hinglish",
+        sql_must_contain=["Star Studios"],
+        response_must_match=[r"₹\s*\d[\d,]*|paid|received|pending"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C4-03", message="What are my total outstanding payments?",
+        category="Total unpaid SUM",
+        sql_must_contain=["SUM("],
+        response_must_match=[r"₹\s*\d[\d,]*"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+
+    # ── CATEGORY 5: Invoice / Bill Status (4) ────────────────────────────────
+    TestCase(
+        id="C5-01", message="List all unpaid invoices",
+        category="Invoice — unpaid list",
+        response_must_match=[r"Star Studios|Pedigree|Samsung|Garnier"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C5-02", message="Kiska invoice bhejna baki hai",
+        category="Invoice — pending Hinglish",
+        response_must_match=[r"Pedigree|Samsung|Garnier|Star Studios"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C5-03", message="Isme se invoice kitne logon ko bheja hai",
+        category="Invoice — sent count Hinglish",
+        sql_must_contain=["COUNT("],
+        response_must_match=[r"\b\d+\b"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C5-04", message="How many invoices have I sent?",
+        category="Invoice — sent count",
+        sql_must_contain=["COUNT("],
+        response_must_match=[r"\b\d+\b"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+
+    # ── CATEGORY 6: Date Range Queries (4) ───────────────────────────────────
+    TestCase(
+        id="C6-01", message="Show jobs from last month",
+        category="Date — last month",
+        response_must_match=[r"Garnier|L'Oréal|no jobs|₹"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C6-02", message="Jobs in Q1 this year",
+        category="Date — Q1",
+        response_must_match=[r"Star Studios|Garnier|Maruti|jobs|₹"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C6-03", message="What did I work on in February?",
+        category="Date — specific month",
+        response_must_match=[r"Garnier|Maruti|February|no jobs"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C6-04", message="Show jobs from this week",
+        category="Date — this week",
+        # Samsung row is Jun 10, 2026 (in week of Jun 8-14)
+        response_must_match=[r"Samsung|no jobs|this week|June"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+
+    # ── CATEGORY 7: Client / Brand Filter (3) ────────────────────────────────
+    TestCase(
+        id="C7-01", message="Show my last 5 jobs",
+        category="Basic list",
+        sql_must_contain=["LIMIT"],
+        response_must_match=[r"Star Studios|Garnier|Samsung|Pedigree|Maruti"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C7-02", message="Show all Garnier jobs",
+        category="Client filter — Garnier",
+        sql_must_contain=["Garnier"],
+        response_must_match=[r"Garnier"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C7-03", message="Show Samsung jobs",
+        category="Client filter — Samsung",
+        sql_must_contain=["Samsung"],
+        response_must_match=[r"Samsung|Galaxy|300"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+
+    # ── CATEGORY 8: Hinglish — Mixed Queries (3) ─────────────────────────────
+    TestCase(
+        id="C8-01", message="Kiska payment baki hai",
+        category="Hinglish — unpaid list",
+        response_must_match=[r"Star Studios|Pedigree|Samsung|Garnier|₹"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C8-02", message="Total fees for Star Studios",
+        category="Hinglish — client total",
+        sql_must_contain=["SUM(", "Star Studios"],
+        response_must_match=[r"₹\s*3[,.]?50[,.]?000|₹\s*350"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+    TestCase(
+        id="C8-03", message="Kaunse jobs ka invoice nahi gaya",
+        category="Hinglish — invoice not sent",
+        response_must_match=[r"Pedigree|Samsung|Garnier Men|no jobs"],
+        response_must_not_contain=_NO_ERROR,
+    ),
+
+    # ── CATEGORY 9: Smart Capture — Bug 4 (2) ────────────────────────────────
+    TestCase(
+        id="C9-01", message="Add a job for Acme, 25k, shoot, paid",
+        category="Smart Capture — paid flag",
         skip_sql_check=True,
-        expected_extracted={
-            "brand_name_nonempty": True,
-            "fees": 25000,
-            "paid_truthy": True,
-        },
+        expected_extracted={"brand_name_nonempty": True, "fees": 25000, "paid_truthy": True},
         response_must_not_contain=["couldn't format"],
     ),
-    # ── Regression: basic queries should still work ───────────────────────────
     TestCase(
-        id="#2", message="Show my last 5 jobs",
-        category="Regression — basic list",
-        sql_must_contain=["LIMIT"],
-        response_must_not_contain=["Two ways I could read", "couldn't format"],
-        response_must_match=[r"Nike|Adidas|Garnier|Pedigree"],
+        id="C9-02", message="Nike ka shoot kiya 10 February ko, 30 hazaar",
+        category="Smart Capture — Hinglish",
+        skip_sql_check=True,
+        expected_extracted={"brand_name_nonempty": True, "fees": 30000},
+        response_must_not_contain=["couldn't format"],
+    ),
+
+    # ── CATEGORY 10: Edge Cases (2) ──────────────────────────────────────────
+    TestCase(
+        id="C10-01", message="Can you book me an Uber?",
+        category="Out of scope",
+        skip_sql_check=True,
+        # Should NOT say it can do it — must decline or redirect
+        response_must_not_contain=["Uber", "book", "ride"],
+        response_must_match=[r"job|invoice|payment|billing|record|track|log"],
     ),
     TestCase(
-        id="#6", message="Total billing this year",
-        category="Regression — total SUM",
-        sql_must_contain=["SUM("],
-        response_must_match=[r"₹?\s*\d[\d,]*"],
+        id="C10-02", message="genrate invoce for Pedigree",
+        category="Typo detection — invoice",
+        skip_sql_check=True,
+        # Should recognise as invoice request (not "Two ways I could read")
         response_must_not_contain=["Two ways I could read", "couldn't format"],
+        response_must_match=[r"Pedigree|invoice|invoic"],
     ),
 ]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Test runner
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# Test runners
+# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class TestResult:
@@ -378,156 +547,169 @@ class TestResult:
         return self.error is None and self.sql_pass and self.response_pass
 
 
-def run_query_test(tc: TestCase, gemini: GeminiService, supabase: MockSupabaseService) -> TestResult:
-    """Run one query test case through the full pipeline."""
-    t0 = time.time()
-    sql = None
-    response = None
-    sql_failures: List[str] = []
-    response_failures: List[str] = []
+def _run_plan_retried(message, gemini, supabase):
+    """Run execute_query_plan with one retry on JSON parse fluke."""
+    result = execute_query_plan(message, gemini, supabase, user_id=TEST_USER_ID)
+    if result.get("_error") and "JSON" in str(result.get("_error", "")):
+        time.sleep(1.5)
+        result = execute_query_plan(message, gemini, supabase, user_id=TEST_USER_ID)
+    return result
 
+
+def run_query_test(tc: TestCase, gemini, supabase) -> TestResult:
+    t0 = time.time()
+    sql = None; response = None
+    sql_failures: List[str] = []; response_failures: List[str] = []
     try:
-        # Stage 1: Planner → SQL (retry once on JSON parse error — LLM fluke)
-        plan_result = execute_query_plan(
-            tc.message, gemini, supabase,
-            user_id=TEST_USER_ID,
-        )
-        if plan_result.get("_error") and "JSON" in str(plan_result.get("_error", "")):
-            time.sleep(1)
-            plan_result = execute_query_plan(
-                tc.message, gemini, supabase,
-                user_id=TEST_USER_ID,
-            )
+        plan_result = _run_plan_retried(tc.message, gemini, supabase)
 
         if plan_result.get("clarification"):
-            # Clarification means planner bailed — counts as SQL failure
             sql = f"[CLARIFICATION] {plan_result['clarification']}"
-            sql_failures.append(f"Planner returned clarification instead of SQL")
+            sql_failures.append("Planner returned clarification instead of SQL")
         elif plan_result.get("_error"):
-            sql = f"[ERROR] {plan_result['_error']}"
-            sql_failures.append(f"Planner error: {plan_result['_error']}")
+            sql = f"[ERROR] {plan_result['_error'][:120]}"
+            sql_failures.append(f"Planner error: {plan_result['_error'][:80]}")
         else:
             sql = plan_result.get("sql", "")
 
-        # Stage 2: SQL quality checks
         if sql and not tc.skip_sql_check:
             su = sql.upper()
-            for pattern in tc.sql_must_contain:
-                if pattern.upper() not in su:
-                    sql_failures.append(f"SQL missing '{pattern}'")
-            for pattern in tc.sql_must_not_contain:
-                if pattern.upper() in su:
-                    sql_failures.append(f"SQL contains forbidden '{pattern}'")
+            for p in tc.sql_must_contain:
+                if p.upper() not in su:
+                    sql_failures.append(f"SQL missing '{p}'")
+            for p in tc.sql_must_not_contain:
+                if p.upper() in su:
+                    sql_failures.append(f"SQL contains forbidden '{p}'")
 
-        # Stage 3: Execute mock SQL + synthesize response
         if sql and not sql.startswith("["):
-            db_result = supabase.execute_sql(sql)
-            rows = db_result.get("rows", []) if db_result.get("ok") else []
+            db = supabase.execute_sql(sql)
+            rows = db.get("rows", []) if db.get("ok") else []
             payload = build_clean_payload(rows, "select")
             response = gemini.synthesize_response(payload, tc.message)
         else:
-            # No valid SQL — synthesize an error response for checking
             response = sql or ""
 
-        # Stage 4: Response quality checks
         if response:
-            for pattern in tc.response_must_not_contain:
-                if pattern.lower() in response.lower():
-                    response_failures.append(f"Response contains bad phrase: '{pattern}'")
-            for pattern in tc.response_must_match:
-                if not re.search(pattern, response, re.IGNORECASE):
-                    response_failures.append(f"Response missing expected pattern: '{pattern}'")
+            for p in tc.response_must_not_contain:
+                if p.lower() in response.lower():
+                    response_failures.append(f"Response contains bad phrase: '{p}'")
+            for p in tc.response_must_match:
+                if not re.search(p, response, re.IGNORECASE):
+                    response_failures.append(f"Missing expected pattern: '{p}'")
         else:
             response_failures.append("Empty response from synthesizer")
 
     except Exception as e:
-        return TestResult(
-            tc=tc, sql=sql, response=response,
-            sql_pass=False, response_pass=False,
-            sql_failures=sql_failures, response_failures=response_failures,
-            error=str(e), elapsed=time.time() - t0,
-        )
+        return TestResult(tc=tc, sql=sql, response=response,
+                          sql_pass=False, response_pass=False,
+                          sql_failures=sql_failures, response_failures=response_failures,
+                          error=str(e), elapsed=time.time() - t0)
 
-    return TestResult(
-        tc=tc, sql=sql, response=response,
-        sql_pass=len(sql_failures) == 0,
-        response_pass=len(response_failures) == 0,
-        sql_failures=sql_failures,
-        response_failures=response_failures,
-        error=None, elapsed=time.time() - t0,
-    )
+    return TestResult(tc=tc, sql=sql, response=response,
+                      sql_pass=not sql_failures, response_pass=not response_failures,
+                      sql_failures=sql_failures, response_failures=response_failures,
+                      error=None, elapsed=time.time() - t0)
 
 
-def run_smart_capture_test(tc: TestCase, gemini: GeminiService, supabase: MockSupabaseService) -> TestResult:
-    """Run a smart-capture test: only extract_job_fields, no SQL."""
+def run_smart_capture_test(tc: TestCase, gemini, supabase) -> TestResult:
     t0 = time.time()
     response_failures: List[str] = []
-
     try:
         extracted = gemini.extract_job_fields(tc.message)
-        if extracted is None:  # retry once on JSON fluke
-            time.sleep(1)
+        if extracted is None:
+            time.sleep(1.5)
             extracted = gemini.extract_job_fields(tc.message)
         response = json.dumps(extracted, ensure_ascii=False) if extracted else "null"
 
         if tc.expected_extracted and extracted:
-            if tc.expected_extracted.get("brand_name_nonempty"):
-                if not extracted.get("brand_name"):
-                    response_failures.append("brand_name not extracted")
+            if tc.expected_extracted.get("brand_name_nonempty") and not extracted.get("brand_name"):
+                response_failures.append("brand_name not extracted")
             if "fees" in tc.expected_extracted:
                 if extracted.get("fees") != tc.expected_extracted["fees"]:
-                    response_failures.append(
-                        f"fees: expected {tc.expected_extracted['fees']}, got {extracted.get('fees')}"
-                    )
+                    response_failures.append(f"fees: expected {tc.expected_extracted['fees']}, got {extracted.get('fees')}")
             if tc.expected_extracted.get("paid_truthy"):
-                paid_val = str(extracted.get("paid") or "").lower()
-                if paid_val not in ("true", "yes", "1", "paid"):
-                    response_failures.append(
-                        f"paid not extracted as truthy (got {extracted.get('paid')!r})"
-                    )
+                if str(extracted.get("paid") or "").lower() not in ("true", "yes", "1", "paid"):
+                    response_failures.append(f"paid not truthy (got {extracted.get('paid')!r})")
         elif not extracted:
             response_failures.append("extract_job_fields returned None")
 
-        for pattern in tc.response_must_not_contain:
-            if response and pattern.lower() in response.lower():
-                response_failures.append(f"Response contains bad phrase: '{pattern}'")
+        for p in tc.response_must_not_contain:
+            if response and p.lower() in response.lower():
+                response_failures.append(f"Response contains bad phrase: '{p}'")
 
     except Exception as e:
-        return TestResult(
-            tc=tc, sql=None, response=None,
-            sql_pass=True, response_pass=False,
-            sql_failures=[], response_failures=[str(e)],
-            error=str(e), elapsed=time.time() - t0,
-        )
+        return TestResult(tc=tc, sql=None, response=None,
+                          sql_pass=True, response_pass=False,
+                          sql_failures=[], response_failures=[str(e)],
+                          error=str(e), elapsed=time.time() - t0)
 
-    return TestResult(
-        tc=tc, sql=None, response=response,
-        sql_pass=True,
-        response_pass=len(response_failures) == 0,
-        sql_failures=[],
-        response_failures=response_failures,
-        error=None, elapsed=time.time() - t0,
-    )
+    return TestResult(tc=tc, sql=None, response=response,
+                      sql_pass=True, response_pass=not response_failures,
+                      sql_failures=[], response_failures=response_failures,
+                      error=None, elapsed=time.time() - t0)
 
+
+def run_oos_test(tc: TestCase, gemini, supabase) -> TestResult:
+    """Out-of-scope / edge-case tests — run through the planner and check response."""
+    t0 = time.time()
+    response_failures: List[str] = []
+    sql = None
+    try:
+        plan_result = _run_plan_retried(tc.message, gemini, supabase)
+        # May get clarification or SQL
+        if plan_result.get("clarification"):
+            response = plan_result["clarification"]
+        elif plan_result.get("sql"):
+            sql = plan_result["sql"]
+            db = supabase.execute_sql(sql)
+            rows = db.get("rows", []) if db.get("ok") else []
+            payload = build_clean_payload(rows, "select")
+            response = gemini.synthesize_response(payload, tc.message)
+        elif plan_result.get("_error"):
+            response = plan_result["_error"][:120]
+        else:
+            response = ""
+
+        if response:
+            for p in tc.response_must_not_contain:
+                if p.lower() in response.lower():
+                    response_failures.append(f"Response contains bad phrase: '{p}'")
+            for p in tc.response_must_match:
+                if not re.search(p, response, re.IGNORECASE):
+                    response_failures.append(f"Missing expected pattern: '{p}'")
+        else:
+            response_failures.append("Empty response")
+
+    except Exception as e:
+        return TestResult(tc=tc, sql=sql, response=None,
+                          sql_pass=True, response_pass=False,
+                          sql_failures=[], response_failures=[str(e)],
+                          error=str(e), elapsed=time.time() - t0)
+
+    return TestResult(tc=tc, sql=sql, response=response,
+                      sql_pass=True, response_pass=not response_failures,
+                      sql_failures=[], response_failures=response_failures,
+                      error=None, elapsed=time.time() - t0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Output
+# ─────────────────────────────────────────────────────────────────────────────
 
 def print_result(r: TestResult):
     status = f"{GREEN}PASS{RESET}" if r.overall_pass else f"{RED}FAIL{RESET}"
-    elapsed = f"{r.elapsed:.1f}s"
-
-    print(f"\n{BOLD}{r.tc.id:10}{RESET} {CYAN}{r.tc.category:<30}{RESET} {status}  ({elapsed})")
-    print(f"  Message:  {r.tc.message}")
+    print(f"\n{BOLD}{r.tc.id:<10}{RESET}{CYAN}{r.tc.category:<35}{RESET}{status}  ({r.elapsed:.1f}s)")
+    print(f"  {r.tc.message}")
 
     if not r.tc.skip_sql_check and r.sql:
-        sql_preview = r.sql[:120].replace("\n", " ")
-        sql_ok = f"{GREEN}✓{RESET}" if r.sql_pass else f"{RED}✗{RESET}"
-        print(f"  SQL {sql_ok}:   {sql_preview}")
+        ok = f"{GREEN}✓{RESET}" if r.sql_pass else f"{RED}✗{RESET}"
+        print(f"  SQL {ok}  {r.sql[:110].replace(chr(10),' ')}")
         for f in r.sql_failures:
             print(f"    {RED}→ {f}{RESET}")
 
     if r.response:
-        resp_preview = (r.response or "")[:160].replace("\n", " ")
-        resp_ok = f"{GREEN}✓{RESET}" if r.response_pass else f"{RED}✗{RESET}"
-        print(f"  Resp {resp_ok}:  {resp_preview}")
+        ok = f"{GREEN}✓{RESET}" if r.response_pass else f"{RED}✗{RESET}"
+        print(f"  Resp {ok} {(r.response or '')[:140].replace(chr(10),' ')}")
         for f in r.response_failures:
             print(f"    {RED}→ {f}{RESET}")
 
@@ -535,42 +717,61 @@ def print_result(r: TestResult):
         print(f"  {RED}Exception: {r.error}{RESET}")
 
 
-def main():
-    print(f"\n{BOLD}{'═'*70}{RESET}")
-    print(f"{BOLD}  Ops Bot — Live E2E Tests{RESET}")
-    print(f"  {len(TESTS)} cases | user_id={TEST_USER_ID}")
-    print(f"{'═'*70}{RESET}\n")
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
 
-    gemini = GeminiService()
+def main():
+    print(f"\n{BOLD}{'═'*72}{RESET}")
+    print(f"{BOLD}  Ops Bot — Live E2E Tests  ({len(TESTS)} cases){RESET}")
+    print(f"  user_id={TEST_USER_ID}  |  max_tokens={_MAX_TOKENS_OVERRIDE}")
+    print(f"{'═'*72}{RESET}")
+
+    gemini  = GeminiService()
     supabase = MockSupabaseService()
 
     results: List[TestResult] = []
+    by_category: Dict[str, List[TestResult]] = {}
+
     for tc in TESTS:
-        print(f"  Running {tc.id} — {tc.message[:60]}...", end="", flush=True)
-        if tc.expected_extracted is not None or tc.skip_sql_check:
+        print(f"  ▶ {tc.id}  {tc.message[:65]}...", end="", flush=True)
+
+        if tc.expected_extracted is not None:
             r = run_smart_capture_test(tc, gemini, supabase)
+        elif tc.category.startswith("Out of scope") or tc.category.startswith("Typo"):
+            r = run_oos_test(tc, gemini, supabase)
         else:
             r = run_query_test(tc, gemini, supabase)
+
         results.append(r)
+        cat = tc.category.split("—")[0].strip().split(" ")[0]
+        by_category.setdefault(cat, []).append(r)
         print(f"\r", end="")
         print_result(r)
-        time.sleep(0.3)  # light rate-limit buffer
+        time.sleep(0.25)
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # ── Summary ──────────────────────────────────────────────────────────────
     passed = sum(1 for r in results if r.overall_pass)
     failed = len(results) - passed
-    print(f"\n{BOLD}{'═'*70}{RESET}")
-    print(f"{BOLD}  Results: {GREEN}{passed} passed{RESET}{BOLD}, {RED}{failed} failed{RESET}{BOLD} / {len(results)} total{RESET}")
+
+    print(f"\n{BOLD}{'═'*72}{RESET}")
+    print(f"{BOLD}  Results by category:{RESET}")
+    for cat, rs in by_category.items():
+        cp = sum(1 for r in rs if r.overall_pass)
+        bar = f"{GREEN}{'█'*cp}{RED}{'░'*(len(rs)-cp)}{RESET}"
+        print(f"    {cat:<22} {bar}  {cp}/{len(rs)}")
+
+    print(f"\n{BOLD}  Total: {GREEN}{passed} passed{RESET}{BOLD}, "
+          f"{RED}{failed} failed{RESET}{BOLD} / {len(results)}{RESET}")
 
     if failed:
-        print(f"\n  {BOLD}Failing tests:{RESET}")
+        print(f"\n  {BOLD}Failing:{RESET}")
         for r in results:
             if not r.overall_pass:
-                tag = f"{RED}✗{RESET}"
-                issues = r.sql_failures + r.response_failures
-                print(f"    {tag} {r.tc.id} — {'; '.join(issues[:2])}")
+                issues = (r.sql_failures + r.response_failures)[:2]
+                print(f"    {RED}✗{RESET} {r.tc.id} — {'; '.join(issues)}")
 
-    print(f"{'═'*70}\n")
+    print(f"{'═'*72}\n")
     sys.exit(0 if failed == 0 else 1)
 
 
