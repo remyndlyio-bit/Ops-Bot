@@ -89,6 +89,13 @@ def build_clean_payload(rows: List[Dict], operation: str = "select") -> Dict[str
         orig_keys = [str(k).lower() for k in rows[0].keys()]
         if any(c in orig_keys for c in _AGG_KEYS):
             raw_row = rows[0]
+            # GROUP BY result: row has both a dimension column (e.g. client_name)
+            # and an aggregate — don't drop the dimension. Route as job_summary so
+            # the synthesizer sees the full row ("biggest client is X: ₹5L").
+            _non_agg_keys = [k for k in orig_keys if k not in _AGG_KEYS]
+            if _non_agg_keys:
+                cleaned_row = _clean_row(raw_row)
+                return {"type": "job_summary", "data": cleaned_row}
             agg_val = None
             for k in raw_row:
                 if str(k).lower() in _AGG_KEYS:

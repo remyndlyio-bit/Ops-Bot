@@ -4570,6 +4570,41 @@ class IntentService:
         uid = user_id.replace("'", "''")
         _not_deleted = "(\"isDeleted\" IS NOT TRUE)"
         base = f"SELECT * FROM public.job_entries WHERE user_id = '{uid}' AND {_not_deleted}"
+        _client_expr = (
+            "COALESCE(NULLIF(client_name,''),NULLIF(brand_name,''),NULLIF(production_house,''))"
+        )
+
+        # "biggest/top/largest client" — group by client, sum fees, top 1
+        if re.search(r'\b(biggest|top|largest|best|highest[- ]paying)\b.{0,30}\b(client|brand|company)\b', msg):
+            return (
+                f"SELECT {_client_expr} AS client_name, SUM(fees) AS result "
+                f"FROM public.job_entries WHERE user_id='{uid}' AND {_not_deleted} "
+                f"GROUP BY 1 HAVING {_client_expr} IS NOT NULL ORDER BY result DESC LIMIT 1"
+            )
+
+        # "average fees per job" / "average billing" / "औसत"
+        if re.search(r'\b(average|avg|औसत)\b.{0,30}\b(fees?|billing|earnings?|amount|income)\b', msg):
+            return (
+                f"SELECT AVG(fees) AS result FROM public.job_entries "
+                f"WHERE user_id='{uid}' AND {_not_deleted} AND fees IS NOT NULL"
+            )
+
+        # "how much does X owe me" / "X ka paisa" — client + unpaid SUM
+        _owe_m = re.search(
+            r'\b(how\s+much\s+does\s+(.+?)\s+owe\s+me'
+            r'|(.+?)\s+(?:ka\s+paisa|se\s+paisa\s+aaya|ka\s+payment)\b)',
+            msg,
+        )
+        if _owe_m:
+            _client_raw = (_owe_m.group(2) or _owe_m.group(3) or "").strip().strip("?").strip()
+            if _client_raw and len(_client_raw) > 1:
+                _c = _client_raw.replace("'", "''")
+                return (
+                    f"SELECT SUM(fees) AS result FROM public.job_entries "
+                    f"WHERE user_id='{uid}' AND {_not_deleted} "
+                    f"AND ({_client_expr} ILIKE '%{_c}%') "
+                    f"AND (paid IS NULL OR TRIM(COALESCE(paid,''))='' OR LOWER(paid) NOT IN ('true','t','yes','1','paid'))"
+                )
 
         # "last job" / "latest job" / "most recent job" / "recent job"
         if re.search(r'\b(last|latest|most\s+recent|recent)\b.*\b(jobs?|entr(?:y|ies)?|work|project|gig)\b', msg):

@@ -945,6 +945,14 @@ def execute_query_plan(
     plan = resolve_rows(plan, user_id, supabase_service, conversation_context)
     logger.info(f"[PIPELINE] Stage 3 resolved: {json.dumps(plan)[:200]}")
 
+    # Post-plan correction: "how many" queries with metric=null produce SELECT *
+    # instead of COUNT(*). Force metric=count when the message is clearly asking
+    # for a count and the planner didn't emit one. Hinglish "kitne" included.
+    if (plan.get("metric") is None
+            and re.search(r'\b(how\s+many|kitne)\b', message.lower())):
+        plan["metric"] = "count"
+        logger.info("[PLAN_POSTPROCESS] Forced metric=count for 'how many' query")
+
     # ── Path 3: Typed Plan validation (Phase 3b — STRICT + RETRY) ──
     # Every plan is validated against the typed CanonicalFilter contract.
     # On the first failure we re-prompt the planner with the typed error

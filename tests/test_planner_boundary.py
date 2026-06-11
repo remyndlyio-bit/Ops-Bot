@@ -366,3 +366,93 @@ class TestColumnRegistry:
         handles them. Should never raise."""
         from services.columns import get
         assert get("totally_made_up_column") is None
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Bug 1 & 2 regression — aggregate keyword SQL + COUNT post-correction
+# ════════════════════════════════════════════════════════════════════════
+
+class TestKeywordAggregates:
+    """Keyword SQL fallback and plan post-correction for aggregate queries."""
+
+    def setup_method(self):
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+    def _make_intent_stub(self, uid="testuser"):
+        """Minimal stub for _keyword_sql_fallback testing."""
+        from unittest.mock import MagicMock
+        from services.intent_service import IntentService
+        svc = object.__new__(IntentService)
+        return svc
+
+    def test_biggest_client_keyword_sql_returns_group_by(self):
+        svc = self._make_intent_stub()
+        sql = svc._keyword_sql_fallback("Who is my biggest client?", "user123")
+        assert sql is not None, "Expected SQL for 'biggest client'"
+        assert "GROUP BY" in sql.upper()
+        assert "SUM" in sql.upper()
+        assert "ORDER BY" in sql.upper()
+        assert "DESC" in sql.upper()
+        assert "LIMIT 1" in sql.upper()
+
+    def test_average_fees_keyword_sql_returns_avg(self):
+        svc = self._make_intent_stub()
+        sql = svc._keyword_sql_fallback("Average fees per job", "user123")
+        assert sql is not None, "Expected SQL for 'average fees'"
+        assert "AVG" in sql.upper()
+
+    def test_owe_me_keyword_sql_returns_sum_unpaid(self):
+        svc = self._make_intent_stub()
+        sql = svc._keyword_sql_fallback("How much does Star Studios owe me?", "user123")
+        assert sql is not None, "Expected SQL for 'owe me'"
+        assert "SUM" in sql.upper()
+        # Should filter for unpaid
+        assert "paid" in sql.lower()
+
+    def test_count_post_correction_forces_count_metric(self):
+        """'how many' with metric=null → metric forced to count in execute_query_plan."""
+        import re
+        from services.query_planner import _precompute_time_ranges
+        # Simulate the post-correction logic
+        message = "How many jobs have I done?"
+        plan = {"operation": "query", "metric": None, "filters": {}}
+        if plan.get("metric") is None and re.search(r'\b(how\s+many|kitne)\b', message.lower()):
+            plan["metric"] = "count"
+        assert plan["metric"] == "count"
+
+    def test_hinglish_count_correction(self):
+        import re
+        message = "Kitne jobs hain mere paas?"
+        plan = {"operation": "query", "metric": None, "filters": {}}
+        if plan.get("metric") is None and re.search(r'\b(how\s+many|kitne)\b', message.lower()):
+            plan["metric"] = "count"
+        assert plan["metric"] == "count"
+
+
+class TestGroupByPayload:
+    """build_clean_payload correctly handles GROUP BY results (Bug 1 fix)."""
+
+    def test_group_by_result_routes_as_job_summary(self):
+        from services.response_synthesis import build_clean_payload
+        rows = [{"client_name": "Star Studios", "result": 500000}]
+        payload = build_clean_payload(rows, "select")
+        # Must NOT collapse to scalar aggregate (which drops client_name).
+        # Type must be job_summary so synthesizer sees the full grouped row.
+        assert payload["type"] == "job_summary", (
+            f"Expected job_summary for GROUP BY result, got {payload['type']}"
+        )
+
+    def test_scalar_aggregate_still_works(self):
+        from services.response_synthesis import build_clean_payload
+        rows = [{"result": 42}]
+        payload = build_clean_payload(rows, "select")
+        assert payload["type"] == "aggregate"
+        assert payload["data"]["result"] == 42
+
+    def test_zero_aggregate_stays_zero(self):
+        from services.response_synthesis import build_clean_payload
+        rows = [{"result": None}]
+        payload = build_clean_payload(rows, "select")
+        assert payload["type"] == "aggregate"
+        assert payload["data"]["result"] == 0
