@@ -110,10 +110,13 @@ class TestNoData:
 
     def test_zero_rows_returns_friendly_message(self):
         svc = _make_svc()
-        # Both AI paths fail → keyword fallback kicks in → DB returns 0 rows
+        # Both AI paths fail → keyword fallback kicks in → DB returns 0 rows.
+        # The deterministic router runs FIRST ('list_jobs'); on 0 rows it falls
+        # through to the planner path, which then hits the no-data check.
         svc.gemini.parse_user_intent.return_value = {"operation": "GEMINI_ERROR", "parameters": {}}
         svc.supabase.execute_sql.side_effect = [
-            {"ok": True, "rows": []},           # keyword-fallback SELECT → 0 rows
+            {"ok": True, "rows": []},           # router 'list_jobs' SELECT → 0 rows → fall through
+            {"ok": True, "rows": []},           # planner keyword-fallback SELECT → 0 rows
             {"ok": True, "rows": [{"cnt": 0}]}, # "do you have any data?" check → no
         ]
 
@@ -378,6 +381,157 @@ class TestCancelDisambiguation:
         result = svc._handle_disambiguation_reply("u1", "stop", self._pending())
         resp = result.get("response", "").lower()
         assert "cancel" in resp or "let me know" in resp
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 138b – CRITICAL: a bare "yes" must NEVER bulk-delete in a numbered
+#        disambiguation. Regression for the "Yes to email → deleted job" bug.
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestYesDoesNotDeleteInNumberedDisambiguation:
+    """A stray 'yes' (e.g. meant for an invoice-email prompt) must not be
+    interpreted as 'delete all' when the pending disambiguation was a numbered
+    pick list (no bulk_mode flag)."""
+
+    def _numbered_pending(self):
+        return {
+            "sql": "UPDATE public.job_entries SET \"isDeleted\"=true WHERE user_id='u1' RETURNING *",
+            "rows": [
+                {"id": "r1", "client_name": "Nike", "job_date": "2026-04-10"},
+                {"id": "r2", "client_name": "Nike", "job_date": "2026-03-15"},
+                {"id": "r3", "client_name": "Nike", "job_date": "2026-02-14"},
+            ],
+            "data_user_id": "u1",
+            # NOTE: no "bulk_mode": True — this is a numbered pick list.
+        }
+
+    def test_yes_does_not_execute_delete(self):
+        svc = _make_svc()
+        result = svc._handle_disambiguation_reply("u1", "yes", self._numbered_pending())
+        # Must NOT run any DELETE/UPDATE SQL.
+        svc.supabase.execute_sql.assert_not_called()
+        # Must fall through (return None) so a competing pending state can handle it.
+        assert result is None, f"Expected fall-through (None), got: {result!r}"
+
+    def test_yes_clears_stale_disambiguation(self):
+        svc = _make_svc()
+        svc._handle_disambiguation_reply("u1", "yes", self._numbered_pending())
+        svc.memory.update_user_memory.assert_called_with("u1", {"pending_disambiguation": None})
+
+    def test_explicit_all_still_bulk_deletes(self):
+        svc = _make_svc()
+        svc.supabase.execute_sql.return_value = {"ok": True, "rows": [{"id": "r1"}, {"id": "r2"}, {"id": "r3"}]}
+        result = svc._handle_disambiguation_reply("u1", "all", self._numbered_pending())
+        # "all" is explicit → bulk delete should run.
+        assert svc.supabase.execute_sql.called
+        called_sql = svc.supabase.execute_sql.call_args[0][0]
+        assert "isDeleted" in called_sql and "true" in called_sql.lower()
+        assert "deleted" in result.get("response", "").lower()
+
+    def test_yes_in_bulk_mode_still_deletes(self):
+        svc = _make_svc()
+        svc.supabase.execute_sql.return_value = {"ok": True, "rows": [{"id": "r1"}, {"id": "r2"}, {"id": "r3"}]}
+        pending = self._numbered_pending()
+        pending["bulk_mode"] = True  # we explicitly asked "Reply 'Yes' to delete all"
+        result = svc._handle_disambiguation_reply("u1", "yes", pending)
+        assert svc.supabase.execute_sql.called
+        assert "deleted" in result.get("response", "").lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 139b – "Highest paying job" must sort by FEES, not job_date.
+#        Regression for the bug where it returned the most-recent job and the
+#        synthesizer refused ("I can't sort by highest paying").
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestHighestPayingJob:
+    """The pre-planner intercept must run SQL ordered by fees DESC (top) / ASC
+    (bottom), bypassing the planner which sorts a single job by date."""
+
+    def _make(self):
+        svc = _make_svc()
+        svc.supabase.execute_sql.return_value = {
+            "ok": True,
+            "rows": [{"id": "r9", "client_name": "Pedigree", "job_date": "2026-01-02",
+                      "fees": 200000, "bill_no": "INV-009", "paid": "No"}],
+        }
+        svc.gemini.synthesize_response.return_value = "Your highest paying job was Pedigree at ₹2,00,000."
+        svc.gemini.is_history_question.return_value = False
+        return svc
+
+    def _executed_sqls(self, svc):
+        return [
+            (c.args[0] if c.args else c.kwargs.get("sql", ""))
+            for c in svc.supabase.execute_sql.call_args_list
+        ]
+
+    def test_highest_paying_orders_by_fees_desc(self):
+        svc = self._make()
+        svc.process_request("user1", "What was my highest paying job?")
+        sqls = self._executed_sqls(svc)
+        ordered_by_fees = [s for s in sqls if "order by fees desc" in s.lower()]
+        assert ordered_by_fees, (
+            f"Expected SQL ordered by fees DESC, got: {sqls}"
+        )
+        # Must NOT resolve the answer by ordering on date.
+        for s in ordered_by_fees:
+            assert "order by job_date" not in s.lower()
+
+    def test_lowest_paying_orders_by_fees_asc(self):
+        svc = self._make()
+        svc.process_request("user1", "What was my lowest paying job?")
+        sqls = self._executed_sqls(svc)
+        assert any("order by fees asc" in s.lower() for s in sqls), (
+            f"Expected SQL ordered by fees ASC, got: {sqls}"
+        )
+
+    def test_biggest_client_does_not_hit_job_intercept(self):
+        """'biggest client' is a grouped aggregate — it must NOT be captured by
+        the single-job fees intercept (which would return one raw job row)."""
+        svc = self._make()
+        svc.process_request("user1", "Who is my biggest client?")
+        sqls = self._executed_sqls(svc)
+        # The job intercept emits 'SELECT * ... ORDER BY fees DESC ... LIMIT 1'.
+        # A client query must not produce that exact shape.
+        bad = [s for s in sqls if "select *" in s.lower() and "order by fees desc" in s.lower()]
+        assert not bad, f"'biggest client' wrongly hit the single-job intercept: {bad}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 140 – Bank details parser: shorthand "Account: <num>" must be captured.
+#        Regression for the silent "Account Number: Not set" save bug.
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestBankDetailsParser:
+    """_parse_bank_details_message must capture account number from a bare
+    'Account:' label, and the holder name from 'Account Holder:'."""
+
+    def _parse(self, msg):
+        from services.intent_service import IntentService
+        return IntentService._parse_bank_details_message(msg)
+
+    def test_bare_account_label_captures_number(self):
+        parsed = self._parse("Account Name: Darshit\nBank: HDFC\nAccount: 123456\nIFSC: HDFC001")
+        assert parsed.get("bank_account_name") == "Darshit"
+        assert parsed.get("bank_account_number") == "123456", (
+            f"'Account: 123456' must map to account number, got: {parsed!r}"
+        )
+        assert parsed.get("bank_name") == "HDFC"
+        assert parsed.get("bank_ifsc") == "HDFC001"
+
+    def test_full_labels_still_work(self):
+        parsed = self._parse(
+            "Account Name: Darshit Mody\nBank Name: HDFC Bank\n"
+            "Account Number: 1234567890\nIFSC: HDFC0001234\nUPI: darshit@upi"
+        )
+        assert parsed.get("bank_account_number") == "1234567890"
+        assert parsed.get("bank_account_name") == "Darshit Mody"
+        assert parsed.get("upi_id") == "darshit@upi"
+
+    def test_account_holder_maps_to_name_not_number(self):
+        parsed = self._parse("Account Holder: John\nA/C: 9988776655\nIFSC: SBIN0001")
+        assert parsed.get("bank_account_name") == "John"
+        assert parsed.get("bank_account_number") == "9988776655"
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -472,6 +472,10 @@ async def process_and_send_invoice(
                 }
                 if poc_email:
                     _patch["awaiting_send_confirmation"] = True
+                    # Clear any stale disambiguation so a "Yes" meant for THIS email
+                    # prompt can't be hijacked by a leftover delete/select disambiguation
+                    # (which previously caused "Yes" to silently delete a job).
+                    _patch["pending_disambiguation"] = None
                     _patch["pending_send_invoice"] = {
                         "client_name": cached_client_name,
                         "month": cached_month_name,

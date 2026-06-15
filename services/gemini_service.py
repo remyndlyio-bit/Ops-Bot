@@ -204,6 +204,9 @@ class GeminiService:
             "    type=aggregate, data.result=0, note='zero'  → '₹0 for that period.' or 'No jobs found for that filter.' — be specific about what the user asked; keep it short.\n"
             "    type=aggregate, data.result=0 (for a count query) → 'No matching records.' — brief, don't pad.\n"
             "  Refusing when the DB returned a number is a bug we've shipped before — don't repeat it.\n"
+            "- DATA ACCESS: This system can query ANY date range, including last year, two years ago, or any historical period. Never say 'I can only access data for X years' — that restriction does not exist. If a query returns 0 results for a past year, say 'No earnings found for [year]' or '₹0 for [year]'.\n"
+            "- SORTING BY FEES IS SUPPORTED: If the user asks for the 'highest paying job', 'most expensive job', 'biggest job', or 'top earner' and you receive a job record in the data, that record IS the answer — describe it. Never say 'I can't sort by highest paying' — the SQL already did the sorting.\n"
+            "- EARNINGS FROM JOB ROWS: If the user asks for earnings/kamai/billing/revenue for a period and you receive job record(s) instead of an aggregate, summarise fees from those rows. Never say 'I can't tell you [period] earnings' or 'I don't have earnings data for that period' — state the fees you received. E.g. if you get a Samsung job with ₹60,000, say 'Last month: ₹60,000 — Samsung TVC'.\n"
         )
 
         # Optional conversation context — last few turns help maintain thread of conversation
@@ -703,11 +706,15 @@ Return ONLY valid JSON with these keys:
 - "notes": Any additional info that doesn't fit above, or null
 
 Rules:
-- If the brand and client are the same entity, put it in brand_name and set client_name to null.
+- brand_name = the consumer-facing product or brand (e.g. "Nike", "Samsung", "Garnier", "Xiaomi").
+- client_name = the company, agency, or production house that hired you (e.g. "Star Studios", "Leo Burnett", "The Good Take").
+- If a name contains words like Studios, Films, Productions, Agency, House, Entertainment, Media, or Creative it is almost certainly a client_name, NOT a brand_name.
+- If only one entity is mentioned and it is clearly a consumer brand, use brand_name. If it looks like a company/studio/agency, use client_name.
+- If the brand and client are genuinely the same (e.g. "Nike ka kaam kiya for Nike directly"), put in brand_name.
 - "k" means thousands (25k = 25000), "L" or "lac" or "lakh" means 100000 (1.5L = 150000). "hazaar" = thousands, "lakh" = 100000.
 - If a field is not mentioned, set it to null.
 - Do NOT hallucinate or invent data. Only extract what's explicitly stated.
-- The user may write in English, Hindi (Devanagari), Roman Hindi, or Hinglish. Understand all. Examples: "Nike ka kaam kiya 10 April ko, 25 hazaar" → brand_name: "Nike", job_date: "2026-04-10", fees: 25000.
+- The user may write in English, Hindi (Devanagari), Roman Hindi, or Hinglish. Understand all. Examples: "Nike ka kaam kiya 10 April ko, 25 hazaar" → brand_name: "Nike", job_date: "2026-04-10", fees: 25000. "Add job for Star Studios, 10 April, dubbing, 15k" → client_name: "Star Studios", brand_name: null.
 
 User message:
 {message}

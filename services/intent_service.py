@@ -5,6 +5,15 @@ from utils.date_utils import month_name_to_number, number_to_month_name
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
 from services.query_planner import execute_query_plan
+from services.query_router import (
+    route_common_query,
+    format_client_list,
+    format_payment_status,
+    ROWS as _RENDER_ROWS,
+    AGGREGATE as _RENDER_AGGREGATE,
+    CLIENT_LIST as _RENDER_CLIENT_LIST,
+    PAYMENT_STATUS as _RENDER_PAYMENT_STATUS,
+)
 from services.response_formatter import (
     format_response,
     ASSISTANT_MODE,
@@ -80,6 +89,49 @@ def _format_job_cards(rows: list) -> str:
         prefix = f"Job {i}\n" if len(rows) > 1 else ""
         cards.append(prefix + _format_job_card(row))
     return "\n\n".join(cards)
+
+
+def _format_aggregate_fallback(payload: dict, user_message: str) -> str:
+    """
+    Deterministic formatter for simple aggregate payloads when AI synthesis returns empty.
+    Handles type='aggregate' (SUM/COUNT/AVG result) and type='multi_record' GROUP BY results.
+    Never returns the generic 'couldn't format' error string.
+    """
+    msg = user_message.strip().lower()
+    p_type = payload.get("type", "")
+
+    if p_type == "aggregate":
+        val = (payload.get("data") or {}).get("result", 0)
+        is_zero = val is None or val == 0
+        # Decide if it's a money answer or a count answer based on message keywords
+        is_count = any(k in msg for k in ("how many", "count", "kitne", "number of"))
+        if is_count:
+            n = int(val or 0)
+            return f"{'No' if n == 0 else n} {'jobs' if 'job' in msg else 'records'} found."
+        else:
+            amount = int(val or 0)
+            if is_zero:
+                return "₹0 for that period — no matching records."
+            return f"₹{amount:,}"
+
+    if p_type in ("multi_record", "job_summary", "job_list"):
+        data = payload.get("data") or []
+        if not data:
+            return "No matching records found."
+        if isinstance(data, dict):
+            data = [data]
+        # GROUP BY result: each row has client_name + result
+        lines = []
+        for row in data[:10]:
+            client = row.get("client_name") or row.get("brand_name") or "Unknown"
+            amount = row.get("result") or row.get("fee") or row.get("fees") or 0
+            try:
+                lines.append(f"• {client}: ₹{int(float(amount)):,}")
+            except (ValueError, TypeError):
+                lines.append(f"• {client}: {amount}")
+        return "\n".join(lines) if lines else "No matching records found."
+
+    return "No matching records found."
 
 
 def _generate_jobs_excel(rows: list, user_id: str) -> str:
@@ -1403,7 +1455,14 @@ class IntentService:
             # Save to database — POC fields are optional
             return self._save_smart_capture_job(user_id, extracted)
 
-        elif msg in ("edit", "change", "modify", "fix", "no"):
+        elif msg in ("no", "nope", "nah", "cancel", "nevermind", "nvm", "abort"):
+            # User declines — cancel cleanly without asking them to re-send info
+            self.memory.cancel_form(user_id)
+            response = "No problem, cancelled. Let me know if you need anything else."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "smart_capture_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        elif msg in ("edit", "change", "modify", "fix"):
             response = (
                 "No problem! Send the corrected job info in one message.\n\n"
                 "Example:\n"
@@ -2197,11 +2256,18 @@ class IntentService:
         text = message.strip()
         result = {}
 
-        # Map of possible labels → db field name
+        # Map of possible labels → db field name.
+        # NOTE: bank_account_number includes a bare "account" label (negative-
+        # lookahead excludes "account name"/"account holder") so inputs like
+        # "Account: 123456" — common shorthand — are captured, not dropped.
         label_map = {
-            "bank_account_name": [r"account\s*(?:holder\s*)?name", r"holder\s*name", r"name\s*on\s*account"],
+            "bank_account_name": [r"account\s*(?:holder\s*)?name", r"account\s*holder", r"holder\s*name", r"name\s*on\s*account"],
             "bank_name": [r"bank\s*name", r"bank"],
-            "bank_account_number": [r"account\s*(?:no|number|num|#)", r"a/?c\s*(?:no|number|num|#)?"],
+            "bank_account_number": [
+                r"account\s*(?:no|number|num|#)",
+                r"a/?c\s*(?:no|number|num|#)?",
+                r"account(?!\s*(?:holder|name|holder\s*name))",
+            ],
             "bank_ifsc": [r"ifsc\s*(?:code)?"],
             "upi_id": [r"upi\s*(?:id)?"],
         }
@@ -2821,6 +2887,19 @@ class IntentService:
             # 0a. Check if user is responding with job data (awaiting smart capture input)
             user_mem = self.memory.get_user_memory(user_id)
 
+            # An active invoice-email flow (asking for a POC email or a yes/no send
+            # confirmation) takes precedence over a STALE disambiguation. Otherwise a
+            # reply meant for the email prompt (an address, "yes"/"no") gets swallowed
+            # by a leftover delete/select disambiguation. Drop the stale state here.
+            _invoice_await_active = (
+                user_mem.get("awaiting_poc_email")
+                or user_mem.get("awaiting_send_confirmation")
+            )
+            if _invoice_await_active and user_mem.get("pending_disambiguation"):
+                logger.info("[DISAMBIG] Invoice-email flow active — clearing stale disambiguation so the email reply is handled correctly")
+                self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
+                user_mem = self.memory.get_user_memory(user_id)
+
             # Handle pending disambiguation reply (user selecting a specific row by number)
             if user_mem.get("pending_disambiguation"):
                 _disambig_result = self._handle_disambiguation_reply(user_id, message, user_mem["pending_disambiguation"])
@@ -3245,6 +3324,21 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # 1b-bis. "Send that/it to the client" but NO cached invoice to send.
+            # Don't fall through to the query pipeline (which runs a confusing SELECT
+            # disambiguation on "client"). Give a clear, actionable message instead.
+            if not cached_invoice and re.search(
+                r'\bsend\s+(?:that|it|this|the\s+invoice|the\s+bill)\b.*\b(client|them|over|email)\b',
+                msg_lower,
+            ):
+                response = (
+                    "I don't have a recently generated invoice to send. "
+                    "Generate one first — e.g. 'Generate invoice for Nike for March' — "
+                    "and then I can email it to the client."
+                )
+                self._store_conversation(user_id, message, response)
+                return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             # 1c. Invoice feedback — user complains about the just-generated invoice
             _INVOICE_FEEDBACK_WORDS = ["missing", "wrong", "incorrect", "update", "change",
                                        "fix", "edit", "add", "remove", "doesn't have",
@@ -3264,6 +3358,24 @@ class IntentService:
                         f"\"Update client billing for {cached_client}\"\n\n"
                         f"After updating, say \"Regenerate invoice for {cached_client}\" "
                         f"and I'll create a fresh PDF with the new details."
+                    )
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "invoice_feedback", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # 1c-bis. Invoice feedback with NO cached invoice (prior generation failed or
+            # session was fresh). "Invoice is wrong" / "the bill is incorrect" must still be
+            # recognised as feedback and answered helpfully — never fall through to the query
+            # pipeline (which errors on this phrasing).
+            if not cached_invoice and not is_send_to_client:
+                _fb_words = ("wrong", "incorrect", "missing", "not right", "is off", "looks off", "error in")
+                _has_inv_ref = ("invoice" in msg_lower or re.search(r'\bbill\b', msg_lower) or "pdf" in msg_lower)
+                if _has_inv_ref and any(w in msg_lower for w in _fb_words):
+                    response = (
+                        "Sorry the invoice isn't right. Tell me what's off and I'll fix it:\n\n"
+                        "• Wrong amount or missing job → say which client and month\n"
+                        "• Wrong header details (your name/address/email) → say \"Update invoice profile\"\n"
+                        "• Wrong client billing details → say \"Update client billing for [client]\"\n\n"
+                        "Then say \"Regenerate invoice for [client]\" and I'll produce a fresh PDF."
                     )
                     self._store_conversation(user_id, message, response)
                     return {"operation": "invoice_feedback", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -3348,6 +3460,7 @@ class IntentService:
                 if _invoice_action_definite:
                     _direct_month = None
                     _direct_client = None
+                    _direct_bill = None
                     _month_names = {
                         "january": 1, "february": 2, "march": 3, "april": 4,
                         "may": 5, "june": 6, "july": 7, "august": 8,
@@ -3359,14 +3472,43 @@ class IntentService:
                         if f" {_mn}" in msg_lower or msg_lower.endswith(_mn):
                             _direct_month = _mv
                             break
-                    # Extract client name: text between "for" and the month/end
-                    _for_match = re.search(
-                        r'\bfor\s+(.+?)(?:\s+for\s+|\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*|$)',
-                        msg_lower, re.IGNORECASE
+                    # Detect a bill/invoice number BEFORE client extraction so
+                    # "Generate invoice for bill INV-001" doesn't treat "bill INV-001"
+                    # as a client name. Matches: "bill INV-001", "bill no INV-001",
+                    # "invoice INV-001", "#INV-001", or a bare "INV-001"/"INV001".
+                    _bill_match = re.search(
+                        r'\b(?:bill|invoice|inv)\s*(?:no\.?|number|#)?\s*#?\s*'
+                        r'((?:inv[-\s]?)?\d{1,6}|[a-z]{2,5}[-]\d{1,6})\b',
+                        msg_lower, re.IGNORECASE,
                     )
-                    if _for_match:
-                        _direct_client = _for_match.group(1).strip().title()
-                    if _direct_client:
+                    # Only treat as a bill number if it actually looks like one
+                    # (contains a digit and isn't just a plain month/year).
+                    if _bill_match:
+                        _cand = _bill_match.group(1).strip()
+                        if re.search(r'\d', _cand) and not re.fullmatch(r'20\d{2}', _cand):
+                            # Normalise to the stored format, e.g. "inv-001" → "INV-001".
+                            _norm = _cand.upper().replace(" ", "")
+                            if _norm.isdigit():
+                                _direct_bill = _norm
+                            else:
+                                _direct_bill = re.sub(r'^INV-?', 'INV-', _norm)
+                            logger.info(f"[INVOICE_SHORTCUT] Detected bill number: {_direct_bill!r}")
+                    # Extract client name only when no bill number was found.
+                    if not _direct_bill:
+                        _for_match = re.search(
+                            r'\bfor\s+(.+?)(?:\s+for\s+|\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*|$)',
+                            msg_lower, re.IGNORECASE
+                        )
+                        if _for_match:
+                            _direct_client = _for_match.group(1).strip().title()
+                    if _direct_bill:
+                        intent_result = {
+                            "operation": "ACTION_TRIGGER",
+                            "parameters": {"client_name": None, "month": None, "year": None, "bill_number": _direct_bill},
+                            "confidence": 0.97,
+                            "clarification_question": None,
+                        }
+                    elif _direct_client:
                         intent_result = {
                             "operation": "ACTION_TRIGGER",
                             "parameters": {"client_name": _direct_client, "month": None, "year": None},
@@ -3384,6 +3526,23 @@ class IntentService:
                 else:
                     schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
                     intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
+                # Resilience: a definite invoice action ("generate invoice") must NOT fall
+                # through to the query pipeline just because the intent LLM flaked
+                # (GEMINI_ERROR). Synthesise a minimal ACTION_TRIGGER so downstream context
+                # resolution (last_saved_job / uscf_context / last_intent) still runs.
+                if _invoice_action_definite and intent_result.get("operation") == "GEMINI_ERROR":
+                    logger.info("[INVOICE_SHORTCUT] parse_user_intent flaked on a definite invoice action — synthesising minimal intent for context resolution")
+                    intent_result = {
+                        "operation": "ACTION_TRIGGER",
+                        "parameters": {
+                            "client_name": _direct_client,
+                            "month": (number_to_month_name(_direct_month) if _direct_month else None),
+                            "year": None,
+                            "bill_number": _direct_bill,
+                        },
+                        "confidence": 0.8,
+                        "clarification_question": None,
+                    }
                 params = intent_result.get("parameters", {})
                 # If the intent parser asked for clarification, surface that question
                 # — but only when the existing flow can't handle it. Missing month or
@@ -3661,7 +3820,30 @@ class IntentService:
                             if periods:
                                 hint = f"\n\nI do have records for {client_name} in: {', '.join(periods)}."
                             else:
-                                hint = f"\n\nI don't have any records for {client_name} at all."
+                                # No DATED records — but the client may still have rows
+                                # with a NULL job_date. Don't claim "no records at all"
+                                # without checking the actual row count first.
+                                _cnt_sql = (
+                                    f"SELECT COUNT(*) AS cnt FROM public.job_entries "
+                                    f"WHERE user_id = '{safe_uid}' "
+                                    f"AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
+                                    f"AND (\"isDeleted\" IS NOT TRUE)"
+                                )
+                                _cnt_res = self.supabase.execute_sql(_cnt_sql)
+                                _cnt = 0
+                                if _cnt_res.get("ok") and _cnt_res.get("rows"):
+                                    try:
+                                        _cnt = int(_cnt_res["rows"][0].get("cnt", 0))
+                                    except (ValueError, TypeError):
+                                        _cnt = 0
+                                if _cnt > 0:
+                                    hint = (
+                                        f"\n\nI have {_cnt} record{'s' if _cnt != 1 else ''} for {client_name}, "
+                                        f"but none have a job date set, so I can't filter by month. "
+                                        f"Try 'Generate invoice for {client_name}' without a month."
+                                    )
+                                else:
+                                    hint = f"\n\nI don't have any records for {client_name} at all."
                         if client_name and month_num:
                             response = f"I found no jobs for {client_name} in {month_name or month_num} {year_val}.{hint}"
                         else:
@@ -3894,8 +4076,15 @@ class IntentService:
 
             # 3. Overdue / payment followup (keyword-based; data from Supabase)
             overdue_keywords = ["overdue", "due date", "passed due", "past due", "late payment", "follow up", "followup", "payment followup", "payment status"]
-            is_overdue = any(k in message.lower() for k in overdue_keywords) and ("invoice" in message.lower() or "client" in message.lower() or "payment" in message.lower())
-            if is_overdue:
+            _ml = message.lower()
+            is_overdue = any(k in _ml for k in overdue_keywords) and ("invoice" in _ml or "client" in _ml or "payment" in _ml)
+            # "Remind clients about payments" / "send payment reminders" / "remind everyone
+            # to pay" — a manual request to chase payments. Route to the same overdue
+            # handler, which lists due invoices and offers to send reminders.
+            _wants_remind = bool(re.search(r'\bremind(?:er|ers)?\b', _ml)) and (
+                "payment" in _ml or "pay" in _ml or "client" in _ml or "invoice" in _ml or "due" in _ml or "everyone" in _ml
+            )
+            if is_overdue or _wants_remind:
                 overdue_jobs = self.supabase.fetch_overdue_jobs(payment_terms_days=30, user_id=user_id)
                 if not overdue_jobs:
                     response = "Great news! I don't see any invoices that have passed their due date."
@@ -3906,7 +4095,15 @@ class IntentService:
                         due = (j.get("due_date") or "")[:10]
                         bill = j.get("bill_no") or ""
                         lines.append(f"• {client}" + (f" (Due: {due})" if due else "") + (f" — Bill #{bill}" if bill else ""))
+                    lines.append("\nWant me to send payment reminders to these clients? Reply 'yes' and I'll draft them.")
                     response = "\n".join(lines)
+                    # Remember which clients are pending so a "yes" reply can act on them.
+                    self.memory.update_user_memory(user_id, {
+                        "pending_reminder_offer": [
+                            (j.get("client_name") or "").strip()
+                            for j in overdue_jobs[:20] if (j.get("client_name") or "").strip()
+                        ],
+                    })
                 self._store_conversation(user_id, message, response)
                 return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -4003,6 +4200,22 @@ class IntentService:
                 response = followup_answer
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # ── Deterministic-first routing ──────────────────────────────────
+            # The ~20 common query shapes (counts, sums, lists, top-N, by-client,
+            # paid/unpaid, date lookups) are mapped straight to SQL by the query
+            # router — no LLM guesswork. This is far more reliable than the planner
+            # for the high-frequency cases; the planner stays as the fallback below
+            # for the long tail. See services/query_router.py for the route table.
+            _routed = route_common_query(message, data_user_id)
+            if _routed is not None:
+                _routed_result = self._execute_routed_query(
+                    _routed, user_id, data_user_id, message, conversation_history,
+                )
+                if _routed_result is not None:
+                    return _routed_result
+                # None → router matched but DB returned nothing usable; fall through
+                # to the planner so the user still gets a best-effort answer.
 
             # Generate SQL via query planner pipeline (Classify → Plan → Resolve → Validate → SQL)
             conv_ctx = user_mem.get("uscf_context") or {}
@@ -4541,7 +4754,8 @@ class IntentService:
                     response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q, conversation_history=conversation_history)
                     if not response or not response.strip():
                         logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
-                        response = "I found matching records but couldn't format the reply. Try asking again?"
+                        # Deterministic fallback for simple aggregate results — never show "couldn't format"
+                        response = _format_aggregate_fallback(payload, message)
                     else:
                         logger.info(f"[QUERY] Success: {len(rows)} rows, response length={len(response)}")
 
@@ -4561,11 +4775,81 @@ class IntentService:
             "invoice_data": invoice_data
         }
 
+    def _execute_routed_query(self, routed, user_id: str, data_user_id: str,
+                              message: str, conversation_history: list) -> Optional[Dict]:
+        """Execute a deterministic RoutedQuery and render its rows.
+
+        Returns a response dict on success, or None to fall through to the LLM
+        planner (router matched but the DB returned nothing usable). All four
+        render kinds share the same context-update + storage tail so follow-ups
+        ("yes, show details") keep working.
+        """
+        logger.info(f"[ROUTER] matched route '{routed.name}' ({routed.render}): {routed.sql[:200]}")
+        exec_result = self.supabase.execute_sql(routed.sql)
+        if not exec_result.get("ok"):
+            logger.warning(f"[ROUTER] SQL failed for route '{routed.name}': {exec_result.get('error')}")
+            return None
+        rows = exec_result.get("rows", []) or []
+
+        # Remember the SQL + rows so context-dependent follow-ups still work.
+        if rows:
+            self._update_sql_context(user_id, rows)
+            ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
+            ctx["last_sql"] = routed.sql
+            self.memory.update_user_memory(user_id, {"uscf_context": ctx})
+
+        def _finish(resp: str) -> Dict:
+            self._store_conversation(user_id, message, resp)
+            return {"operation": "query", "response": resp, "trigger_invoice": False, "invoice_data": {}}
+
+        # ── Deterministic renders (no LLM) ──
+        if routed.render == _RENDER_CLIENT_LIST:
+            return _finish(format_client_list(rows, routed.meta.get("status", "all")))
+
+        if routed.render == _RENDER_PAYMENT_STATUS:
+            if not rows:
+                # Client not found — let the planner try (typo / different phrasing).
+                return None
+            return _finish(format_payment_status(rows, routed.meta))
+
+        if routed.render == _RENDER_AGGREGATE:
+            payload = build_clean_payload(rows, "select")
+            resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
+            if not resp or not resp.strip():
+                resp = _format_aggregate_fallback(payload, message)
+            return _finish(resp)
+
+        # ── ROWS: full job rows → cards / spreadsheet / synthesiser ──
+        if not rows:
+            return None  # nothing to show — hand to planner for a helpful empty-state reply
+        if len(rows) > 4 and _is_full_job_row(rows[0]):
+            excel_path = _generate_jobs_excel(rows, data_user_id)
+            resp = f"Found {len(rows)} results — here's a spreadsheet with all of them."
+            self._store_conversation(user_id, message, resp)
+            return {"operation": "query", "response": resp, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
+        if _is_full_job_row(rows[0]):
+            return _finish(_format_job_cards(rows))
+        payload = build_clean_payload(rows, "select")
+        resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
+        if not resp or not resp.strip():
+            resp = _format_aggregate_fallback(payload, message)
+        return _finish(resp)
+
     def _keyword_sql_fallback(self, message: str, user_id: str) -> Optional[str]:
         """
         Deterministic SQL fallback based on keyword matching — no LLM needed.
         Returns a SQL string for common query patterns, or None if no pattern matches.
+
+        NOTE: the primary path is now services/query_router.route_common_query,
+        run BEFORE the planner. This method remains as the planner-FAILURE safety
+        net (planner errored or returned 0 rows) and delegates to the same router
+        so there is a single source of truth for common-query SQL.
         """
+        # Single source of truth: try the deterministic router first.
+        _routed = route_common_query(message, user_id)
+        if _routed is not None:
+            return _routed.sql
+
         msg = message.strip().lower()
         uid = user_id.replace("'", "''")
         _not_deleted = "(\"isDeleted\" IS NOT TRUE)"
@@ -4580,6 +4864,24 @@ class IntentService:
                 f"SELECT {_client_expr} AS client_name, SUM(fees) AS result "
                 f"FROM public.job_entries WHERE user_id='{uid}' AND {_not_deleted} "
                 f"GROUP BY 1 HAVING {_client_expr} IS NOT NULL ORDER BY result DESC LIMIT 1"
+            )
+
+        # "highest paying job" / "most expensive job" — single row, max fees
+        if re.search(r'\b(highest[- ]paying|most expensive|biggest|top[- ]earning)\b.{0,20}\b(job|project|work|gig)\b', msg) \
+                or re.search(r'\b(highest|most|max(imum)?)\b.{0,20}\b(pay(ing)?|fee|earning|income)\b', msg):
+            return (
+                f"SELECT * FROM public.job_entries WHERE user_id='{uid}' AND {_not_deleted} "
+                f"AND fees IS NOT NULL ORDER BY fees DESC NULLS LAST LIMIT 1"
+            )
+
+        # "earnings by client" / "fees per client" / "breakdown by client" — all clients grouped
+        if re.search(r'\b(earnings?|fees?|billing|revenue|income)\b.{0,20}\b(by|per|for each|breakdown)\b.{0,20}\b(client|brand|company)\b', msg) \
+                or re.search(r'\b(by|per|for each)\b.{0,20}\b(client|brand)\b.{0,20}\b(earnings?|fees?|billing)\b', msg) \
+                or re.search(r'\b(show|list).{0,20}\b(earnings?|income|revenue).{0,20}\b(client|brand)\b', msg):
+            return (
+                f"SELECT {_client_expr} AS client_name, SUM(fees) AS result "
+                f"FROM public.job_entries WHERE user_id='{uid}' AND {_not_deleted} "
+                f"GROUP BY 1 HAVING {_client_expr} IS NOT NULL ORDER BY result DESC"
             )
 
         # "average fees per job" / "average billing" / "औसत"
@@ -4618,9 +4920,49 @@ class IntentService:
         if re.search(r'\b(total|sum|overall)\b.*\b(fees?|earnings?|income|revenue|billing)\b', msg):
             return f"SELECT SUM(fees) AS result FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
 
+        # "show all my clients" / "list clients" / "which clients" (NOT how many)
+        if re.search(r'\b(show|list|all|which|my)\b.{0,20}\b(clients?|brands?|companies|compan(?:y|ies))\b', msg) \
+                and not re.search(r'\b(how\s+many|count|kitne|number\s+of)\b', msg):
+            return (
+                f"SELECT DISTINCT {_client_expr} AS client_name "
+                f"FROM public.job_entries WHERE user_id='{uid}' AND {_not_deleted} "
+                f"AND {_client_expr} IS NOT NULL ORDER BY 1"
+            )
+
         # "show all jobs" / "list jobs" / "my jobs"
         if re.search(r'\b(show|list|all|my)\b.*\b(jobs?|entr(?:y|ies)?|records?|work)\b', msg):
             return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 25"
+
+        # Hinglish/Roman Hindi: "pichhle quarter/mahine mein kitna paisa aaya" — earnings SUM (no client filter)
+        # "paisa aaya" alone (without "se" / "ka" indicating a client) → total SUM
+        if re.search(r'\b(paisa\s+aaya|paisa\s+mila|kamai|kamaya|kitna\s+mila)\b', msg) \
+                and not re.search(r'\b(se\s+paisa\s+aaya|ka\s+paisa|ka\s+payment|se\s+paisa\s+mila)\b', msg):
+            return f"SELECT SUM(fees) AS result FROM public.job_entries WHERE user_id='{uid}' AND {_not_deleted}"
+
+        # "what did I do on [date]" / "show jobs on [date]" — date-specific job lookup
+        _date_on_m = re.search(
+            r'\b(?:what\s+did\s+i\s+do|what\s+was|show\s+(?:me\s+)?jobs?)\s+on\s+'
+            r'(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*(?:\s+\d{4})?'
+            r'|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2}(?:\s*,?\s*\d{4})?)',
+            msg,
+        )
+        if _date_on_m:
+            _raw_date = _date_on_m.group(1).strip()
+            from datetime import datetime as _dt_
+            _cur_year = _dt_.now().year
+            for _fmt in ("%d %B", "%d %b", "%B %d", "%b %d"):
+                try:
+                    _parsed = _dt_.strptime(_raw_date, _fmt).replace(year=_cur_year)
+                    _d = _parsed.strftime("%Y-%m-%d")
+                    return f"{base} AND job_date = '{_d}' ORDER BY job_date DESC"
+                except ValueError:
+                    pass
+            for _fmt in ("%d %B %Y", "%d %b %Y", "%B %d %Y", "%b %d, %Y"):
+                try:
+                    _d = _dt_.strptime(_raw_date, _fmt).strftime("%Y-%m-%d")
+                    return f"{base} AND job_date = '{_d}' ORDER BY job_date DESC"
+                except ValueError:
+                    pass
 
         # "unpaid" / "pending payments"
         if re.search(r'\b(unpaid|pending|not\s+paid|outstanding)\b', msg):
@@ -4809,9 +5151,25 @@ class IntentService:
             return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         rows = pending.get("rows", [])
-        # Bulk-delete path: "all" / "yes" / "delete all" / "all of them" → mark every row deleted.
-        _BULK_TOKENS = {"all", "yes", "y", "delete all", "all of them", "every one", "everyone", "do it"}
-        if msg in _BULK_TOKENS or msg.startswith("delete all") or msg.startswith("yes"):
+        _is_bulk_confirm = bool(pending.get("bulk_mode"))
+        # "yes"/"y"/"do it" only mean "delete all" when we EXPLICITLY asked a bulk
+        # confirmation ("Reply 'Yes' to delete all of them"). In a numbered
+        # disambiguation we only offered number/all/cancel — a bare "yes" there is
+        # ambiguous (often a stray confirmation meant for a DIFFERENT pending flow,
+        # e.g. an invoice email prompt). Treating it as delete-all caused jobs to be
+        # silently deleted. So: affirmatives delete-all ONLY in bulk_mode.
+        _AFFIRM_TOKENS = {"yes", "y", "do it", "every one", "everyone"}
+        _EXPLICIT_ALL = {"all", "delete all", "all of them"}
+        _is_explicit_all = msg in _EXPLICIT_ALL or msg.startswith("delete all")
+        _is_affirm = msg in _AFFIRM_TOKENS or msg.startswith("yes")
+        if _is_affirm and not _is_bulk_confirm:
+            # Ambiguous bare "yes" in a numbered disambiguation — do NOT delete.
+            # Fall through so a competing pending state (invoice email send
+            # confirmation, compound follow-up, etc.) can handle it instead.
+            self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
+            logger.info("[DISAMBIG] Bare 'yes' in numbered disambiguation — clearing and falling through (NOT deleting)")
+            return None
+        if _is_explicit_all or (_is_affirm and _is_bulk_confirm):
             if not rows:
                 self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
                 response = "Nothing to delete. Let me know if you need anything else."
@@ -5096,9 +5454,21 @@ class IntentService:
             except Exception:
                 prefs = {}
 
-        # ── Step 1: Name (required) ───────────────────────────────────────
+        # ── Step 1: Name (optional — 'skip' accepted) ────────────────────
         if not profile.get("name"):
             raw_name = message.strip()
+
+            # User explicitly skips → assign generic name and advance
+            if raw_name.lower() in ("skip", "n/a"):
+                name = "User"
+                self.supabase.upsert_user_profile(user_id, platform, {"name": name})
+                response = (
+                    "No problem! I'll refer to you as 'User' for now — you can change it anytime.\n\n"
+                    "What's your company or industry? (e.g. Video Production, Photography, Design)\n"
+                    "Type 'skip' to skip this too."
+                )
+                self._store_conversation(user_id, message, response)
+                return {"operation": "onboarding_name", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             _GREETING_WORDS = {
                 "hi", "hello", "helo", "hey", "heyy", "heyyy", "hii", "hiii",
@@ -5113,8 +5483,8 @@ class IntentService:
             if _stripped in {"good morning", "good evening", "good afternoon",
                              "whats up", "what's up"}:
                 _is_greeting_only = True
-            if _is_greeting_only or raw_name.lower() in ("skip", "no", "n/a", ""):
-                response = "Before we begin, please share your full name — it's required to set up your account."
+            if _is_greeting_only or raw_name.lower() in ("no", ""):
+                response = "Before we begin, please share your full name — or type 'skip' to continue without one."
                 self._store_conversation(user_id, message, response)
                 return {"operation": "onboarding_name_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -5164,16 +5534,43 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "onboarding_name", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # ── Step 2: Email (required, validated) ───────────────────────────
+        # ── Step 2: Email (optional — 'skip' accepted) ────────────────────
         elif not prefs.get("invoice_email"):
             raw = message.strip()
+
+            # User skips email → use name as company/industry and complete onboarding
+            if raw.lower() in ("skip", "n/a"):
+                user_name = profile.get("name", "User")
+                prefs["industry"] = user_name
+                from datetime import datetime
+                self.supabase.upsert_user_profile(user_id, platform, {
+                    "preferences": prefs,
+                    "onboarded_at": datetime.now().isoformat(),
+                })
+                response = (
+                    f"Got it, {user_name}! You're all set! ✅\n\n"
+                    "Here's how to use me:\n\n"
+                    "📊 View data:\n"
+                    "• 'How many jobs this month?'\n"
+                    "• 'Total fees for Client X'\n\n"
+                    "📄 Generate invoices:\n"
+                    "• 'Send invoice to Client for March'\n\n"
+                    "✏️ Add jobs:\n"
+                    "• 'Add a job for Client X'\n\n"
+                    "💳 Bank details:\n"
+                    "• 'Update bank details'\n\n"
+                    "Try it now! Say 'Add a job' to get started."
+                )
+                self._store_conversation(user_id, message, response)
+                return {"operation": "onboarding_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             # Try to extract an email if it's embedded in a sentence
             _m = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", raw)
             candidate = _m.group(0) if _m else raw
-            if raw.lower() in ("skip", "no", "n/a") or not self._is_valid_email(candidate):
+            if not self._is_valid_email(candidate):
                 response = (
                     "I need a valid email address to continue (e.g. name@company.com). "
-                    "This appears on your invoices and is required."
+                    "This appears on your invoices — or type 'skip' to set it up later."
                 )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "onboarding_email_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -5189,13 +5586,12 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "onboarding_email", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # ── Step 3: Industry (required) ───────────────────────────────────
+        # ── Step 3: Industry (optional — 'skip' accepted) ────────────────
         elif not prefs.get("industry"):
             industry = message.strip()
             if industry.lower() in ("skip", "no", "n/a", "") or len(industry) < 2:
-                response = "Please share your industry — it's required (e.g. Video Production, Photography, Design, Consulting)."
-                self._store_conversation(user_id, message, response)
-                return {"operation": "onboarding_industry_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                # Use user's name as default industry when skipped
+                industry = profile.get("name", "Freelancer")
             if len(industry) > 80:
                 industry = industry[:80]
             prefs["industry"] = industry
