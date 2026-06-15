@@ -269,6 +269,9 @@ class TestCase:
     response_must_not_contain: List[str] = field(default_factory=list)
     expected_extracted:   Optional[Dict] = None
     skip_sql_check:       bool = False
+    # Exact rows the mock DB should return — validates SQL correctness independent of NL synthesis.
+    # Use for queries with deterministic results (no date-relative filters).
+    expected_db_rows:     Optional[List[Dict]] = None
 
 
 _NO_ERROR = ["Two ways I could read", "couldn't format", "couldn't quite work out"]
@@ -283,6 +286,7 @@ TESTS: List[TestCase] = [
         sql_must_not_contain=["SELECT *"],
         response_must_match=[r"\b8\b"],
         response_must_not_contain=_NO_ERROR,
+        expected_db_rows=[{"result": 8}],
     ),
     TestCase(
         id="C1-02", message="How many total jobs do I have?",
@@ -291,6 +295,7 @@ TESTS: List[TestCase] = [
         sql_must_not_contain=["SELECT *"],
         response_must_match=[r"\b8\b"],
         response_must_not_contain=_NO_ERROR,
+        expected_db_rows=[{"result": 8}],
     ),
     TestCase(
         id="C1-03", message="How many unpaid invoices do I have?",
@@ -312,8 +317,10 @@ TESTS: List[TestCase] = [
         id="C2-01", message="Total billing this year",
         category="SUM",
         sql_must_contain=["SUM("],
-        response_must_match=[r"₹\s*\d[\d,]*"],
+        # All 8 mock rows are in 2026: 150k+200k+80k+120k+95k+300k+55k+175k = 1,175,000
+        response_must_match=[r"11[,.]?75[,.]?000|1[,.]?175[,.]?000|1175000"],
         response_must_not_contain=_NO_ERROR,
+        expected_db_rows=[{"result": 1175000}],
     ),
     TestCase(
         id="C2-02", message="Earnings last quarter",
@@ -357,8 +364,11 @@ TESTS: List[TestCase] = [
         id="C3-02", message="Average fees per job",
         category="AVG",
         sql_must_contain=["AVG("],
-        response_must_match=[r"₹\s*\d[\d,]*|\d[\d,]*"],
-        response_must_not_contain=_NO_ERROR,
+        # AVG of 8 rows = 1,175,000 / 8 = 146,875. Must contain the actual value,
+        # not just any number — this catches the AVG→SUM refusal bug from HANDOFF.md.
+        response_must_match=[r"1[,.]?46[,.]?875|146875"],
+        response_must_not_contain=_NO_ERROR + ["total fees", "can't calculate", "cannot calculate", "don't calculate"],
+        expected_db_rows=[{"result": 146875}],
     ),
     TestCase(
         id="C3-03", message="Top 3 clients by total revenue",
@@ -373,8 +383,10 @@ TESTS: List[TestCase] = [
         id="C4-01", message="How much does Star Studios owe me?",
         category="Client unpaid SUM",
         sql_must_contain=["SUM(", "Star Studios"],
-        response_must_match=[r"Star Studios", r"₹\s*\d[\d,]*"],
+        # Only row 2 (Adidas, paid=None) = 200,000. Row 1 is paid so excluded.
+        response_must_match=[r"Star Studios", r"2[,.]?00[,.]?000|200[,.]?000|200000"],
         response_must_not_contain=_NO_ERROR,
+        expected_db_rows=[{"result": 200000}],
     ),
     TestCase(
         id="C4-02", message="Star Studios se paisa aaya kya?",
@@ -480,8 +492,10 @@ TESTS: List[TestCase] = [
         id="C8-02", message="Total fees for Star Studios",
         category="Hinglish — client total",
         sql_must_contain=["SUM(", "Star Studios"],
+        # Row 1 (150k) + Row 2 (200k) = 350,000
         response_must_match=[r"₹\s*3[,.]?50[,.]?000|₹\s*350"],
         response_must_not_contain=_NO_ERROR,
+        expected_db_rows=[{"result": 350000}],
     ),
     TestCase(
         id="C8-03", message="Kaunse jobs ka invoice nahi gaya",
@@ -584,6 +598,12 @@ def run_query_test(tc: TestCase, gemini, supabase) -> TestResult:
         if sql and not sql.startswith("["):
             db = supabase.execute_sql(sql)
             rows = db.get("rows", []) if db.get("ok") else []
+
+            if tc.expected_db_rows is not None and rows != tc.expected_db_rows:
+                sql_failures.append(
+                    f"DB result mismatch: expected {tc.expected_db_rows}, got {rows}"
+                )
+
             payload = build_clean_payload(rows, "select")
             response = gemini.synthesize_response(payload, tc.message)
         else:
