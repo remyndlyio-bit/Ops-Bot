@@ -66,6 +66,35 @@ _CLIENT_WORD = r"(?:clients?|brands?|companies|compan(?:y|ies)|customers?)"
 _COUNT_WORD = r"(?:how\s+many|count|kitne|number\s+of)"
 _JOB_WORD = r"\b(?:job|project|work|gig|invoice|earner|payday|paycheck)\b"
 
+# Time/period tokens that are NOT a client name in a "for X" / "from X" phrase.
+_TIME_TOKENS = {
+    "today", "yesterday", "week", "weeks", "month", "months", "quarter", "quarters",
+    "year", "years", "q1", "q2", "q3", "q4", "this", "last", "next", "each", "ago",
+    "recent", "latest", "now", "the", "all", "every",
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    "january", "february", "march", "april", "june", "july", "august",
+    "september", "october", "november", "december",
+}
+
+
+def _has_scope_qualifier(msg: str) -> bool:
+    """True if the message narrows results by date period or a specific client —
+    in which case an UNFILTERED aggregate/list route must step aside and let the
+    planner build the filtered query. Prevents "total billing for Nike" from
+    returning the grand total, or "how many jobs this quarter" ignoring the date."""
+    if re.search(r'\b(today|yesterday|quarter|q[1-4]|20\d{2}'
+                 r'|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec'
+                 r'|january|february|march|april|june|july|august'
+                 r'|september|october|november|december)\b', msg):
+        return True
+    if re.search(r'\b(last|this|next|past|previous)\s+(week|month|quarter|year|fortnight)\b', msg):
+        return True
+    # "for <client>" / "from <client>" where the word isn't a time token.
+    for m in re.finditer(r'\b(?:for|from)\s+([a-z0-9]+)', msg):
+        if m.group(1) not in _TIME_TOKENS:
+            return True
+    return False
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # Routes — ordered most-specific first in _ROUTES below.
@@ -203,8 +232,10 @@ def _route_list_clients(msg: str, uid: str) -> Optional[RoutedQuery]:
 
 
 def _route_average_fees(msg: str, uid: str) -> Optional[RoutedQuery]:
-    """"Average fees per job" / "average billing" / "औसत"."""
+    """"Average fees per job" / "average billing" / "औसत" (unqualified only)."""
     if not re.search(r'\b(average|avg|औसत)\b.{0,30}\b(fees?|billing|earnings?|amount|income)\b', msg):
+        return None
+    if _has_scope_qualifier(msg):   # "average fee for Nike" / "...this quarter" → planner
         return None
     sql = (
         f"SELECT AVG(fees) AS result FROM public.job_entries "
@@ -214,19 +245,21 @@ def _route_average_fees(msg: str, uid: str) -> Optional[RoutedQuery]:
 
 
 def _route_count_jobs(msg: str, uid: str) -> Optional[RoutedQuery]:
-    """"How many jobs / total number of jobs / kitne jobs"."""
+    """"How many jobs / total number of jobs / kitne jobs" (unqualified only)."""
     if not re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of|kitne)\b.*\b(jobs?|entr(?:y|ies)?|records?|work|kaam)\b', msg):
+        return None
+    if _has_scope_qualifier(msg):   # "how many jobs this quarter" / "...for Nike" → planner
         return None
     sql = f"SELECT COUNT(*) AS result FROM public.job_entries WHERE user_id='{uid}' AND {NOT_DELETED}"
     return RoutedQuery("count_jobs", sql, AGGREGATE)
 
 
 def _route_total_fees(msg: str, uid: str) -> Optional[RoutedQuery]:
-    """"Total billing / total earnings / overall revenue" (no client, no date)."""
+    """"Total billing / total earnings / overall revenue" (unqualified only)."""
     if not re.search(r'\b(total|sum|overall)\b.*\b(fees?|earnings?|income|revenue|billing)\b', msg):
         return None
-    # Defer to the planner when a date phrase is present — date math belongs there.
-    if re.search(r'\b(today|yesterday|week|month|quarter|year|q[1-4]|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|20\d{2}|last|this)\b', msg):
+    # Date phrase or specific client → the planner builds the filtered query.
+    if _has_scope_qualifier(msg):
         return None
     sql = f"SELECT SUM(fees) AS result FROM public.job_entries WHERE user_id='{uid}' AND {NOT_DELETED}"
     return RoutedQuery("total_fees", sql, AGGREGATE)
@@ -296,8 +329,12 @@ def _route_unpaid_list(msg: str, uid: str) -> Optional[RoutedQuery]:
 
 
 def _route_list_jobs(msg: str, uid: str) -> Optional[RoutedQuery]:
-    """"Show all jobs / list my jobs" — recent jobs list."""
+    """"Show all jobs / list my jobs" — recent jobs list (unfiltered only)."""
     if not re.search(r'\b(show|list|all|my)\b.*\b(jobs?|entr(?:y|ies)?|records?|work)\b', msg):
+        return None
+    # "Show jobs for Nike" / "my jobs for March" / "jobs this quarter" carry a
+    # filter the generic list can't honour — hand to the planner.
+    if _has_scope_qualifier(msg):
         return None
     sql = f"{_base(uid)} ORDER BY job_date DESC NULLS LAST LIMIT 25"
     return RoutedQuery("list_jobs", sql, ROWS)

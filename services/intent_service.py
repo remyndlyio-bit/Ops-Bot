@@ -222,6 +222,10 @@ def _generate_jobs_excel(rows: list, user_id: str) -> str:
 
     safe_uid = re.sub(r'[^a-zA-Z0-9]', '_', str(user_id))[-20:]
     filename = f"jobs_{safe_uid}_{int(time.time())}.xlsx"
+    # Ensure the output directory exists. It is gitignored, so a fresh worktree
+    # or deploy won't have it — without this, every >4-row query crashes with
+    # FileNotFoundError when saving the spreadsheet.
+    os.makedirs("output", exist_ok=True)
     path = os.path.join("output", filename)
     wb.save(path)
 

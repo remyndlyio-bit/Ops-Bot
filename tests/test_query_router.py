@@ -142,6 +142,41 @@ class TestNonMatches:
         assert r is None or r.render != CLIENT_LIST
 
 
+class TestScopeQualifierGuard:
+    """Unfiltered aggregate/list routes must DEFER to the planner when a date
+    period or specific client narrows the query — otherwise they return the
+    grand total / all rows and silently drop the filter."""
+
+    @pytest.mark.parametrize("msg", [
+        "Total billing for Nike",          # client filter
+        "Total billing this year",         # date filter
+        "How many jobs this quarter?",     # date filter
+        "How many jobs for Samsung",       # client filter
+        "average fee for Garnier",         # client filter
+        "Show jobs for Nike",              # client filter
+        "Show my jobs for March",          # month filter
+        "List all jobs this quarter",      # date filter
+        "earnings in April",               # month filter
+    ])
+    def test_qualified_aggregates_defer_to_planner(self, msg):
+        r = _route(msg)
+        assert r is None or r.name not in (
+            "total_fees", "count_jobs", "average_fees", "list_jobs"
+        ), f"{msg!r} wrongly matched unfiltered route {r and r.name} (dropped the filter)"
+
+    @pytest.mark.parametrize("msg,route", [
+        ("How many jobs have I done?", "count_jobs"),
+        ("Total billing", "total_fees"),
+        ("what's my average fee", "average_fees"),
+        ("Show all my jobs", "list_jobs"),
+    ])
+    def test_unqualified_aggregates_still_fire(self, msg, route):
+        r = _route(msg)
+        assert r is not None and r.name == route, (
+            f"{msg!r} should still route to {route}, got {r and r.name}"
+        )
+
+
 # ── SQL safety: user_id is escaped, no obvious injection surface ─────────────
 
 class TestSqlSafety:
