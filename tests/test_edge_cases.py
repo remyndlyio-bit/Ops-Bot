@@ -806,3 +806,75 @@ class TestHindiWithEnglishNames:
         assert any(k in resp for k in ["nike", "invoice", "april", "month"]), (
             f"Expected invoice response for Hinglish input, got: {result.get('response')!r}"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 144 – Regression batch: FAILs 38/40/42/44 from the live WhatsApp audit
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestRegressionBatch3745:
+    """Deterministic fixes for the final regression batch."""
+
+    def test_delete_last_job_not_treated_as_client(self):
+        """FAIL 40: 'Delete my last job' must delete the most recent job, not
+        search for a client literally named 'last'."""
+        svc = _make_svc()
+        svc.supabase.execute_sql.return_value = {
+            "ok": True,
+            "rows": [{"id": "r1", "client_name": "Nike", "job_date": "2026-04-10",
+                      "job_description_details": "Shoot"}],
+        }
+        result = svc.process_request("user1", "Delete my last job")
+        resp = result.get("response", "").lower()
+        assert "matching 'last'" not in resp, (
+            f"'last' was treated as a client name: {result.get('response')!r}"
+        )
+        # The soft-delete fetch must NOT filter by a client named 'last'.
+        for call in svc.supabase.execute_sql.call_args_list:
+            sql = (call.args[0] if call.args else "").lower()
+            assert "ilike '%last%'" not in sql, f"Filtered by client 'last': {sql}"
+
+    def test_out_of_scope_flight_is_refused_not_errored(self):
+        """FAIL 44: 'Can you book me a flight?' → on-brand refusal, not an error."""
+        svc = _make_svc()
+        svc.gemini.answer_feature_question.return_value = (
+            "I can't book flights — I track jobs, invoices, and payments."
+        )
+        result = svc.process_request("user1", "Can you book me a flight?")
+        assert result.get("operation") == "unsupported", (
+            f"Expected on-brand refusal, got: {result.get('operation')} / {result.get('response')!r}"
+        )
+        resp = result.get("response", "").lower()
+        assert "snag" not in resp and "circuits" not in resp and "blanked" not in resp
+
+    def test_maybe_later_acknowledged_not_errored(self):
+        """FAIL 38: 'Maybe later' → graceful acknowledgement, never an error."""
+        svc = _make_svc()
+        result = svc.process_request("user1", "Maybe later")
+        assert result.get("operation") == "decline_followup", (
+            f"Expected decline acknowledgement, got: {result.get('operation')} / {result.get('response')!r}"
+        )
+
+    def test_invoice_for_them_resolves_from_context(self):
+        """FAIL 42: 'Generate invoice for them' must resolve 'them' to the client
+        in context, not search for a client literally named 'Them'."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {"client_name": "Nike", "operation": "query", "entity": "job"},
+            "uscf_context": {"last_row_data": {"client_name": "Nike"}},
+        }
+        svc.gemini.is_invoice_action_request.return_value = True
+        svc.gemini.parse_user_intent.return_value = {
+            "operation": "ACTION_TRIGGER",
+            "parameters": {"client_name": None, "month": None, "year": None},
+        }
+        svc.supabase.get_available_months_for_client.return_value = {
+            "ok": True, "months": [{"label": "April 2026", "month": 4, "year": 2026}],
+        }
+        svc.supabase.execute_sql.return_value = {"ok": True, "rows": [{"client_name": "Nike"}]}
+        result = svc.process_request("user1", "Generate invoice for them")
+        resp = result.get("response", "").lower()
+        assert "couldn't find a client" not in resp, (
+            f"'them' was treated as a client name: {result.get('response')!r}"
+        )
+        assert "them" not in resp or "nike" in resp

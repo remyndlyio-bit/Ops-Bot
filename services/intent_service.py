@@ -3148,15 +3148,42 @@ class IntentService:
             ]
             if msg_lower in _NEGATIVE_RESPONSES:
                 # Check if last assistant message was a follow-up question
+                is_followup = False
                 if conversation_history:
                     last_msgs = [m for m in conversation_history if m.get("role") == "assistant"]
                     if last_msgs:
                         last_assistant = last_msgs[-1].get("content", "").lower()
                         is_followup = any(marker in last_assistant for marker in _FOLLOWUP_MARKERS) or last_assistant.rstrip().endswith("?")
-                        if is_followup:
-                            response = "👍 Got it. Let me know if you need anything else."
-                            self._store_conversation(user_id, message, response)
-                            return {"operation": "decline_followup", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                # A bare decline reaching this point has no actionable target (every
+                # awaiting-state handler already ran above). Acknowledge gracefully
+                # rather than letting "maybe later" / "not now" fall through to the
+                # SQL pipeline, where it parses to nothing and surfaces as an error.
+                _PURE_SOCIAL_DECLINE = {
+                    "maybe later", "not now", "not right now", "no thanks",
+                    "no thank you", "i'm good", "im good", "all good", "pass",
+                    "that's fine", "thats fine", "no need", "no its fine",
+                    "no it's fine", "i'm fine", "im fine",
+                }
+                if is_followup or msg_lower in _PURE_SOCIAL_DECLINE:
+                    response = "👍 Got it. Let me know if you need anything else."
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "decline_followup", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # 0b6. Clearly out-of-scope requests (book a flight/cab/hotel, order food,
+            # etc.) — give a deterministic on-brand refusal instead of letting them hit
+            # the SQL pipeline, where they parse to nothing and surface as an error.
+            _OOS = re.search(
+                r'\b(book|order|reserve|buy|get\s+me|find\s+me)\b.{0,25}'
+                r'\b(flight|flights|uber|ola|cab|taxi|ride|hotel|room|ticket|tickets|'
+                r'food|pizza|lunch|dinner|coffee|groceries|grocery)\b',
+                msg_lower,
+            )
+            if _OOS:
+                response = self.gemini.answer_feature_question(message, conversation_history=conversation_history)
+                if not response or not response.strip():
+                    response = unsupported_feature_phrase(message[:80])
+                self._store_conversation(user_id, message, response)
+                return {"operation": "unsupported", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             # ── Context Reconstruction ──────────────────────────────────
             # For short / ambiguous messages, merge with stored last_intent
@@ -3500,7 +3527,16 @@ class IntentService:
                             msg_lower, re.IGNORECASE
                         )
                         if _for_match:
-                            _direct_client = _for_match.group(1).strip().title()
+                            _cand_client = _for_match.group(1).strip().title()
+                            # Pronouns ("them", "it", "this client") are NOT client
+                            # names — leave _direct_client null so downstream context
+                            # resolution maps them to the remembered client.
+                            _PRONOUNS = {
+                                "them", "it", "this", "that", "this client", "that client",
+                                "the client", "him", "her", "they", "this one", "that one",
+                            }
+                            if _cand_client.lower() not in _PRONOUNS:
+                                _direct_client = _cand_client
                     if _direct_bill:
                         intent_result = {
                             "operation": "ACTION_TRIGGER",
@@ -3590,6 +3626,14 @@ class IntentService:
                         intent_result["operation"] = "SEND_EMAIL"
 
                     client_name = (params.get("client_name") or "").strip()
+                    # A pronoun is never a real client — clear it so context
+                    # resolution (last_saved_job / uscf_context / last_intent) maps
+                    # "them"/"it"/"this client" to the remembered client.
+                    if client_name.lower() in (
+                        "them", "it", "this", "that", "this client", "that client",
+                        "the client", "him", "her", "they", "this one", "that one",
+                    ):
+                        client_name = ""
                     month_name = (params.get("month") or "").strip()
                     year_val = params.get("year")
                     bill_number = (params.get("bill_number") or "").strip() or None
@@ -5004,14 +5048,21 @@ class IntentService:
             r'\b(?:delete|remove|erase|trash|discard)\s+(?:all\s+)?(?:jobs?|entries|records?|rows?)\s+(?:for|from|of)\s+(.+?)$',
             r'\b(?:all|every)\s+(.+?)\s+(?:jobs?|entries|records?)\b',
         ]
-        for _pat in _patterns:
-            _m = re.search(_pat, msg_lower, re.IGNORECASE)
-            if _m:
-                _hint = _m.group(1).strip().strip("'\"")
-                # Reject empty / generic words
-                if _hint and _hint not in ("my", "the", "all", "every", "this", "that"):
-                    client_hint = _hint
-                    break
+        # "last"/"latest"/"recent" are POSITIONAL references, not client names —
+        # "delete my last job" must not extract "last" as a client (which then
+        # matches nothing → "no jobs matching 'last'"). Skip hint extraction when
+        # the message is a last/recent reference; is_last drives row selection below.
+        _hint_stopwords = ("my", "the", "all", "every", "this", "that",
+                           "last", "latest", "recent", "most", "most recent")
+        if not is_last:
+            for _pat in _patterns:
+                _m = re.search(_pat, msg_lower, re.IGNORECASE)
+                if _m:
+                    _hint = _m.group(1).strip().strip("'\"")
+                    # Reject empty / generic / positional words
+                    if _hint and _hint not in _hint_stopwords:
+                        client_hint = _hint
+                        break
 
         if not is_last and last_row and any(w in msg_lower for w in ["this", "it", "that"]):
             # Delete the job that was most recently shown
@@ -5243,7 +5294,28 @@ class IntentService:
             return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         result_rows = exec_result.get("rows", [])
-        if result_rows:
+        _is_update = targeted_sql.strip().upper().startswith("UPDATE")
+        if result_rows and _is_update:
+            # Deterministic confirmation for the picked UPDATE — don't hand the row
+            # to the synthesiser, which sometimes just re-describes it (and can read
+            # the new state as the old, e.g. "it's currently unpaid" right after we
+            # marked it paid). State plainly what changed.
+            self._update_sql_context(user_id, result_rows)
+            _row = result_rows[0]
+            _client = (_row.get("client_name") or _row.get("brand_name") or "the job").strip()
+            _bill = (_row.get("bill_no") or "").strip()
+            _label = f"{_client} ({_bill})" if _bill else _client
+            _updates = pending.get("updates") or {}
+            _paid_set = any(str(k).lower() == "paid" for k in _updates) or "set paid" in targeted_sql.lower()
+            _now_paid = str(_row.get("paid", "")).strip().lower() in ("yes", "true", "t", "1", "paid")
+            if _paid_set and _now_paid:
+                response = f"✅ Done — marked {_label} as paid."
+            elif _updates:
+                _changed = ", ".join(f"{k.replace('_', ' ')} → {v}" for k, v in _updates.items())
+                response = f"✅ Done — updated {_label}: {_changed}."
+            else:
+                response = f"✅ Done — updated {_label}."
+        elif result_rows:
             self._update_sql_context(user_id, result_rows)
             payload = build_clean_payload(result_rows, "select")
             # _handle_disambiguation_reply has no conversation_history parameter
