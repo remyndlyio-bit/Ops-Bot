@@ -40,6 +40,21 @@ def _is_full_job_row(row: dict) -> bool:
     return "bill_no" in row or "job_date" in row
 
 
+def _is_aggregate_sql(sql: str) -> bool:
+    """True when the SQL is an aggregate / GROUP BY query (has GROUP BY, an
+    aggregate function, or an `AS result` alias). Such queries must NOT be
+    rewritten to `SELECT *` for history questions — doing so drops the aliased
+    aggregate that ORDER BY / HAVING still reference, causing Postgres
+    'column "result" does not exist'."""
+    if not sql:
+        return False
+    return bool(
+        re.search(r"\bGROUP\s+BY\b", sql, re.IGNORECASE)
+        or re.search(r"\b(SUM|AVG|COUNT|MIN|MAX)\s*\(", sql, re.IGNORECASE)
+        or re.search(r"\bAS\s+result\b", sql, re.IGNORECASE)
+    )
+
+
 def _format_job_card(row: dict) -> str:
     client = (row.get("client_name") or row.get("brand_name") or
               row.get("production_house") or "—").strip()
@@ -4454,10 +4469,18 @@ class IntentService:
             sql = re.sub(r"SET\s+paid\s*=\s*'(?:true|1|yes)'",  "SET paid = 'Yes'",  sql, flags=re.IGNORECASE)
             sql = re.sub(r"SET\s+paid\s*=\s*'(?:false|0|no)'",  "SET paid = 'No'",   sql, flags=re.IGNORECASE)
 
-            # History questions need SELECT * so that the `notes` change-log reaches Gemini.
-            if _is_history_q and sql and sql.upper().lstrip().startswith("SELECT"):
+            # History questions need SELECT * so that the `notes` change-log reaches
+            # Gemini. But ONLY for plain row SELECTs — NEVER for aggregate / GROUP BY
+            # queries: rewriting "SELECT job_description, AVG(fees) AS result ... ORDER
+            # BY result" to "SELECT *" drops the aliased aggregate while ORDER BY/HAVING
+            # still reference it → Postgres "column result does not exist". (is_history_question
+            # also false-positives on phrases like "all time", so this guard matters.)
+            _is_agg_sql = _is_aggregate_sql(sql)
+            if _is_history_q and sql and sql.upper().lstrip().startswith("SELECT") and not _is_agg_sql:
                 sql = re.sub(r"(?i)^\s*SELECT\s+(?!\*).+?\s+FROM\s+", "SELECT * FROM ", sql, count=1)
                 logger.info("[PIPELINE] History question — rewrote SELECT to SELECT *")
+            elif _is_history_q and _is_agg_sql:
+                logger.info("[PIPELINE] History question but aggregate/GROUP BY SQL — skipping SELECT * rewrite (would break the aggregate alias)")
 
             # Expand AI-generated `client_name ILIKE 'X'` → `(client_name ILIKE '%X%' OR brand_name ILIKE '%X%')`
             # Users say "Nike" meaning the brand; the actual client_name may be a production company.

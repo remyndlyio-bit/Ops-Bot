@@ -456,3 +456,43 @@ class TestGroupByPayload:
         payload = build_clean_payload(rows, "select")
         assert payload["type"] == "aggregate"
         assert payload["data"]["result"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# History-question SELECT* rewrite must NOT clobber aggregate / GROUP BY SQL.
+# Regression for the production crash: "give me top 3 jobs all time with their
+# average" → SELECT job_description, AVG(fees) AS result ... ORDER BY result was
+# rewritten to SELECT * → Postgres 'column "result" does not exist'.
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestHistoryRewriteSkipsAggregates:
+    def test_detects_group_by_as_aggregate(self):
+        from services.intent_service import _is_aggregate_sql
+        assert _is_aggregate_sql(
+            "SELECT job_description_details, AVG(fees) AS result FROM public.job_entries "
+            "WHERE user_id='x' GROUP BY job_description_details ORDER BY result DESC"
+        )
+
+    def test_detects_bare_aggregate_function(self):
+        from services.intent_service import _is_aggregate_sql
+        assert _is_aggregate_sql("SELECT SUM(fees) AS result FROM public.job_entries WHERE user_id='x'")
+        assert _is_aggregate_sql("SELECT COUNT(*) AS result FROM public.job_entries WHERE user_id='x'")
+
+    def test_plain_select_is_not_aggregate(self):
+        from services.intent_service import _is_aggregate_sql
+        assert not _is_aggregate_sql(
+            "SELECT bill_no, client_name, fees FROM public.job_entries WHERE user_id='x' ORDER BY job_date DESC"
+        )
+
+    def test_aggregate_sql_survives_history_rewrite(self):
+        """The actual guard: an aggregate SELECT must keep its alias when the
+        history flag is on (otherwise ORDER BY result breaks)."""
+        import re
+        from services.intent_service import _is_aggregate_sql
+        sql = ("SELECT job_description_details, AVG(fees) AS result FROM public.job_entries "
+               "WHERE user_id='x' GROUP BY job_description_details ORDER BY result DESC")
+        is_history = True
+        if is_history and sql.upper().lstrip().startswith("SELECT") and not _is_aggregate_sql(sql):
+            sql = re.sub(r"(?i)^\s*SELECT\s+(?!\*).+?\s+FROM\s+", "SELECT * FROM ", sql, count=1)
+        assert "AVG(fees) AS result" in sql, "aggregate alias was destroyed by the rewrite"
+        assert "SELECT *" not in sql
