@@ -1683,8 +1683,7 @@ class IntentService:
                 "Job: Master film 30 sec + 4 cutdowns\n"
                 "Client: The Good Take\n"
                 "Fees: 25k\n"
-                "POC: Rohan Mehta\n"
-                "POC Email: rohan@thegoodtake.com (optional)"
+                "POC: Rohan Mehta"
             )
             self._store_conversation(user_id, message, response)
             return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -1720,8 +1719,7 @@ class IntentService:
                 "Job: Master film 30 sec + 4 cutdowns\n"
                 "Client: The Good Take\n"
                 "Fees: 25k\n"
-                "POC: Rohan Mehta\n"
-                "POC Email: rohan@thegoodtake.com (optional)"
+                "POC: Rohan Mehta"
             )
             self._store_conversation(user_id, content, response)
             return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
