@@ -8,6 +8,16 @@ from utils.logger import logger
 import re as _re
 
 
+def has_usable_bank_details(bank_details) -> bool:
+    """True only when bank details carry a non-empty account number — the one
+    field a payer actually needs. Used as the HARD GUARD against emitting an
+    unpayable (bankless) invoice. Shared so the pre-check and the generation-time
+    guard agree on what 'has bank details' means."""
+    if not bank_details:
+        return False
+    return bool(str(bank_details.get("bank_account_number") or "").strip())
+
+
 def _strip_billing_label(text: str) -> str:
     """Remove a stray leading label the user often types into billing details,
     e.g. "Billing info is Spotify India..." → "Spotify India...". Defensive

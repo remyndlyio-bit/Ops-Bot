@@ -377,6 +377,36 @@ async def process_and_send_invoice(
                         "gst": bank_details.get("gst_number", "") if bank_details else "",
                     }
                     logger.info(f"[INVOICE] Loaded user profile for invoice header: name={user_profile.get('name')}")
+
+            # ── HARD GUARD: never emit a bankless invoice ──────────────────────
+            # The client can't pay without account details, so an invoice with a
+            # blank BANK ACCOUNT DETAILS section is worse than no invoice. The
+            # intent_service pre-check tries to catch this earlier, but this is the
+            # belt-and-suspenders gate at the actual generation point — if we got
+            # here without a bank account number, abort and tell the user, instead
+            # of silently producing an unpayable PDF.
+            from services.invoice_generation_service import has_usable_bank_details
+            if not has_usable_bank_details(bank_details):
+                logger.warning(f"[INVOICE] Aborting generation for user_id={user_id} — no bank account number on file (hard guard)")
+                _no_bank_msg = (
+                    "I couldn't generate the invoice yet — your bank account details are missing, "
+                    "and the client can't pay without them.\n\n"
+                    "Send your bank details in this format and I'll generate it right away:\n\n"
+                    "Account Name: Your Name\n"
+                    "Bank Name: HDFC Bank\n"
+                    "Account Number: 1234567890\n"
+                    "IFSC: HDFC0001234\n"
+                    "UPI: you@upi (optional)"
+                )
+                try:
+                    if platform == "whatsapp" and to_number:
+                        whatsapp_service.send_text_message(to_number, _no_bank_msg)
+                    elif platform == "telegram" and chat_id:
+                        await telegram_service.send_text_message(chat_id, _no_bank_msg)
+                except Exception as _ne:
+                    logger.error(f"[INVOICE] Failed to notify user about missing bank details: {_ne}")
+                return
+
             pdf_path = invoice_gen_service.generate_pdf(summary, data, bank_details=bank_details, user_profile=user_profile)
             if not pdf_path:
                 logger.error("Failed to generate PDF")

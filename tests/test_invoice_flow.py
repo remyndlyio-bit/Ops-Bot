@@ -369,3 +369,26 @@ class TestInvoicePdfFeedbackFixes:
         r2 = svc._handle_invoice_address_response("u1", "skip")
         saved2 = svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]
         assert saved2.get("invoice_address_skipped") is True
+
+
+class TestBankHardGuard:
+    """has_usable_bank_details() is the gate that stops bankless (unpayable)
+    invoices from being generated."""
+
+    def test_none_or_empty(self):
+        from services.invoice_generation_service import has_usable_bank_details
+        assert has_usable_bank_details(None) is False
+        assert has_usable_bank_details({}) is False
+
+    def test_missing_or_blank_account_number(self):
+        from services.invoice_generation_service import has_usable_bank_details
+        # The FAIL-34 shape: bank name + UPI present but NO account number.
+        assert has_usable_bank_details({"bank_name": "HDFC", "upi_id": "x@y"}) is False
+        assert has_usable_bank_details({"bank_account_number": ""}) is False
+        assert has_usable_bank_details({"bank_account_number": "   "}) is False
+        assert has_usable_bank_details({"bank_account_number": None}) is False
+
+    def test_valid_account_number(self):
+        from services.invoice_generation_service import has_usable_bank_details
+        assert has_usable_bank_details({"bank_account_number": "1234567890"}) is True
+        assert has_usable_bank_details({"bank_account_number": 1234567890}) is True
