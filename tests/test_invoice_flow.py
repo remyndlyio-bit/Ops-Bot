@@ -360,15 +360,17 @@ class TestInvoicePdfFeedbackFixes:
         svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {}}}
         svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "X"}, "pending_address_user_id": "u1"}
 
-        r = svc._handle_invoice_address_response("u1", "12 MG Road, Mumbai")
-        assert r["trigger_invoice"] is True
+        svc.process_request = MagicMock(return_value={"operation": "query", "response": "ok"})
+        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "X", "month": "March", "year": 2026}, "pending_address_user_id": "u1"}
+        svc._handle_invoice_address_response("u1", "12 MG Road, Mumbai")
         saved = svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]
         assert saved.get("invoice_address") == "12 MG Road, Mumbai"
+        assert svc.process_request.called, "should re-enter the invoice flow after saving the address"
 
+        # 'cancel' aborts the invoice (address is now mandatory, no skip)
         svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "X"}, "pending_address_user_id": "u1"}
-        r2 = svc._handle_invoice_address_response("u1", "skip")
-        saved2 = svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]
-        assert saved2.get("invoice_address_skipped") is True
+        r2 = svc._handle_invoice_address_response("u1", "cancel")
+        assert r2["operation"] == "invoice_cancelled" and r2["trigger_invoice"] is False
 
 
 class TestBankHardGuard:
@@ -394,38 +396,60 @@ class TestBankHardGuard:
         assert has_usable_bank_details({"bank_account_number": 1234567890}) is True
 
 
-class TestAddressCheckNotBypassed:
-    """The #2 address prompt must also fire on the bank-resume path (when bank
-    details were the blocker), not just the single-pass path."""
+class TestInvoiceReadinessGate:
+    """_invoice_readiness_check is the mandatory-fields gate: it returns a prompt
+    for the FIRST missing required field (billing, POC, job description, bank,
+    address), in order, and None only when the invoice is complete."""
 
-    def _svc(self):
+    COMPLETE_ROW = {
+        "id": "r1", "client_name": "Spotify", "client_billing_details": "Spotify India",
+        "poc_name": "karan", "job_description_details": "2 master films english VO",
+        "job_date": "2026-03-04", "fees": 10000,
+    }
+    INVOICE = {"client_name": "Spotify", "month": "March", "year": 2026}
+
+    def _svc(self, row_overrides=None, bank=True, address=True):
         from unittest.mock import patch, MagicMock
         with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
              patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
             from services.intent_service import IntentService
             svc = IntentService()
         svc.supabase = MagicMock(); svc.memory = MagicMock()
-        svc.supabase.upsert_user_config.return_value = {"ok": True}
+        row = dict(self.COMPLETE_ROW)
+        if row_overrides:
+            row.update(row_overrides)
+        svc.supabase.fetch_job_entries_for_invoice.return_value = {"ok": True, "rows": [row]}
+        svc.supabase.get_user_bank_details.return_value = {"ok": True, "data": ({"bank_account_number": "123456"} if bank else None)}
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": ({"invoice_address": "12 MG Road"} if address else {})}}
         return svc
 
-    def test_bank_resume_runs_address_check_when_missing(self):
-        svc = self._svc()
-        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {}}}
-        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "Spotify"}}
-        r = svc._handle_bank_details_response("u1", "Account Name: D\nAccount Number: 123456\nIFSC: HDFC001")
-        assert r["trigger_invoice"] is False, "should ask for address before generating, not generate"
-        assert "address" in r["response"].lower()
+    def _check(self, svc):
+        return svc._invoice_readiness_check("u1", "u1", dict(self.INVOICE))
 
-    def test_bank_resume_generates_when_address_present(self):
-        svc = self._svc()
-        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {"invoice_address": "12 MG Road"}}}
-        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "Spotify"}}
-        r = svc._handle_bank_details_response("u1", "Account Name: D\nAccount Number: 123456\nIFSC: HDFC001")
-        assert r["trigger_invoice"] is True
+    def test_all_present_passes(self):
+        assert self._check(self._svc()) is None
 
-    def test_bank_resume_generates_when_address_skipped(self):
-        svc = self._svc()
-        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {"invoice_address_skipped": True}}}
-        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "Spotify"}}
-        r = svc._handle_bank_details_response("u1", "Account Name: D\nAccount Number: 123456\nIFSC: HDFC001")
-        assert r["trigger_invoice"] is True
+    def test_missing_billing_prompts_first(self):
+        r = self._check(self._svc({"client_billing_details": ""}))
+        assert r is not None and "billing" in r["response"].lower() and r["trigger_invoice"] is False
+
+    def test_missing_poc(self):
+        r = self._check(self._svc({"client_billing_details": "Spotify India", "poc_name": ""}))
+        assert r is not None and "addressed to" in r["response"].lower()
+
+    def test_missing_job_description(self):
+        r = self._check(self._svc({"job_description_details": ""}))
+        assert r is not None and "description" in r["response"].lower()
+
+    def test_missing_bank(self):
+        r = self._check(self._svc(bank=False))
+        assert r is not None and "bank" in r["response"].lower()
+
+    def test_missing_address_last(self):
+        r = self._check(self._svc(address=False))
+        assert r is not None and "address" in r["response"].lower()
+
+    def test_order_billing_before_bank(self):
+        # Both billing AND bank missing → billing is asked first.
+        r = self._check(self._svc({"client_billing_details": ""}, bank=False))
+        assert "billing" in r["response"].lower() and "bank" not in r["response"].lower()

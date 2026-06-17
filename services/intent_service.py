@@ -2055,21 +2055,13 @@ class IntentService:
             "pending_billing_user_id": None,
         })
 
-        # Allow skip
-        if message.strip().lower() in ("skip", "cancel", "no", "none"):
-            self.memory.update_user_memory(user_id, {"skip_billing_prompt": True})
-            if pending_invoice:
-                response = f"No problem, generating the invoice for {client_name} without billing details."
-                self._store_conversation(user_id, message, response)
-                return {
-                    "operation": "billing_skipped",
-                    "response": response,
-                    "trigger_invoice": True,
-                    "invoice_data": pending_invoice,
-                }
-            response = "Got it, skipped. You can update billing details later."
+        # Billing details are mandatory — 'cancel' aborts the invoice, otherwise
+        # the value is required.
+        if message.strip().lower() in ("cancel", "stop", "abort", "nevermind"):
+            self.memory.update_user_memory(user_id, {"pending_invoice": None})
+            response = "No problem — invoice cancelled. Nothing was generated."
             self._store_conversation(user_id, message, response)
-            return {"operation": "billing_skipped", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            return {"operation": "invoice_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         # Parse billing details from the message. Strip a stray leading label the
         # user often types ("Billing info is Spotify India…") so it doesn't get
@@ -2102,56 +2094,18 @@ class IntentService:
             else:
                 logger.warning(f"[BILLING] Failed to save billing details: {result.get('error')}")
 
-        # Now trigger invoice generation if pending
+        # Re-enter the invoice flow so the gate prompts for the next missing field
+        # (or generates once everything is present).
         if pending_invoice:
-            response = f"Billing details saved for {client_name}. Generating the invoice now."
-            self._store_conversation(user_id, message, response)
-            return {
-                "operation": "billing_saved",
-                "response": response,
-                "trigger_invoice": True,
-                "invoice_data": pending_invoice,
-            }
+            return self._resume_invoice_flow(user_id, pending_invoice)
 
         response = f"Billing details saved for {client_name}."
         self._store_conversation(user_id, message, response)
         return {"operation": "billing_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-    def _maybe_prompt_invoice_address(self, user_id: str, addr_uid: str,
-                                      invoice_data: dict, message: str = "") -> Optional[Dict]:
-        """If the invoicer has no business address on file (and hasn't skipped),
-        prompt for it and stash the pending invoice — returns the prompt response.
-        Returns None when an address is present or was skipped (caller proceeds).
-        Shared by the main invoice path AND the bank-details resume path so the
-        address check (#2) can't be bypassed when bank was the blocker."""
-        prefs = {}
-        prof = self.supabase.get_user_profile(addr_uid)
-        if prof.get("ok") and prof.get("data"):
-            prefs = prof["data"].get("preferences") or {}
-            if isinstance(prefs, str):
-                try:
-                    prefs = json.loads(prefs)
-                except (json.JSONDecodeError, TypeError):
-                    prefs = {}
-        if (prefs.get("invoice_address") or "").strip() or prefs.get("invoice_address_skipped"):
-            return None
-        self.memory.update_user_memory(user_id, {
-            "pending_invoice": invoice_data,
-            "awaiting_invoice_address": True,
-            "pending_address_user_id": addr_uid,
-        })
-        response = (
-            "Before I generate it — what's your business address for the "
-            "invoice header? It'll sit under your name on every invoice.\n\n"
-            "Reply with your address (multiple lines are fine), or 'skip' to leave it off."
-        )
-        self._store_conversation(user_id, message, response)
-        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
     def _handle_invoice_address_response(self, user_id: str, message: str) -> Dict:
-        """Store the invoicer's business address (or a skip flag) in profile
-        preferences, then resume the pending invoice. Drives the #2 prompt-when-
-        missing flow so the invoice header carries a 'from' address."""
+        """Store the invoicer's business address (mandatory) in profile preferences,
+        then re-enter the invoice flow. 'cancel' aborts the invoice."""
         user_mem = self.memory.get_user_memory(user_id)
         pending_invoice = user_mem.get("pending_invoice", {})
         addr_uid = user_mem.get("pending_address_user_id") or user_id
@@ -2160,7 +2114,12 @@ class IntentService:
             "pending_address_user_id": None,
         })
 
-        skipped = message.strip().lower() in ("skip", "cancel", "no", "none", "later", "not now")
+        # Address is mandatory — 'cancel' aborts the invoice.
+        if message.strip().lower() in ("cancel", "stop", "abort", "nevermind"):
+            self.memory.update_user_memory(user_id, {"pending_invoice": None})
+            response = "No problem — invoice cancelled. Nothing was generated."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "invoice_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         # Merge into profile preferences (upsert merges, won't wipe name/etc.).
         prefs = {}
@@ -2174,13 +2133,8 @@ class IntentService:
                     prefs = {}
             elif isinstance(_p, dict):
                 prefs = _p
-        if skipped:
-            prefs["invoice_address_skipped"] = True
-            ack = "No problem — I'll leave the address off. You can add it anytime with \"update my address\"."
-        else:
-            prefs["invoice_address"] = message.strip()
-            prefs.pop("invoice_address_skipped", None)
-            ack = "Saved — that address will appear on your invoices."
+        prefs["invoice_address"] = message.strip()
+        prefs.pop("invoice_address_skipped", None)
         platform = "telegram" if str(addr_uid).isdigit() else "whatsapp"
         try:
             self.supabase.upsert_user_profile(addr_uid, platform, {"preferences": prefs})
@@ -2188,12 +2142,169 @@ class IntentService:
             logger.warning(f"[INVOICE_ADDR] Could not save invoice address: {_e}")
 
         if pending_invoice:
-            self.memory.update_user_memory(user_id, {"pending_invoice": None})
-            response = f"{ack} Generating the invoice now."
-            self._store_conversation(user_id, message, response)
-            return {"operation": "address_saved", "response": response, "trigger_invoice": True, "invoice_data": pending_invoice}
+            self._store_conversation(user_id, message, "Saved — that address will appear on your invoices.")
+            return self._resume_invoice_flow(user_id, pending_invoice)
+        ack = "Saved — that address will appear on your invoices."
         self._store_conversation(user_id, message, ack)
         return {"operation": "address_saved", "response": ack, "trigger_invoice": False, "invoice_data": {}}
+
+    # ── Mandatory-fields gate for invoices ──────────────────────────────────
+    # Every invoice must carry: client billing details, a POC name, a description
+    # for each job, the user's bank account, and the user's business address.
+    # _invoice_readiness_check returns a prompt for the FIRST missing field (and
+    # arms the matching awaiting state + pending_invoice); the field's handler
+    # saves it and re-enters the flow, so prompts chain until the invoice is
+    # complete — only then does generation/email proceed. GST and POC email stay
+    # optional. 'cancel' at any prompt aborts the invoice.
+    def _invoice_readiness_check(self, user_id: str, data_user_id: str,
+                                 invoice_data: dict, rows: Optional[List[Dict]] = None) -> Optional[Dict]:
+        display_client = invoice_data.get("client_name", "Client")
+        month_display = invoice_data.get("month", "")
+        year_val = invoice_data.get("year")
+        bill_number = invoice_data.get("bill_number")
+
+        if rows is None:
+            _mn = month_name_to_number(month_display) if month_display and month_display != "Request" else None
+            if bill_number:
+                _res = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=data_user_id)
+            else:
+                _res = self.supabase.fetch_job_entries_for_invoice(client_name=display_client, month=_mn, year=year_val, user_id=data_user_id)
+            rows = _res.get("rows") or []
+        if not rows:
+            return None  # nothing to invoice — the main flow handles the empty case
+
+        def _prompt(state: dict, text: str) -> Dict:
+            patch = {"pending_invoice": invoice_data}
+            patch.update(state)
+            self.memory.update_user_memory(user_id, patch)
+            self._store_conversation(user_id, "", text)
+            return {"operation": "ACTION_TRIGGER", "response": text, "trigger_invoice": False, "invoice_data": {}}
+
+        def _present(v) -> bool:
+            s = str(v or "").strip()
+            return bool(s) and s.lower() != "none"
+
+        # 1. Client billing details
+        if not any(_present(r.get("client_billing_details")) for r in rows):
+            return _prompt(
+                {"awaiting_client_billing": True, "pending_billing_client": display_client,
+                 "pending_billing_user_id": data_user_id},
+                f"To bill {display_client}, I need their billing details.\n\n"
+                "Send the billing name + address (and GST if they have one), e.g.:\n"
+                "Spotify India\nLower Parel, Mumbai\nGST: 27ABCDE1234F1Z5\n\n"
+                "(or 'cancel' to stop)"
+            )
+
+        # 2. POC name
+        if not any(_present(r.get("poc_name")) for r in rows):
+            return _prompt(
+                {"awaiting_poc_name": True, "pending_poc_client": display_client,
+                 "pending_poc_user_id": data_user_id,
+                 "pending_poc_row_ids": [r["id"] for r in rows if r.get("id")]},
+                f"Who should the invoice for {display_client} be addressed to? "
+                "(the point-of-contact name — or 'cancel' to stop)"
+            )
+
+        # 3. Job description — every line item needs one
+        _missing = [r for r in rows if not _present(r.get("job_description_details"))]
+        if _missing:
+            _r = _missing[0]
+            _d = str(_r.get("job_date") or "")[:10]
+            _when = f" dated {_d}" if _d else ""
+            return _prompt(
+                {"awaiting_job_description": True, "pending_jobdesc_row_id": _r.get("id"),
+                 "pending_jobdesc_user_id": data_user_id},
+                f"One job{_when} for {display_client} has no description.\n\n"
+                "What was the work? (e.g. '2 master films, English VO' — or 'cancel' to stop)"
+            )
+
+        # 4. Bank account number — the client can't pay without it
+        _bank = self.supabase.get_user_bank_details(data_user_id)
+        _bd = _bank.get("data") if _bank.get("ok") else None
+        if not _bd or not str(_bd.get("bank_account_number") or "").strip():
+            return _prompt(
+                {"awaiting_bank_details": True},
+                "Before I generate it, I need your bank details so the client can pay:\n\n"
+                "Account Name: Your Name\nBank Name: HDFC Bank\nAccount Number: 1234567890\n"
+                "IFSC: HDFC0001234\nUPI: you@upi (optional)\n\n"
+                "(or 'cancel' to stop)"
+            )
+
+        # 5. Invoicer business address (mandatory — no skip)
+        _prof = self.supabase.get_user_profile(data_user_id)
+        _prefs = {}
+        if _prof.get("ok") and _prof.get("data"):
+            _prefs = _prof["data"].get("preferences") or {}
+            if isinstance(_prefs, str):
+                try:
+                    _prefs = json.loads(_prefs)
+                except (json.JSONDecodeError, TypeError):
+                    _prefs = {}
+        if not (_prefs.get("invoice_address") or "").strip():
+            return _prompt(
+                {"awaiting_invoice_address": True, "pending_address_user_id": data_user_id},
+                "Last thing — what's your business address for the invoice header? "
+                "It'll sit under your name.\n\n(multiple lines are fine — or 'cancel' to stop)"
+            )
+
+        return None  # everything mandatory is present → proceed
+
+    def _resume_invoice_flow(self, user_id: str, invoice_data: dict) -> Dict:
+        """Re-enter the invoice flow after a mandatory field was supplied, so the
+        readiness gate re-runs and either prompts for the next field or generates."""
+        self.memory.update_user_memory(user_id, {"pending_invoice": None})
+        client = invoice_data.get("client_name", "")
+        month = invoice_data.get("month", "")
+        year = invoice_data.get("year")
+        bill = invoice_data.get("bill_number")
+        send = invoice_data.get("send_to_client")
+        verb = "Send" if send else "Generate"
+        if bill:
+            synthetic = f"{verb} invoice for bill {bill}"
+        else:
+            _yr = f" {year}" if year else ""
+            _mo = f" for {month}" if month and month != "Request" else ""
+            synthetic = f"{verb} invoice for {client}{_mo}{_yr}"
+        if send:
+            synthetic += " over email"
+        logger.info(f"[INVOICE_GATE] Field supplied — re-entering flow: '{synthetic}'")
+        return self.process_request(user_id=user_id, message=synthetic)
+
+    def _handle_job_description_response(self, user_id: str, message: str) -> Dict:
+        """Save the supplied description to the pending job row, then re-enter the
+        invoice flow (which prompts for the next missing field or generates)."""
+        user_mem = self.memory.get_user_memory(user_id)
+        pending_invoice = user_mem.get("pending_invoice", {})
+        row_id = user_mem.get("pending_jobdesc_row_id")
+        uid = user_mem.get("pending_jobdesc_user_id", user_id)
+        self.memory.update_user_memory(user_id, {
+            "awaiting_job_description": False,
+            "pending_jobdesc_row_id": None,
+            "pending_jobdesc_user_id": None,
+        })
+
+        if message.strip().lower() in ("cancel", "stop", "nevermind", "abort"):
+            self.memory.update_user_memory(user_id, {"pending_invoice": None})
+            response = "No problem — invoice cancelled. Nothing was generated."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "invoice_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        desc = message.strip()
+        if row_id and desc:
+            _safe_desc = desc.replace("'", "''")
+            _safe_id = str(row_id).replace("'", "''")
+            _safe_uid = str(uid).replace("'", "''")
+            self.supabase.execute_sql(
+                f"UPDATE public.job_entries SET job_description_details = '{_safe_desc}' "
+                f"WHERE id = '{_safe_id}' AND user_id = '{_safe_uid}' AND (\"isDeleted\" IS NOT TRUE)"
+            )
+            logger.info(f"[INVOICE_GATE] Saved job description for row {row_id}")
+
+        if pending_invoice:
+            return self._resume_invoice_flow(user_id, pending_invoice)
+        response = "Got it, saved that job description."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "jobdesc_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _handle_poc_name_response(self, user_id: str, message: str) -> Dict:
         """Handle user providing POC name before invoice generation."""
@@ -2211,21 +2322,12 @@ class IntentService:
             "pending_poc_row_ids": None,
         })
 
-        # Allow skip
-        if message.strip().lower() in ("skip", "cancel", "no", "none"):
-            self.memory.update_user_memory(user_id, {"skip_poc_prompt": True})
-            if pending_invoice:
-                response = f"No problem, generating the invoice for {client_name} using the brand/client name."
-                self._store_conversation(user_id, message, response)
-                return {
-                    "operation": "poc_skipped",
-                    "response": response,
-                    "trigger_invoice": True,
-                    "invoice_data": pending_invoice,
-                }
-            response = "Got it, skipped."
+        # POC name is mandatory — 'cancel' aborts the invoice.
+        if message.strip().lower() in ("cancel", "stop", "abort", "nevermind"):
+            self.memory.update_user_memory(user_id, {"pending_invoice": None})
+            response = "No problem — invoice cancelled. Nothing was generated."
             self._store_conversation(user_id, message, response)
-            return {"operation": "poc_skipped", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            return {"operation": "invoice_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         poc_name = message.strip()
         # Save to the specific rows queried for this invoice (or all matching client rows
@@ -2258,14 +2360,7 @@ class IntentService:
                     logger.warning(f"[POC] Failed to save poc_name: {result.get('error')}")
 
         if pending_invoice:
-            response = f"Got it. Invoice will be addressed to {poc_name}. Generating now."
-            self._store_conversation(user_id, message, response)
-            return {
-                "operation": "poc_saved",
-                "response": response,
-                "trigger_invoice": True,
-                "invoice_data": pending_invoice,
-            }
+            return self._resume_invoice_flow(user_id, pending_invoice)
 
         response = f"POC name saved as {poc_name}."
         self._store_conversation(user_id, message, response)
@@ -2320,27 +2415,10 @@ class IntentService:
             user_mem = self.memory.get_user_memory(user_id)
             pending_invoice = user_mem.get("pending_invoice")
             if pending_invoice:
-                # Bank was the blocker; now that it's saved, still run the address
-                # check (#2) before generating so this resume path doesn't bypass it.
-                _addr_resp = self._maybe_prompt_invoice_address(user_id, user_id, pending_invoice, message)
-                if _addr_resp is not None:
-                    _addr_resp["response"] = "Your bank details have been saved! ✅\n\n" + _addr_resp["response"]
-                    self._store_conversation(user_id, message, _addr_resp["response"])
-                    return _addr_resp
-                # Clear pending invoice flag
-                self.memory.update_user_memory(user_id, {"pending_invoice": None})
-                client_name = pending_invoice.get("client_name", "Client")
-                response = (
-                    "Your bank details have been saved! ✅\n\n"
-                    f"Now generating the invoice for {client_name}..."
-                )
-                self._store_conversation(user_id, message, response)
-                return {
-                    "operation": "bank_config_complete",
-                    "response": response,
-                    "trigger_invoice": True,
-                    "invoice_data": pending_invoice
-                }
+                # Bank saved — re-enter the invoice flow so the gate runs the
+                # remaining mandatory checks (address, etc.) before generating.
+                self._store_conversation(user_id, message, "Your bank details have been saved! ✅")
+                return self._resume_invoice_flow(user_id, pending_invoice)
             else:
                 response = "Your bank details have been saved successfully! Say 'my bank details' to view them."
         else:
@@ -2532,7 +2610,7 @@ class IntentService:
                 "awaiting_send_confirmation", "awaiting_bank_details",
                 "awaiting_client_billing", "awaiting_poc_name", "awaiting_name_change",
                 "awaiting_link_id", "awaiting_modify_field", "awaiting_compound_response",
-                "awaiting_invoice_address",
+                "awaiting_invoice_address", "awaiting_job_description",
             )
         )
         if _active_subflow:
@@ -3214,6 +3292,10 @@ class IntentService:
             # 0b1.9. Check if user is providing their business address for the invoice (#2)
             if user_mem.get("awaiting_invoice_address"):
                 return self._handle_invoice_address_response(user_id, message)
+
+            # 0b1.10. Check if user is providing a missing job description (#3)
+            if user_mem.get("awaiting_job_description"):
+                return self._handle_job_description_response(user_id, message)
 
             # 0b2. Check if user is responding with bank details (awaiting state)
             if user_mem.get("awaiting_bank_details"):
@@ -4101,6 +4183,16 @@ class IntentService:
                     except Exception:
                         pass
 
+                    # ── Mandatory-fields gate ──────────────────────────────────
+                    # Prompt for any missing required field (client billing, POC
+                    # name, job description, bank account, business address) and
+                    # only proceed once the invoice is complete. Runs for BOTH the
+                    # generate and the email paths; each field's handler re-enters
+                    # the flow so the prompts chain until everything is present.
+                    _gate = self._invoice_readiness_check(user_id, data_user_id, invoice_data, rows)
+                    if _gate is not None:
+                        return _gate
+
                     # Decide between generating/sending invoice via WhatsApp/Telegram vs email
                     if intent_result.get("operation") == "SEND_EMAIL":
                         poc_email = (rows[0].get("poc_email") or "").strip()
@@ -4134,89 +4226,7 @@ class IntentService:
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
 
-                    # Check if client billing details exist — prompt if missing
-                    _has_billing = any(
-                        (str(r.get("client_billing_details") or "")).strip()
-                        for r in rows
-                    )
-                    if not _has_billing:
-                        # Check if we've already asked and user skipped (avoid loop)
-                        _skip_billing = self.memory.get_user_memory(user_id).get("skip_billing_prompt")
-                        if not _skip_billing:
-                            self.memory.update_user_memory(user_id, {
-                                "awaiting_client_billing": True,
-                                "pending_invoice": invoice_data,
-                                "pending_billing_client": display_client,
-                                "pending_billing_user_id": data_user_id,
-                            })
-                            response = (
-                                f"I have the records for {display_client}, but client billing details are missing.\n\n"
-                                f"Please provide the billing info (or type 'skip' to generate without it):\n\n"
-                                f"Billing Name: Company Pvt Ltd\n"
-                                f"Address: 123 Street, City\n"
-                                f"GST: 22AAAAA0000A1Z5 (optional)\n"
-                            )
-                            self._store_conversation(user_id, message, response)
-                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                        else:
-                            # Clear skip flag for next time
-                            self.memory.update_user_memory(user_id, {"skip_billing_prompt": False})
-
-                    # Check if any row has a POC name — invoice should be addressed to a
-                    # person, not the brand. Prompt the user once if missing.
-                    _has_poc_name = any(
-                        (str(r.get("poc_name") or "")).strip()
-                        and (str(r.get("poc_name") or "")).strip().lower() != "none"
-                        for r in rows
-                    )
-                    if not _has_poc_name:
-                        _skip_poc = self.memory.get_user_memory(user_id).get("skip_poc_prompt")
-                        if not _skip_poc:
-                            self.memory.update_user_memory(user_id, {
-                                "awaiting_poc_name": True,
-                                "pending_invoice": invoice_data,
-                                "pending_poc_client": display_client,
-                                "pending_poc_user_id": data_user_id,
-                                "pending_poc_row_ids": [r["id"] for r in rows if r.get("id")],
-                            })
-                            response = (
-                                f"I have the records for {display_client}, but no point-of-contact name is on file.\n\n"
-                                f"Who should the invoice be addressed to? "
-                                f"(Send the POC name, or type 'skip' to use the client/brand name.)"
-                            )
-                            self._store_conversation(user_id, message, response)
-                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                        else:
-                            self.memory.update_user_memory(user_id, {"skip_poc_prompt": False})
-
-                    # Check if bank details exist before generating invoice
-                    bank_result = self.supabase.get_user_bank_details(data_user_id)
-                    bank_details = bank_result.get("data") if bank_result.get("ok") else None
-                    if not bank_details or not bank_details.get("bank_account_number"):
-                        # No bank details - prompt user to add them
-                        self.memory.update_user_memory(user_id, {
-                            "pending_invoice": invoice_data
-                        })
-                        response = (
-                            f"I found the records for {display_client}, but you haven't added your bank details yet.\n\n"
-                            "Please send your bank details in this format:\n\n"
-                            "Account Name: Your Name\n"
-                            "Bank Name: HDFC Bank\n"
-                            "Account Number: 1234567890\n"
-                            "IFSC: HDFC0001234\n"
-                            "UPI: you@upi (optional)\n\n"
-                            "Once saved, I'll generate the invoice automatically."
-                        )
-                        self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-                    # #2 — ensure the invoicer's business ADDRESS is on file for the
-                    # invoice header. Prompt once (skippable); persisted so we never
-                    # ask again. Shared helper, also called from the bank-resume path.
-                    _addr_resp = self._maybe_prompt_invoice_address(user_id, data_user_id, invoice_data, message)
-                    if _addr_resp is not None:
-                        return _addr_resp
+                    # (All mandatory-field checks now run in _invoice_readiness_check above.)
 
                     # Default path: generate PDF, deliver via WhatsApp/Telegram, then
                     # automatically offer to email it to the POC. Two cases:
