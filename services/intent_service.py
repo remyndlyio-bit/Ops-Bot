@@ -2117,6 +2117,37 @@ class IntentService:
         self._store_conversation(user_id, message, response)
         return {"operation": "billing_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+    def _maybe_prompt_invoice_address(self, user_id: str, addr_uid: str,
+                                      invoice_data: dict, message: str = "") -> Optional[Dict]:
+        """If the invoicer has no business address on file (and hasn't skipped),
+        prompt for it and stash the pending invoice — returns the prompt response.
+        Returns None when an address is present or was skipped (caller proceeds).
+        Shared by the main invoice path AND the bank-details resume path so the
+        address check (#2) can't be bypassed when bank was the blocker."""
+        prefs = {}
+        prof = self.supabase.get_user_profile(addr_uid)
+        if prof.get("ok") and prof.get("data"):
+            prefs = prof["data"].get("preferences") or {}
+            if isinstance(prefs, str):
+                try:
+                    prefs = json.loads(prefs)
+                except (json.JSONDecodeError, TypeError):
+                    prefs = {}
+        if (prefs.get("invoice_address") or "").strip() or prefs.get("invoice_address_skipped"):
+            return None
+        self.memory.update_user_memory(user_id, {
+            "pending_invoice": invoice_data,
+            "awaiting_invoice_address": True,
+            "pending_address_user_id": addr_uid,
+        })
+        response = (
+            "Before I generate it — what's your business address for the "
+            "invoice header? It'll sit under your name on every invoice.\n\n"
+            "Reply with your address (multiple lines are fine), or 'skip' to leave it off."
+        )
+        self._store_conversation(user_id, message, response)
+        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
     def _handle_invoice_address_response(self, user_id: str, message: str) -> Dict:
         """Store the invoicer's business address (or a skip flag) in profile
         preferences, then resume the pending invoice. Drives the #2 prompt-when-
@@ -2289,6 +2320,13 @@ class IntentService:
             user_mem = self.memory.get_user_memory(user_id)
             pending_invoice = user_mem.get("pending_invoice")
             if pending_invoice:
+                # Bank was the blocker; now that it's saved, still run the address
+                # check (#2) before generating so this resume path doesn't bypass it.
+                _addr_resp = self._maybe_prompt_invoice_address(user_id, user_id, pending_invoice, message)
+                if _addr_resp is not None:
+                    _addr_resp["response"] = "Your bank details have been saved! ✅\n\n" + _addr_resp["response"]
+                    self._store_conversation(user_id, message, _addr_resp["response"])
+                    return _addr_resp
                 # Clear pending invoice flag
                 self.memory.update_user_memory(user_id, {"pending_invoice": None})
                 client_name = pending_invoice.get("client_name", "Client")
@@ -4174,32 +4212,11 @@ class IntentService:
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                     # #2 — ensure the invoicer's business ADDRESS is on file for the
-                    # invoice header. Prompt once (skippable); the choice is persisted
-                    # in preferences so we never ask again after they answer/skip.
-                    _addr_prof = self.supabase.get_user_profile(data_user_id)
-                    _addr_prefs = {}
-                    if _addr_prof.get("ok") and _addr_prof.get("data"):
-                        _addr_prefs = _addr_prof["data"].get("preferences") or {}
-                        if isinstance(_addr_prefs, str):
-                            try:
-                                _addr_prefs = json.loads(_addr_prefs)
-                            except (json.JSONDecodeError, TypeError):
-                                _addr_prefs = {}
-                    _has_addr = bool((_addr_prefs.get("invoice_address") or "").strip())
-                    _addr_skipped = bool(_addr_prefs.get("invoice_address_skipped"))
-                    if not _has_addr and not _addr_skipped:
-                        self.memory.update_user_memory(user_id, {
-                            "pending_invoice": invoice_data,
-                            "awaiting_invoice_address": True,
-                            "pending_address_user_id": data_user_id,
-                        })
-                        response = (
-                            "Before I generate it — what's your business address for the "
-                            "invoice header? It'll sit under your name on every invoice.\n\n"
-                            "Reply with your address (multiple lines are fine), or 'skip' to leave it off."
-                        )
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                    # invoice header. Prompt once (skippable); persisted so we never
+                    # ask again. Shared helper, also called from the bank-resume path.
+                    _addr_resp = self._maybe_prompt_invoice_address(user_id, data_user_id, invoice_data, message)
+                    if _addr_resp is not None:
+                        return _addr_resp
 
                     # Default path: generate PDF, deliver via WhatsApp/Telegram, then
                     # automatically offer to email it to the POC. Two cases:

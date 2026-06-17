@@ -392,3 +392,40 @@ class TestBankHardGuard:
         from services.invoice_generation_service import has_usable_bank_details
         assert has_usable_bank_details({"bank_account_number": "1234567890"}) is True
         assert has_usable_bank_details({"bank_account_number": 1234567890}) is True
+
+
+class TestAddressCheckNotBypassed:
+    """The #2 address prompt must also fire on the bank-resume path (when bank
+    details were the blocker), not just the single-pass path."""
+
+    def _svc(self):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.supabase = MagicMock(); svc.memory = MagicMock()
+        svc.supabase.upsert_user_config.return_value = {"ok": True}
+        return svc
+
+    def test_bank_resume_runs_address_check_when_missing(self):
+        svc = self._svc()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {}}}
+        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "Spotify"}}
+        r = svc._handle_bank_details_response("u1", "Account Name: D\nAccount Number: 123456\nIFSC: HDFC001")
+        assert r["trigger_invoice"] is False, "should ask for address before generating, not generate"
+        assert "address" in r["response"].lower()
+
+    def test_bank_resume_generates_when_address_present(self):
+        svc = self._svc()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {"invoice_address": "12 MG Road"}}}
+        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "Spotify"}}
+        r = svc._handle_bank_details_response("u1", "Account Name: D\nAccount Number: 123456\nIFSC: HDFC001")
+        assert r["trigger_invoice"] is True
+
+    def test_bank_resume_generates_when_address_skipped(self):
+        svc = self._svc()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {"invoice_address_skipped": True}}}
+        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "Spotify"}}
+        r = svc._handle_bank_details_response("u1", "Account Name: D\nAccount Number: 123456\nIFSC: HDFC001")
+        assert r["trigger_invoice"] is True
