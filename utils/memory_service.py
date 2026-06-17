@@ -6,6 +6,11 @@ from datetime import datetime, date
 from decimal import Decimal
 import uuid
 
+from utils.logger import logger
+
+# Default shape for a brand-new user.
+_DEFAULT = {"name": "User", "role": "Client", "last_sheet": "Leads"}
+
 
 class _SafeEncoder(json.JSONEncoder):
     """JSON encoder that handles types psycopg2 returns but stdlib json can't encode."""
@@ -18,110 +23,193 @@ class _SafeEncoder(json.JSONEncoder):
             return str(obj)
         return super().default(obj)
 
+
 class MemoryService:
+    """Per-user conversation + flow state.
+
+    Backed by Supabase (public.user_memory) when SUPABASE_DB_URL is set, so the
+    state survives redeploys and is shared across multiple app instances. Falls
+    back to a local JSON file for dev when no DB is configured.
+
+    Why DB-backed: the webhook can be redeployed (fresh container = fresh disk) or
+    scaled to several instances, each with its own filesystem. With the old
+    file-only store, an in-flight 'awaiting_*' flag set while prompting (e.g. for
+    the invoice address) could vanish before the user's reply arrived, orphaning
+    the reply. The shared DB keeps state consistent across both.
+    """
+
     def __init__(self, file_path: str = "user_memory.json"):
         self.file_path = file_path
-        self._lock = threading.Lock()          # Global lock for file I/O
-        self._user_locks: Dict[str, threading.Lock] = {}  # Per-user locks
-        self._load_memory()
-        # Get memory level from environment variable, default to 5 if not set
+        self._lock = threading.Lock()                     # global lock (file I/O + DB access)
+        self._user_locks: Dict[str, threading.Lock] = {}  # per-user read-modify-write locks
         self.memory_level = int(os.getenv("CHAT_MEMORYLEVEL", "5"))
 
+        self._db_url = (os.getenv("SUPABASE_DB_URL") or "").strip() or None
+        self._conn = None          # single reused connection (lazy)
+        self._db_ok = False
+        self.memory: Dict = {}     # file-fallback store / dev cache
+
+        if self._db_url:
+            self._ensure_table()
+        if not self._db_ok:
+            self._load_file()
+
+    # ── per-user lock ──────────────────────────────────────────────────────
     def _get_user_lock(self, user_id: str) -> threading.Lock:
-        """Get or create a per-user lock to prevent concurrent modifications."""
         if user_id not in self._user_locks:
             with self._lock:
                 if user_id not in self._user_locks:
                     self._user_locks[user_id] = threading.Lock()
         return self._user_locks[user_id]
 
-    def _load_memory(self):
+    # ── DB backend (single reused connection, lock-guarded) ────────────────
+    def _connection(self):
+        if self._conn is not None:
+            try:
+                if self._conn.closed == 0:
+                    return self._conn
+            except Exception:
+                pass
+        import psycopg2
+        self._conn = psycopg2.connect(self._db_url)
+        self._conn.autocommit = True
+        return self._conn
+
+    def _ensure_table(self):
+        try:
+            with self._lock:
+                conn = self._connection()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "CREATE TABLE IF NOT EXISTS public.user_memory ("
+                        "  user_id text PRIMARY KEY,"
+                        "  payload jsonb NOT NULL DEFAULT '{}'::jsonb,"
+                        "  updated_at timestamptz NOT NULL DEFAULT now()"
+                        ")"
+                    )
+            self._db_ok = True
+            logger.info("[MEMORY] Using Supabase-backed user memory (public.user_memory).")
+        except Exception as e:
+            self._db_ok = False
+            self._conn = None
+            logger.warning(f"[MEMORY] DB init failed, falling back to file store: {e}")
+
+    def _db_get(self, user_id: str) -> Optional[Dict]:
+        try:
+            with self._lock:
+                conn = self._connection()
+                with conn.cursor() as cur:
+                    cur.execute("SELECT payload FROM public.user_memory WHERE user_id = %s", (user_id,))
+                    row = cur.fetchone()
+            return row[0] if row and row[0] is not None else None
+        except Exception as e:
+            self._conn = None
+            logger.warning(f"[MEMORY] db_get failed for {user_id}: {e}")
+            return None
+
+    def _db_set(self, user_id: str, payload: Dict) -> bool:
+        try:
+            with self._lock:
+                conn = self._connection()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO public.user_memory (user_id, payload, updated_at) "
+                        "VALUES (%s, %s::jsonb, now()) "
+                        "ON CONFLICT (user_id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()",
+                        (user_id, json.dumps(payload, cls=_SafeEncoder)),
+                    )
+            return True
+        except Exception as e:
+            self._conn = None
+            logger.warning(f"[MEMORY] db_set failed for {user_id}: {e}")
+            return False
+
+    # ── file fallback ──────────────────────────────────────────────────────
+    def _load_file(self):
         if os.path.exists(self.file_path):
-            with open(self.file_path, 'r') as f:
-                self.memory = json.load(f)
+            try:
+                with open(self.file_path, 'r') as f:
+                    self.memory = json.load(f)
+            except Exception:
+                self.memory = {}
         else:
             self.memory = {}
 
-    def _save_memory(self):
+    def _save_file(self):
         with self._lock:
-            with open(self.file_path, 'w') as f:
-                json.dump(self.memory, f, indent=2, cls=_SafeEncoder)
+            try:
+                with open(self.file_path, 'w') as f:
+                    json.dump(self.memory, f, indent=2, cls=_SafeEncoder)
+            except Exception as e:
+                logger.warning(f"[MEMORY] file save failed: {e}")
 
+    # ── unified per-user read/write (DB first, file fallback) ──────────────
+    def _read_raw(self, user_id: str) -> Optional[Dict]:
+        """Return the stored dict for a user, or None if no record yet."""
+        if self._db_ok:
+            return self._db_get(user_id)
+        return self.memory.get(user_id)
+
+    def _write_raw(self, user_id: str, payload: Dict):
+        if self._db_ok and self._db_set(user_id, payload):
+            return
+        # DB unavailable → file fallback (also mirror to the in-RAM dict)
+        self.memory[user_id] = payload
+        self._save_file()
+
+    # ── public API (signatures unchanged) ──────────────────────────────────
     def get_user_memory(self, user_id: str) -> Dict:
-        lock = self._get_user_lock(user_id)
-        with lock:
-            return dict(self.memory.get(user_id, {"name": "User", "role": "Client", "last_sheet": "Leads"}))
+        data = self._read_raw(user_id)
+        return dict(data) if data else dict(_DEFAULT)
 
     def update_user_memory(self, user_id: str, data: Dict):
         lock = self._get_user_lock(user_id)
         with lock:
-            if user_id not in self.memory:
-                self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads"}
-
-            self.memory[user_id].update(data)
-            self._save_memory()
+            current = self._read_raw(user_id) or dict(_DEFAULT)
+            current.update(data)
+            self._write_raw(user_id, current)
 
     def get_memory_context(self, user_id: str) -> str:
         mem = self.get_user_memory(user_id)
         return f"User: {mem.get('name')}, Role: {mem.get('role')}, Last Sheet: {mem.get('last_sheet')}"
 
     def get_conversation_history(self, user_id: str) -> List[Dict[str, str]]:
-        """
-        Get the last N messages from conversation history for a user.
-        Returns a list of message dictionaries with 'role' (user/assistant) and 'content'.
-        """
-        if user_id not in self.memory:
+        """Return the last N message pairs (user + assistant) for a user."""
+        data = self._read_raw(user_id)
+        if not data:
             return []
-        
-        conversation = self.memory[user_id].get("conversation", [])
-        # Return only the last N messages (memory_level * 2 because we count both user and assistant messages)
-        # But we want N message pairs, so we take last N*2 messages
+        conversation = data.get("conversation", [])
         return conversation[-self.memory_level * 2:] if conversation else []
 
     def add_message(self, user_id: str, role: str, content: str):
-        """
-        Add a message to the conversation history.
-        role: 'user' or 'assistant'
-        content: the message content
-        """
+        """Append a message to conversation history (role: 'user' or 'assistant')."""
         lock = self._get_user_lock(user_id)
         with lock:
-            if user_id not in self.memory:
-                self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads", "conversation": []}
-
-            if "conversation" not in self.memory[user_id]:
-                self.memory[user_id]["conversation"] = []
-
-            # Add the new message
-            self.memory[user_id]["conversation"].append({
+            current = self._read_raw(user_id) or dict(_DEFAULT)
+            conversation = current.get("conversation") or []
+            conversation.append({
                 "role": role,
                 "content": content,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             })
-
-            # Keep only the last N*2 messages (N user messages + N assistant messages)
-            conversation = self.memory[user_id]["conversation"]
             if len(conversation) > self.memory_level * 2:
-                self.memory[user_id]["conversation"] = conversation[-self.memory_level * 2:]
-
-            self._save_memory()
+                conversation = conversation[-self.memory_level * 2:]
+            current["conversation"] = conversation
+            self._write_raw(user_id, current)
 
     # --- Form state for multi-step data entry (e.g. "add new job") ---
 
     def start_form(self, user_id: str, fields: List[str], form_override: Dict = None) -> None:
-        """Start a new form flow for the user. fields = list of column names to collect.
-        If form_override is provided, use it directly (for smart capture states)."""
         lock = self._get_user_lock(user_id)
         with lock:
-            if user_id not in self.memory:
-                self.memory[user_id] = {"name": "User", "role": "Client", "last_sheet": "Leads"}
+            current = self._read_raw(user_id) or dict(_DEFAULT)
             if form_override:
                 form_override["active"] = True
                 form_override.setdefault("created_at", datetime.now().isoformat())
                 form_override["retry_count"] = 0
-                self.memory[user_id]["form"] = form_override
+                current["form"] = form_override
             else:
-                self.memory[user_id]["form"] = {
+                current["form"] = {
                     "active": True,
                     "fields": fields,
                     "step": 0,
@@ -129,51 +217,60 @@ class MemoryService:
                     "created_at": datetime.now().isoformat(),
                     "retry_count": 0,
                 }
-            self._save_memory()
+            self._write_raw(user_id, current)
 
     def get_form_state(self, user_id: str) -> Optional[Dict]:
-        """Return form state dict or None if no active form."""
-        if user_id not in self.memory:
+        data = self._read_raw(user_id)
+        if not data:
             return None
-        form = self.memory[user_id].get("form")
+        form = data.get("form")
         if form and form.get("active"):
             return form
         return None
 
     def set_form_value(self, user_id: str, field: str, value: str) -> None:
-        """Store a value for the current form field."""
         lock = self._get_user_lock(user_id)
         with lock:
-            form = self.get_form_state(user_id)
-            if form:
-                form["values"][field] = value
-                self._save_memory()
+            current = self._read_raw(user_id)
+            if not current:
+                return
+            form = current.get("form")
+            if form and form.get("active"):
+                form.setdefault("values", {})[field] = value
+                current["form"] = form
+                self._write_raw(user_id, current)
 
     def advance_form_step(self, user_id: str) -> None:
-        """Move to the next step in the form."""
         lock = self._get_user_lock(user_id)
         with lock:
-            form = self.get_form_state(user_id)
-            if form:
-                form["step"] += 1
-                self._save_memory()
+            current = self._read_raw(user_id)
+            if not current:
+                return
+            form = current.get("form")
+            if form and form.get("active"):
+                form["step"] = form.get("step", 0) + 1
+                current["form"] = form
+                self._write_raw(user_id, current)
 
     def complete_form(self, user_id: str) -> Optional[Dict[str, str]]:
-        """Mark form complete and return collected values. Clears form state."""
         lock = self._get_user_lock(user_id)
         with lock:
-            form = self.get_form_state(user_id)
-            if not form:
+            current = self._read_raw(user_id)
+            if not current:
+                return None
+            form = current.get("form")
+            if not (form and form.get("active")):
                 return None
             values = dict(form.get("values", {}))
-            self.memory[user_id]["form"] = {"active": False}
-            self._save_memory()
+            current["form"] = {"active": False}
+            self._write_raw(user_id, current)
             return values
 
     def cancel_form(self, user_id: str) -> None:
-        """Cancel any active form."""
         lock = self._get_user_lock(user_id)
         with lock:
-            if user_id in self.memory:
-                self.memory[user_id]["form"] = {"active": False}
-                self._save_memory()
+            current = self._read_raw(user_id)
+            if not current:
+                return
+            current["form"] = {"active": False}
+            self._write_raw(user_id, current)
