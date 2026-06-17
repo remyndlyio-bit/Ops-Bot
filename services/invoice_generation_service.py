@@ -5,6 +5,25 @@ from num2words import num2words
 from typing import List, Dict
 from utils.logger import logger
 
+import re as _re
+
+
+def _strip_billing_label(text: str) -> str:
+    """Remove a stray leading label the user often types into billing details,
+    e.g. "Billing info is Spotify India..." → "Spotify India...". Defensive
+    cleanup so a captured label doesn't print on the invoice (#1)."""
+    if not text:
+        return text
+    cleaned = _re.sub(
+        r'^\s*(?:the\s+)?billing\s*(?:info(?:rmation|r)?|details?|address)?\s*'
+        r'(?:is|are|:|-)?\s*',
+        '',
+        text,
+        count=1,
+        flags=_re.IGNORECASE,
+    )
+    return cleaned.strip() or text
+
 
 def sanitize_pdf_text(text):
     """Return PDF-safe text.
@@ -144,9 +163,12 @@ class InvoiceGenerationService:
 
             _right_row("Invoice Number :", _db_bill_no)
             _right_row("Invoice Date :", invoice_date)
-            _right_row("Payment Terms :", "Immediate")
-            _right_row("GST :", invoicer_gst if invoicer_gst else "NA")
-            _right_row("Job No. :", "NA")
+            # #5 — keep terms consistent with the T&C ("full payment within 30 days"),
+            # not the contradictory "Immediate".
+            _right_row("Payment Terms :", "Within 30 days")
+            # #6 — only show GST when it's a real value; drop the always-"NA" Job No. row.
+            if invoicer_gst and str(invoicer_gst).strip().upper() not in ("NA", "N/A", ""):
+                _right_row("GST :", invoicer_gst)
 
             pdf.set_y(max(after_left_y, pdf.get_y()) + 4)
 
@@ -172,7 +194,9 @@ class InvoiceGenerationService:
             brand_name_invoice = ""
             for row in (client_data or []):
                 if not client_billing:
-                    client_billing = (str(row.get("client_billing_details") or "")).strip()
+                    client_billing = _strip_billing_label(
+                        (str(row.get("client_billing_details") or "")).strip()
+                    )
                 if not production_house:
                     production_house = (str(row.get("production_house") or "")).strip()
                 if not poc_name:
@@ -218,14 +242,29 @@ class InvoiceGenerationService:
             pdf.ln(4)
 
             # ══════════════════════════════════════════════════════════════
-            # SECTION 3 — Jobs (one line per job)
-            # Format: Job N: Client | Brand | POC | Amount | Date | Bill No
+            # SECTION 3 — Jobs table: Description | Date | Amount
+            # #3/#7 — show the JOB DESCRIPTION (the relevant line item) and drop
+            # the redundant client / brand / POC / bill-no dump (all already shown
+            # above or in the invoice number).
             # ══════════════════════════════════════════════════════════════
             pdf.set_fill_color(*_GRAY_BAR)
             pdf.set_text_color(*_DARK)
             pdf.set_font(font_family, "B", 9)
             pdf.cell(0, 7, "  Jobs", ln=1, fill=True)
             pdf.ln(2)
+
+            # Column widths for the line-item table.
+            _date_w = page_w * 0.20
+            _amt_w  = page_w * 0.20
+            _desc_w = page_w - _date_w - _amt_w
+
+            # Column header row
+            pdf.set_fill_color(*_LIGHT_ROW)
+            pdf.set_font(font_family, "B", 8)
+            pdf.set_text_color(80, 80, 80)
+            pdf.cell(_desc_w, 6, "  Description", border=0, ln=0, fill=True, align="L")
+            pdf.cell(_date_w, 6, "Date", border=0, ln=0, fill=True, align="C")
+            pdf.cell(_amt_w, 6, "Amount", border=0, ln=1, fill=True, align="R")
 
             pdf.set_font(font_family, "", 9)
             total = 0
@@ -241,22 +280,22 @@ class InvoiceGenerationService:
                 except Exception:
                     pass
 
-                client_val = sanitize_pdf_text(str(row.get("client_name", "") or "").strip()) or "-"
-                brand_val  = sanitize_pdf_text(str(row.get("brand_name", "") or "").strip())
-                if not brand_val or brand_val.lower() == "none":
-                    brand_val = "-"
-                poc_val    = sanitize_pdf_text(str(row.get("poc_name", "") or "").strip())
-                if not poc_val or poc_val.lower() == "none":
-                    poc_val = "-"
-                bill_val   = sanitize_pdf_text(str(row.get("bill_no", "") or "").strip()) or "-"
-                fees_val   = self._parse_fees(row.get("fees", "0"))
+                desc_val = sanitize_pdf_text(str(row.get("job_description_details", "") or "").strip())
+                if not desc_val or desc_val.lower() == "none":
+                    # Fall back to the brand/client only when there's genuinely no
+                    # description, so the line is never empty.
+                    desc_val = sanitize_pdf_text(
+                        str(row.get("brand_name") or row.get("client_name") or "Job").strip()
+                    )
+                # Keep the description on one line (truncate very long text).
+                if len(desc_val) > 70:
+                    desc_val = desc_val[:67] + "..."
+                fees_val = self._parse_fees(row.get("fees", "0"))
                 total += fees_val
 
-                line = (
-                    f"Job {idx} : {client_val} | {brand_val} | {poc_val} | "
-                    f"Rs {fees_val:,.0f} | {date_val or '-'} | {bill_val}"
-                )
-                pdf.cell(0, 7, line, border=0, ln=1, align="L", fill=True)
+                pdf.cell(_desc_w, 7, f"  {idx}. {desc_val}", border=0, ln=0, align="L", fill=True)
+                pdf.cell(_date_w, 7, date_val or "-", border=0, ln=0, align="C", fill=True)
+                pdf.cell(_amt_w, 7, sanitize_pdf_text(f"Rs {fees_val:,.0f}"), border=0, ln=1, align="R", fill=True)
 
             pdf.ln(2)
 

@@ -2071,8 +2071,11 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "billing_skipped", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Parse billing details from the message (freeform — store as-is)
-        billing_text = message.strip()
+        # Parse billing details from the message. Strip a stray leading label the
+        # user often types ("Billing info is Spotify India…") so it doesn't get
+        # stored and later printed on the invoice (#1).
+        from services.invoice_generation_service import _strip_billing_label
+        billing_text = _strip_billing_label(message.strip())
 
         # Save to all matching job_entries for this client
         if client_name:
@@ -2113,6 +2116,53 @@ class IntentService:
         response = f"Billing details saved for {client_name}."
         self._store_conversation(user_id, message, response)
         return {"operation": "billing_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_invoice_address_response(self, user_id: str, message: str) -> Dict:
+        """Store the invoicer's business address (or a skip flag) in profile
+        preferences, then resume the pending invoice. Drives the #2 prompt-when-
+        missing flow so the invoice header carries a 'from' address."""
+        user_mem = self.memory.get_user_memory(user_id)
+        pending_invoice = user_mem.get("pending_invoice", {})
+        addr_uid = user_mem.get("pending_address_user_id") or user_id
+        self.memory.update_user_memory(user_id, {
+            "awaiting_invoice_address": False,
+            "pending_address_user_id": None,
+        })
+
+        skipped = message.strip().lower() in ("skip", "cancel", "no", "none", "later", "not now")
+
+        # Merge into profile preferences (upsert merges, won't wipe name/etc.).
+        prefs = {}
+        existing = self.supabase.get_user_profile(addr_uid)
+        if existing.get("ok") and existing.get("data"):
+            _p = existing["data"].get("preferences") or {}
+            if isinstance(_p, str):
+                try:
+                    prefs = json.loads(_p)
+                except (json.JSONDecodeError, TypeError):
+                    prefs = {}
+            elif isinstance(_p, dict):
+                prefs = _p
+        if skipped:
+            prefs["invoice_address_skipped"] = True
+            ack = "No problem — I'll leave the address off. You can add it anytime with \"update my address\"."
+        else:
+            prefs["invoice_address"] = message.strip()
+            prefs.pop("invoice_address_skipped", None)
+            ack = "Saved — that address will appear on your invoices."
+        platform = "telegram" if str(addr_uid).isdigit() else "whatsapp"
+        try:
+            self.supabase.upsert_user_profile(addr_uid, platform, {"preferences": prefs})
+        except Exception as _e:
+            logger.warning(f"[INVOICE_ADDR] Could not save invoice address: {_e}")
+
+        if pending_invoice:
+            self.memory.update_user_memory(user_id, {"pending_invoice": None})
+            response = f"{ack} Generating the invoice now."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "address_saved", "response": response, "trigger_invoice": True, "invoice_data": pending_invoice}
+        self._store_conversation(user_id, message, ack)
+        return {"operation": "address_saved", "response": ack, "trigger_invoice": False, "invoice_data": {}}
 
     def _handle_poc_name_response(self, user_id: str, message: str) -> Dict:
         """Handle user providing POC name before invoice generation."""
@@ -2444,6 +2494,7 @@ class IntentService:
                 "awaiting_send_confirmation", "awaiting_bank_details",
                 "awaiting_client_billing", "awaiting_poc_name", "awaiting_name_change",
                 "awaiting_link_id", "awaiting_modify_field", "awaiting_compound_response",
+                "awaiting_invoice_address",
             )
         )
         if _active_subflow:
@@ -3121,6 +3172,10 @@ class IntentService:
             # 0b1.8. Check if user is providing POC name for an invoice
             if user_mem.get("awaiting_poc_name"):
                 return self._handle_poc_name_response(user_id, message)
+
+            # 0b1.9. Check if user is providing their business address for the invoice (#2)
+            if user_mem.get("awaiting_invoice_address"):
+                return self._handle_invoice_address_response(user_id, message)
 
             # 0b2. Check if user is responding with bank details (awaiting state)
             if user_mem.get("awaiting_bank_details"):
@@ -4115,6 +4170,34 @@ class IntentService:
                             "Once saved, I'll generate the invoice automatically."
                         )
                         self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                    # #2 — ensure the invoicer's business ADDRESS is on file for the
+                    # invoice header. Prompt once (skippable); the choice is persisted
+                    # in preferences so we never ask again after they answer/skip.
+                    _addr_prof = self.supabase.get_user_profile(data_user_id)
+                    _addr_prefs = {}
+                    if _addr_prof.get("ok") and _addr_prof.get("data"):
+                        _addr_prefs = _addr_prof["data"].get("preferences") or {}
+                        if isinstance(_addr_prefs, str):
+                            try:
+                                _addr_prefs = json.loads(_addr_prefs)
+                            except (json.JSONDecodeError, TypeError):
+                                _addr_prefs = {}
+                    _has_addr = bool((_addr_prefs.get("invoice_address") or "").strip())
+                    _addr_skipped = bool(_addr_prefs.get("invoice_address_skipped"))
+                    if not _has_addr and not _addr_skipped:
+                        self.memory.update_user_memory(user_id, {
+                            "pending_invoice": invoice_data,
+                            "awaiting_invoice_address": True,
+                            "pending_address_user_id": data_user_id,
+                        })
+                        response = (
+                            "Before I generate it — what's your business address for the "
+                            "invoice header? It'll sit under your name on every invoice.\n\n"
+                            "Reply with your address (multiple lines are fine), or 'skip' to leave it off."
+                        )
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 

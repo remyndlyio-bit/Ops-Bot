@@ -329,14 +329,32 @@ async def process_and_send_invoice(
             bank_details = None
             user_profile = None
             if user_id:
-                bank_result = supabase_service.get_user_bank_details(user_id)
+                # Resolve the linked account first. Bank details + job data live
+                # under the linked (primary) user_id; fetching by the raw login
+                # user_id missed them for linked users → the blank BANK ACCOUNT
+                # DETAILS section (#4). Mirror intent_service's resolution so the
+                # bank pre-check and this fetch agree on which account to read.
+                _bank_uid = user_id
+                try:
+                    import json as _json0
+                    _p_resolve = supabase_service.get_user_profile(user_id)
+                    if _p_resolve.get("ok") and _p_resolve.get("data"):
+                        _prefs0 = _p_resolve["data"].get("preferences") or {}
+                        if isinstance(_prefs0, str):
+                            _prefs0 = _json0.loads(_prefs0)
+                        _bank_uid = _prefs0.get("linked_user_id") or user_id
+                except Exception as _re:
+                    logger.warning(f"[INVOICE] Could not resolve linked user_id, using raw: {_re}")
+                    _bank_uid = user_id
+
+                bank_result = supabase_service.get_user_bank_details(_bank_uid)
                 if bank_result.get("ok") and bank_result.get("data"):
                     bank_details = bank_result["data"]
-                    logger.info(f"[INVOICE] Loaded bank details for user_id={user_id}")
+                    logger.info(f"[INVOICE] Loaded bank details for user_id={_bank_uid}")
                 else:
-                    logger.info(f"[INVOICE] No bank details found for user_id={user_id}, using defaults")
+                    logger.warning(f"[INVOICE] No bank details found for user_id={_bank_uid} — invoice will have a blank bank section")
                 # Fetch user profile for invoice header (name, title, address, email)
-                prof_result = supabase_service.get_user_profile(user_id)
+                prof_result = supabase_service.get_user_profile(_bank_uid)
                 if prof_result.get("ok") and prof_result.get("data"):
                     prof_data = prof_result["data"]
                     prefs = prof_data.get("preferences") or {}

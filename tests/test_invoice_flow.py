@@ -302,3 +302,70 @@ class TestSendInvoiceEmail:
         svc.send_invoice_email("c@t.com", "Nike", "April", 2024, str(pdf_file))
         # Subject is "Invoice for April 2024" (period-based, not client name)
         assert "April" in captured.get("subject", "")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Invoice PDF feedback fixes (#1-#7 from live client feedback, June 2026)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestInvoicePdfFeedbackFixes:
+    def test_strip_billing_label(self):
+        from services.invoice_generation_service import _strip_billing_label
+        assert _strip_billing_label("Billing infor is\nSpotify India\nLower Parel") == "Spotify India\nLower Parel"
+        assert _strip_billing_label("billing info is Acme Corp") == "Acme Corp"
+        assert _strip_billing_label("the billing details: Foo Ltd") == "Foo Ltd"
+        # No label → unchanged
+        assert _strip_billing_label("Spotify India\nLower Parel") == "Spotify India\nLower Parel"
+
+    def test_pdf_content_addresses_all_feedback(self, tmp_path, monkeypatch):
+        pypdf = __import__("pytest").importorskip("pypdf")
+        monkeypatch.chdir(tmp_path)
+        from services.invoice_generation_service import InvoiceGenerationService
+        svc = InvoiceGenerationService()
+        summary = {"client": "Spotify India", "month": "March", "year": 2026}
+        data = [{
+            "client_name": "", "brand_name": "Spotify", "poc_name": "karan",
+            "client_billing_details": "Billing infor is\nSpotify India\nLower Parel",
+            "job_description_details": "2 master films english VO",
+            "job_date": "2026-03-04", "fees": 10000, "bill_no": "SPO-0002",
+        }]
+        bank = {"bank_name": "HDFC Bank", "bank_account_name": "Darshit Mody",
+                "bank_account_number": "1234567890", "bank_ifsc": "HDFC0001234", "upi_id": "d@hdfc"}
+        prof = {"name": "Darshit Mody", "address": "12 MG Road\nMumbai 400001", "gst": "NA"}
+        path = svc.generate_pdf(summary, data, bank_details=bank, user_profile=prof)
+        text = pypdf.PdfReader(path).pages[0].extract_text()
+
+        # #1 — stray label gone
+        assert "infor is" not in text.lower() and "billing info is" not in text.lower()
+        # #2 — sender address present
+        assert "12 MG Road" in text and "Mumbai 400001" in text
+        # #3 — job description present
+        assert "2 master films english VO" in text
+        # #5 — consistent terms, not "Immediate"
+        assert "Within 30 days" in text and "Immediate" not in text
+        # #6 — no always-NA rows
+        assert "Job No." not in text and "GST : NA" not in text
+        # #4 — bank details present
+        assert "1234567890" in text and "HDFC0001234" in text
+        # #7 — brand appears once (in Invoice To), not duplicated in the job line.
+        assert text.count("Spotify") <= 2  # client name + brand line; not also in the job row
+
+    def test_invoice_address_handler_saves_and_resumes(self):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.supabase = MagicMock(); svc.memory = MagicMock()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {}}}
+        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "X"}, "pending_address_user_id": "u1"}
+
+        r = svc._handle_invoice_address_response("u1", "12 MG Road, Mumbai")
+        assert r["trigger_invoice"] is True
+        saved = svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]
+        assert saved.get("invoice_address") == "12 MG Road, Mumbai"
+
+        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "X"}, "pending_address_user_id": "u1"}
+        r2 = svc._handle_invoice_address_response("u1", "skip")
+        saved2 = svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]
+        assert saved2.get("invoice_address_skipped") is True
