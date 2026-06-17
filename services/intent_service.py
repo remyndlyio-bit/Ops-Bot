@@ -2430,6 +2430,26 @@ class IntentService:
         if not pending:
             return None
 
+        # A pending reminder is a persistent, never-expiring background flag
+        # (written by the cron worker, shared via the DB). It must NOT steal a
+        # reply meant for an active sub-flow — adding a job, providing a POC
+        # email, a yes/no confirmation, a disambiguation pick, etc. Those flows
+        # are handled later in the pipeline; if one is active, yield so the user
+        # isn't trapped. (A genuine reminder reply is a standalone number / skip /
+        # all, which the user can send once the sub-flow is done.)
+        _mem = self.memory.get_user_memory(user_id)
+        _active_subflow = bool(_mem.get("pending_disambiguation")) or any(
+            _mem.get(k) for k in (
+                "awaiting_job_input", "awaiting_poc_email", "awaiting_invoice_month",
+                "awaiting_send_confirmation", "awaiting_bank_details",
+                "awaiting_client_billing", "awaiting_poc_name", "awaiting_name_change",
+                "awaiting_link_id", "awaiting_modify_field", "awaiting_compound_response",
+            )
+        )
+        if _active_subflow:
+            logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
+            return None
+
         msg = message.strip().lower()
 
         # ── Overdue-audit branch — pending entries tagged _audit_row=True ─
@@ -2453,8 +2473,12 @@ class IntentService:
         if msg in ("all", "send all", "send all reminders"):
             return self._send_all_pending_reminders(user_id, message, pending)
 
-        # Check for a number reply like "1", "2", "send 1", "#1"
-        num_match = re.search(r"(\d+)", msg)
+        # A reminder reply is a STANDALONE number selection — "1", "2", "send 1",
+        # "#1". A number buried in free text ("...date 5 may 2025, fees 20k") is
+        # NOT a reminder reply; the old re.search grabbed the first digit anywhere
+        # and hijacked add-job / query messages. Require the whole message to be a
+        # number selection.
+        num_match = re.fullmatch(r"(?:send\s+|reminder\s+|#)?\s*(\d+)\s*\.?", msg)
         if not num_match:
             return None  # Not a reminder reply, let normal flow handle it
 

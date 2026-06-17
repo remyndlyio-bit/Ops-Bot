@@ -878,3 +878,56 @@ class TestRegressionBatch3745:
             f"'them' was treated as a client name: {result.get('response')!r}"
         )
         assert "them" not in resp or "nike" in resp
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 145 – A stale pending reminder must NOT hijack numeric / mid-flow messages.
+# Regression for: "Add a new job" → job description with "5 may 2025, 20k" got
+# answered with "Please reply with a number between 1 and 1, or 'skip'".
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestReminderDoesNotHijack:
+    from unittest.mock import patch as _patch
+
+    PENDING = [{"id": "j1", "client_name": "Nike", "bill_no": "INV-1", "fees": 25000}]
+
+    def _run(self, message, mem):
+        import services.intent_service as isv
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = mem
+        with patch("services.intent_service.get_pending", return_value=self.PENDING), \
+             patch("services.intent_service.clear_pending"):
+            return svc._handle_pending_reminder("u1", message)
+
+    def test_job_description_with_numbers_not_hijacked(self):
+        """The exact production case: a job description containing dates/fees must
+        fall through (return None), not be read as a reminder selection."""
+        res = self._run(
+            "Client content lab, brand Pepsi, date 5 may 2025, 2 master films, fees 20k",
+            {"awaiting_job_input": True},
+        )
+        assert res is None, f"Reminder hijacked the job description: {res}"
+
+    def test_free_text_number_falls_through(self):
+        """Even without an active sub-flow, a number buried in free text isn't a
+        reminder reply."""
+        assert self._run("earnings in 2025", {}) is None
+        assert self._run("show me 2 jobs", {}) is None
+
+    def test_standalone_number_still_handled(self):
+        """A genuine reminder reply ('1', 'send 1') is still intercepted."""
+        assert self._run("1", {}) is not None
+        assert self._run("send 1", {}) is not None
+
+    def test_standalone_number_yields_during_add_job(self):
+        """Mid-add-job, even a bare '1' belongs to the job flow, not the reminder."""
+        assert self._run("1", {"awaiting_job_input": True}) is None
+
+    def test_skip_yields_during_subflow(self):
+        """'skip'/'cancel' mid-flow must not be stolen to clear reminders."""
+        assert self._run("skip", {"awaiting_poc_email": True}) is None
+
+    def test_skip_clears_when_idle(self):
+        """When no sub-flow is active, 'skip' clears the reminders as before."""
+        res = self._run("skip", {})
+        assert res is not None and "skip" in res.get("response", "").lower()
