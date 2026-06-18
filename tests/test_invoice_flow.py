@@ -492,3 +492,38 @@ class TestAddressUpdateCommand:
         svc._persist_invoice_address("u1", "NEW ADDR")
         saved = svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]
         assert saved["invoice_address"] == "NEW ADDR" and saved["invoice_name"] == "Darshit Inc"
+
+
+class TestAddressCommandRouting:
+    """The bug: 'Change my address' was grabbed by the v2 classifier as a
+    FEATURE_QUESTION and refused. The command must route to the address handler
+    (it's now checked before the classifier)."""
+
+    def _svc(self):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.gemini = MagicMock(); svc.email = MagicMock(); svc.supabase = MagicMock(); svc.memory = MagicMock()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"onboarded_at": "2024-01-01T00:00:00", "name": "A", "preferences": {"invoice_address": "OLD"}}}
+        svc.memory.get_user_memory.return_value = {}
+        svc.memory.get_form_state.return_value = None
+        svc.memory.get_conversation_history.return_value = []
+        svc.supabase.db_url = "postgresql://fake"
+        return svc
+
+    def test_change_my_address_does_not_refuse(self):
+        svc = self._svc()
+        r = svc.process_request("u1", "Change my address")
+        # Must reach the address flow (prompt), NOT the feature-question refusal.
+        assert r["operation"] != "feature_q"
+        assert "address" in r["response"].lower()
+        # answer_feature_question must not have been used to reply.
+        assert not svc.gemini.answer_feature_question.called
+
+    def test_inline_change_saves(self):
+        svc = self._svc()
+        r = svc.process_request("u1", "update my address to 12 New Road, Mumbai 400001")
+        assert r["operation"] == "address_updated"
+        assert svc.supabase.upsert_user_profile.called

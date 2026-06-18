@@ -2990,6 +2990,20 @@ class IntentService:
             if reminder_result:
                 return reminder_result
 
+            # Explicit profile-update commands are handled deterministically HERE,
+            # before the v2 classifier — otherwise it grabs "change my address" as a
+            # FEATURE_QUESTION and refuses, never reaching the keyword handler below.
+            _ml_cmd = message.strip().lower()
+            _ADDRESS_UPDATE_TRIGGERS = [
+                "update my address", "change my address", "update my business address",
+                "change my business address", "update business address", "change business address",
+                "set my address", "edit my address", "update invoice address", "change invoice address",
+                "my address is", "my business address is", "wrong address", "address is wrong",
+                "fix my address", "correct my address",
+            ]
+            if any(t in _ml_cmd for t in _ADDRESS_UPDATE_TRIGGERS):
+                return self._handle_address_update(user_id, message, data_user_id)
+
             # ── FlowMachine v2 — session 1 (classifier + IDLE leaf routing) ──
             # Behind a feature flag so production stays on the legacy path until
             # we explicitly flip FLOW_MACHINE_V2=true on Railway. v2 only takes
@@ -3093,6 +3107,7 @@ class IntentService:
                         "awaiting_send_confirmation", "awaiting_client_billing",
                         "awaiting_poc_name", "awaiting_bank_details", "awaiting_name_change",
                         "awaiting_modify_field", "pending_disambiguation",
+                        "awaiting_invoice_address", "awaiting_job_description",
                     )
                     _is_idle = (
                         not any(user_mem.get(k) for k in _idle_blockers)
@@ -3355,17 +3370,7 @@ class IntentService:
             if user_mem.get("awaiting_name_change"):
                 return self._process_name_change(user_id, message)
 
-            # 0b3.5b. "update my address" / "change my business address" — set or
-            # correct the saved invoice business address at any time.
-            _ADDRESS_UPDATE_TRIGGERS = [
-                "update my address", "change my address", "update my business address",
-                "change my business address", "update business address", "change business address",
-                "set my address", "edit my address", "update invoice address", "change invoice address",
-                "my address is", "my business address is", "wrong address", "address is wrong",
-                "fix my address", "correct my address",
-            ]
-            if any(t in msg_lower for t in _ADDRESS_UPDATE_TRIGGERS):
-                return self._handle_address_update(user_id, message, data_user_id)
+            # (Address-update commands are handled earlier, before the v2 classifier.)
 
             # 0b3.6. "what is my user id" / "my user id" — show user_id for account linking
             _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
