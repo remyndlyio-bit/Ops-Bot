@@ -644,3 +644,51 @@ class TestExplicitCommandsBeforeClassifier:
         r = svc.process_request("u1", msg)
         assert r["operation"] == expected_op
         assert not svc.gemini.answer_feature_question.called, f"{msg!r} was refused as a feature question"
+
+
+class TestInvoiceClientLabel:
+    """Invoice should be labelled by what the user asked for. "invoice for pepsi"
+    must not come back as "Content Lab" just because that's the client_name column
+    while Pepsi is the brand."""
+    from services.intent_service import IntentService
+    _name = staticmethod(IntentService._invoice_display_name)
+
+    def test_brand_search_uses_brand_not_client_column(self):
+        rows = [{"client_name": "Content Lab", "brand_name": "Pepsi"}]
+        assert self._name("pepsi", rows) == "Pepsi"
+
+    def test_client_search_keeps_client_name(self):
+        rows = [{"client_name": "Content Lab", "brand_name": "Pepsi"}]
+        assert self._name("content lab", rows) == "Content Lab"
+
+    def test_term_in_both_keeps_client_name(self):
+        rows = [{"client_name": "Samsung India", "brand_name": "Samsung"}]
+        assert self._name("samsung", rows) == "Samsung India"
+
+    def test_no_client_column_falls_back_to_brand(self):
+        rows = [{"client_name": "", "brand_name": "Nike"}]
+        assert self._name("nike", rows) == "Nike"
+
+    def test_no_search_term_uses_client_column(self):
+        rows = [{"client_name": "Acme Corp", "brand_name": "Acme"}]
+        assert self._name("", rows) == "Acme Corp"
+
+    def test_empty_rows_safe(self):
+        assert self._name("pepsi", []) == "pepsi"
+        assert self._name("", []) == "Client"
+
+
+class TestInvoiceAlreadyIssued:
+    """An invoice with an invoice_date on file is a RETRIEVAL — give it back,
+    don't treat "send me the invoice" as a fresh build."""
+    from services.intent_service import IntentService
+    _issued = staticmethod(IntentService._rows_already_invoiced)
+
+    def test_true_when_any_row_has_invoice_date(self):
+        assert self._issued([{"invoice_date": "2026-05-01"}]) is True
+        assert self._issued([{"invoice_date": None}, {"invoice_date": "2026-05-01"}]) is True
+
+    def test_false_when_no_invoice_date(self):
+        assert self._issued([{"invoice_date": None}, {"bill_no": "X-1"}]) is False
+        assert self._issued([{}]) is False
+        assert self._issued([]) is False

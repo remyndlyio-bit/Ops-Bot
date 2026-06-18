@@ -485,6 +485,32 @@ class IntentService:
             return False
         return bool(re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', str(email).strip()))
 
+    @staticmethod
+    def _invoice_display_name(search_term: str, rows: list) -> str:
+        """Pick the client label to show for an invoice.
+
+        Defaults to the row's client_name. But when the user searched by a term
+        that matches the BRAND (and NOT the client_name) — e.g. "invoice for
+        pepsi" where the client_name column is the agency "Content Lab" — label
+        the invoice by the brand, so we don't answer "pepsi" with "Content Lab".
+        """
+        first = (rows[0] if rows else {}) or {}
+        client_col = (str(first.get("client_name") or "")).strip()
+        brand_col = (str(first.get("brand_name") or "")).strip()
+        term = (search_term or "").strip()
+        if (term and brand_col
+                and term.lower() not in client_col.lower()
+                and term.lower() in brand_col.lower()):
+            return brand_col
+        return client_col or term or "Client"
+
+    @staticmethod
+    def _rows_already_invoiced(rows: list) -> bool:
+        """True if an invoice was already issued for these rows (any carries an
+        invoice_date). Used to treat "send me the invoice" as a retrieval rather
+        than a fresh build — give back what exists, don't re-prompt for fields."""
+        return any((r or {}).get("invoice_date") for r in (rows or []))
+
     def __init__(self):
         self.gemini = GeminiService()
         self.email = ResendEmailService()
@@ -4176,7 +4202,7 @@ class IntentService:
                                 logger.warning(f"[INVOICE] Could not persist alt-month context: {_e}")
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                    display_client = (rows[0].get("client_name") or client_name or "Client").strip()
+                    display_client = self._invoice_display_name(client_name, rows)
                     month_display = month_name
                     if not month_display and rows and rows[0].get("job_date"):
                         jd = str(rows[0]["job_date"])[:10]
@@ -4187,6 +4213,17 @@ class IntentService:
                                 pass
                     if not month_display:
                         month_display = "Request"
+
+                    # An invoice was already issued for these rows if any carries an
+                    # invoice_date. Then "send me the invoice" is a RETRIEVAL — give
+                    # the existing one back instead of re-running the new-invoice
+                    # prompts, and word the acknowledgement as a lookup, not a build.
+                    _already_invoiced = self._rows_already_invoiced(rows)
+                    _ack = (
+                        f"Pulling up your invoice for {display_client} ({month_display})…"
+                        if _already_invoiced else
+                        f"On it — putting your invoice for {display_client} ({month_display}) together…"
+                    )
                     # Detect explicit "regenerate" intent — only then bypass the cached PDF.
                     _regen_keywords = (
                         "regenerate", "regen ", "regen.", "re-generate", "re generate",
@@ -4227,15 +4264,18 @@ class IntentService:
                     except Exception:
                         pass
 
-                    # ── Mandatory-fields gate ──────────────────────────────────
+                    # ── Mandatory-fields gate (new invoices only) ──────────────
                     # Prompt for any missing required field (client billing, POC
                     # name, job description, bank account, business address) and
                     # only proceed once the invoice is complete. Runs for BOTH the
                     # generate and the email paths; each field's handler re-enters
                     # the flow so the prompts chain until everything is present.
-                    _gate = self._invoice_readiness_check(user_id, data_user_id, invoice_data, rows)
-                    if _gate is not None:
-                        return _gate
+                    # Skipped when the invoice already exists — a retrieval should
+                    # just hand back what was issued, not re-prompt for fields.
+                    if not _already_invoiced:
+                        _gate = self._invoice_readiness_check(user_id, data_user_id, invoice_data, rows)
+                        if _gate is not None:
+                            return _gate
 
                     # Decide between generating/sending invoice via WhatsApp/Telegram vs email
                     if intent_result.get("operation") == "SEND_EMAIL":
@@ -4266,7 +4306,7 @@ class IntentService:
                         # main.py.process_and_send_invoice — don't duplicate them here.
                         invoice_data["send_to_client"] = True
                         trigger_invoice = True
-                        response = f"On it — generating your invoice for {display_client} ({month_display}) now…"
+                        response = _ack
                         self._store_conversation(user_id, message, response)
                         return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
 
@@ -4292,8 +4332,8 @@ class IntentService:
                     if _auto_poc_email:
                         # PDF delivery + email confirmation prompt are owned by
                         # main.py.process_and_send_invoice — don't duplicate them here.
-                        # Just acknowledge so the user has feedback during PDF generation.
-                        response = f"On it — generating your invoice for {display_client} ({month_display}) now…"
+                        # Just acknowledge so the user has feedback while it's prepared.
+                        response = _ack
                     else:
                         self.memory.update_user_memory(user_id, {
                             "awaiting_poc_email": True,
@@ -4307,7 +4347,7 @@ class IntentService:
                             },
                         })
                         response = (
-                            f"On it — generating your invoice for {display_client} ({month_display}) now.\n\n"
+                            f"{_ack}\n\n"
                             f"Heads up: no client email on file. Reply with one (e.g. client@agency.com) "
                             f"and I'll send it over, or 'skip' to keep it offline."
                         )
