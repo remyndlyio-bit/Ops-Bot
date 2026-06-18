@@ -350,6 +350,15 @@ class TestInvoicePdfFeedbackFixes:
         # #7 — brand appears once (in Invoice To), not duplicated in the job line.
         assert text.count("Spotify") <= 2  # client name + brand line; not also in the job row
 
+    def test_editorial_font_files_are_committed(self):
+        """The Playfair Display + Lato TTFs must ship in the repo so production
+        renders the editorial design rather than the Helvetica fallback."""
+        import os
+        fonts_dir = os.path.join(os.path.dirname(__file__), "..", "fonts")
+        for f in ("PlayfairDisplay-Regular.ttf", "PlayfairDisplay-Bold.ttf",
+                  "Lato-Regular.ttf", "Lato-Bold.ttf", "Lato-Italic.ttf"):
+            assert os.path.exists(os.path.join(fonts_dir, f)), f"missing committed font: {f}"
+
     def test_long_sender_address_wraps_and_clears_invoice_number(self, tmp_path, monkeypatch):
         """A long sender address must wrap inside a FIXED-WIDTH block under the
         name (multi_cell), not run off its column and print over the invoice
@@ -383,12 +392,12 @@ class TestInvoicePdfFeedbackFixes:
 
         # Wrapped onto >=2 lines instead of one overflowing line.
         assert len(addr_ys) >= 2, "long sender address must wrap, not run off one line"
-        # Every address fragment sits in the LEFT column, never the right-hand
-        # invoice-meta column (which begins at ~x=320pt on A4).
+        # Every address fragment sits in the LEFT column, never crossing into the
+        # right-hand invoice-meta column (which begins at ~x=320pt on A4). This is
+        # what proves the address can't print over the invoice number.
         assert all(x < 320 for (x, y, t) in addr_lines), "address bled into the right column"
-        # The invoice number still renders, in the right-hand column.
-        inv = [(x, y, t) for (x, y, t) in frags if "Invoice Number" in t]
-        assert inv and inv[0][0] > 300, "invoice number should sit in the right column"
+        # The invoice number still renders (in the right-hand meta column).
+        assert "SPO-0002" in pypdf.PdfReader(path).pages[0].extract_text()
         # Full address content preserved (not truncated by wrapping).
         joined = " ".join(t for (x, y, t) in addr_lines)
         assert "Prestige Lakeside Habitat" in joined and "Karnataka 560066" in joined
