@@ -527,3 +527,36 @@ class TestAddressCommandRouting:
         r = svc.process_request("u1", "update my address to 12 New Road, Mumbai 400001")
         assert r["operation"] == "address_updated"
         assert svc.supabase.upsert_user_profile.called
+
+
+class TestExplicitCommandsBeforeClassifier:
+    """All explicit account/profile commands must be handled deterministically,
+    before the v2 classifier can grab them as FEATURE_QUESTIONs."""
+
+    def _svc(self):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.gemini = MagicMock(); svc.email = MagicMock(); svc.supabase = MagicMock(); svc.memory = MagicMock()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"onboarded_at": "2024-01-01T00:00:00", "name": "A", "preferences": {}}}
+        svc.supabase.get_user_bank_details.return_value = {"ok": True, "data": {"bank_account_number": "123", "bank_name": "HDFC"}}
+        svc.memory.get_user_memory.return_value = {}
+        svc.memory.get_form_state.return_value = None
+        svc.memory.get_conversation_history.return_value = []
+        svc.supabase.db_url = "postgresql://fake"
+        return svc
+
+    @pytest.mark.parametrize("msg,expected_op", [
+        ("Change my address", "ACTION_TRIGGER"),
+        ("Change my name", "name_change_prompt"),
+        ("update bank details", "bank_details_prompt"),
+        ("my bank details", "bank_details_view"),
+        ("what is my user id", "show_user_id"),
+    ])
+    def test_command_not_refused_as_feature(self, msg, expected_op):
+        svc = self._svc()
+        r = svc.process_request("u1", msg)
+        assert r["operation"] == expected_op
+        assert not svc.gemini.answer_feature_question.called, f"{msg!r} was refused as a feature question"

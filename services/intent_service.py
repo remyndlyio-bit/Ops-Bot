@@ -2990,10 +2990,31 @@ class IntentService:
             if reminder_result:
                 return reminder_result
 
-            # Explicit profile-update commands are handled deterministically HERE,
-            # before the v2 classifier — otherwise it grabs "change my address" as a
-            # FEATURE_QUESTION and refuses, never reaching the keyword handler below.
-            _ml_cmd = message.strip().lower()
+            # Explicit, unambiguous account/profile commands are handled
+            # deterministically HERE, before the v2 classifier — otherwise it grabs
+            # them as FEATURE_QUESTIONs and refuses (e.g. "change my address/name",
+            # "update bank details"), never reaching the keyword handlers.
+            msg_lower = message.strip().lower()
+
+            # Inline bank details ("My account is HDFC 1234 IFSC HDFC0001234 UPI x@y")
+            _has_bank_inline = (
+                ("my account" in msg_lower or "account number" in msg_lower)
+                and ("ifsc" in msg_lower or "upi" in msg_lower or "account is" in msg_lower)
+            )
+            if _has_bank_inline:
+                return self._handle_bank_details_response(user_id, message)
+            if any(t in msg_lower for t in self._UPDATE_BANK_TRIGGERS):
+                return self._prompt_bank_details_format(user_id, message)
+            if any(t in msg_lower for t in self._VIEW_BANK_TRIGGERS):
+                return self._show_bank_details(user_id, message)
+
+            _NAME_CHANGE_TRIGGERS = [
+                "change my name", "update my name", "set my name",
+                "rename me", "my name is wrong", "fix my name",
+            ]
+            if any(t in msg_lower for t in _NAME_CHANGE_TRIGGERS):
+                return self._handle_name_change(user_id, message)
+
             _ADDRESS_UPDATE_TRIGGERS = [
                 "update my address", "change my address", "update my business address",
                 "change my business address", "update business address", "change business address",
@@ -3001,8 +3022,23 @@ class IntentService:
                 "my address is", "my business address is", "wrong address", "address is wrong",
                 "fix my address", "correct my address",
             ]
-            if any(t in _ml_cmd for t in _ADDRESS_UPDATE_TRIGGERS):
+            if any(t in msg_lower for t in _ADDRESS_UPDATE_TRIGGERS):
                 return self._handle_address_update(user_id, message, data_user_id)
+
+            _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
+            if any(t in msg_lower for t in _USER_ID_TRIGGERS):
+                platform = "Telegram" if user_id.isdigit() else "WhatsApp"
+                response = f"Your {platform} user ID is:\n`{user_id}`\n\nShare this with your other platform to link accounts."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "show_user_id", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            _LINK_TRIGGERS = [
+                "link account", "link my account", "link telegram",
+                "link my telegram", "link whatsapp", "link my whatsapp",
+                "connect account", "connect telegram", "connect whatsapp",
+            ]
+            if any(t in msg_lower for t in _LINK_TRIGGERS):
+                return self._handle_link_account(user_id, message)
 
             # ── FlowMachine v2 — session 1 (classifier + IDLE leaf routing) ──
             # Behind a feature flag so production stays on the legacy path until
@@ -3108,6 +3144,7 @@ class IntentService:
                         "awaiting_poc_name", "awaiting_bank_details", "awaiting_name_change",
                         "awaiting_modify_field", "pending_disambiguation",
                         "awaiting_invoice_address", "awaiting_job_description",
+                        "awaiting_link_id",
                     )
                     _is_idle = (
                         not any(user_mem.get(k) for k in _idle_blockers)
@@ -3346,56 +3383,16 @@ class IntentService:
             if user_mem.get("awaiting_bank_details"):
                 return self._handle_bank_details_response(user_id, message)
 
-            # 0b3. "update bank details" — ask user for details in a specific format
+            # msg_lower is used throughout the rest of process_request.
+            # (Explicit bank / name / address / user-id / link commands are now
+            # handled earlier, before the v2 classifier.)
             msg_lower = message.strip().lower()
-            # Direct one-shot bank details: "My account is HDFC 1234 IFSC HDFC0001234, UPI x@y"
-            _has_bank_inline = (
-                ("my account" in msg_lower or "account number" in msg_lower)
-                and ("ifsc" in msg_lower or "upi" in msg_lower or "account is" in msg_lower)
-            )
-            if _has_bank_inline:
-                return self._handle_bank_details_response(user_id, message)
-            if any(t in msg_lower for t in self._UPDATE_BANK_TRIGGERS):
-                return self._prompt_bank_details_format(user_id, message)
 
-            # 0b3.5. "change my name" / "update my name" — update user profile name
-            _NAME_CHANGE_TRIGGERS = [
-                "change my name", "update my name", "set my name",
-                "rename me", "my name is wrong", "fix my name",
-            ]
-            if any(t in msg_lower for t in _NAME_CHANGE_TRIGGERS):
-                return self._handle_name_change(user_id, message)
-
-            # Check if user is awaiting name change (providing new name)
+            # Awaiting-reply handlers for the commands moved above.
             if user_mem.get("awaiting_name_change"):
                 return self._process_name_change(user_id, message)
-
-            # (Address-update commands are handled earlier, before the v2 classifier.)
-
-            # 0b3.6. "what is my user id" / "my user id" — show user_id for account linking
-            _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
-            if any(t in msg_lower for t in _USER_ID_TRIGGERS):
-                platform = "Telegram" if user_id.isdigit() else "WhatsApp"
-                response = f"Your {platform} user ID is:\n`{user_id}`\n\nShare this with your other platform to link accounts."
-                self._store_conversation(user_id, message, response)
-                return {"operation": "show_user_id", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-            # 0b3.7. "link account" / "link telegram" — cross-platform account linking
-            _LINK_TRIGGERS = [
-                "link account", "link my account", "link telegram",
-                "link my telegram", "link whatsapp", "link my whatsapp",
-                "connect account", "connect telegram", "connect whatsapp",
-            ]
-            if any(t in msg_lower for t in _LINK_TRIGGERS):
-                return self._handle_link_account(user_id, message)
-
-            # Check if user is providing a link ID
             if user_mem.get("awaiting_link_id"):
                 return self._process_link_id(user_id, message)
-
-            # 0b4. "my bank details" / "show bank details" — show stored (masked)
-            if any(t in msg_lower for t in self._VIEW_BANK_TRIGGERS):
-                return self._show_bank_details(user_id, message)
 
             # 0b5. Negative intent — user declining a follow-up question
             _NEGATIVE_RESPONSES = {
