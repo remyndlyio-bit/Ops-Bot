@@ -453,3 +453,42 @@ class TestInvoiceReadinessGate:
         # Both billing AND bank missing → billing is asked first.
         r = self._check(self._svc({"client_billing_details": ""}, bank=False))
         assert "billing" in r["response"].lower() and "bank" not in r["response"].lower()
+
+
+class TestAddressUpdateCommand:
+    """Users can set/correct their saved business address any time."""
+
+    def _svc(self, existing_addr="OLD ADDR"):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.supabase = MagicMock(); svc.memory = MagicMock()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {"invoice_address": existing_addr}}}
+        return svc
+
+    def test_inline_update_overwrites(self):
+        svc = self._svc()
+        r = svc._handle_address_update("u1", "update my address to TechNova, BKC, Mumbai 400051", "u1")
+        assert r["operation"] == "address_updated"
+        assert svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]["invoice_address"] == "TechNova, BKC, Mumbai 400051"
+
+    def test_my_address_is_form(self):
+        svc = self._svc()
+        svc._handle_address_update("u1", "my business address is 12 MG Road, Mumbai", "u1")
+        assert svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]["invoice_address"] == "12 MG Road, Mumbai"
+
+    def test_bare_command_prompts(self):
+        svc = self._svc()
+        r = svc._handle_address_update("u1", "update my address", "u1")
+        assert r["trigger_invoice"] is False and "address" in r["response"].lower()
+        patch = svc.memory.update_user_memory.call_args[0][1]
+        assert patch.get("awaiting_invoice_address") is True and patch.get("pending_invoice") is None
+
+    def test_persist_helper_preserves_other_prefs(self):
+        svc = self._svc()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "D", "preferences": {"invoice_address": "OLD", "invoice_name": "Darshit Inc"}}}
+        svc._persist_invoice_address("u1", "NEW ADDR")
+        saved = svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]
+        assert saved["invoice_address"] == "NEW ADDR" and saved["invoice_name"] == "Darshit Inc"

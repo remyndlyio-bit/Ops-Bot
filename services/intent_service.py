@@ -2103,25 +2103,10 @@ class IntentService:
         self._store_conversation(user_id, message, response)
         return {"operation": "billing_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-    def _handle_invoice_address_response(self, user_id: str, message: str) -> Dict:
-        """Store the invoicer's business address (mandatory) in profile preferences,
-        then re-enter the invoice flow. 'cancel' aborts the invoice."""
-        user_mem = self.memory.get_user_memory(user_id)
-        pending_invoice = user_mem.get("pending_invoice", {})
-        addr_uid = user_mem.get("pending_address_user_id") or user_id
-        self.memory.update_user_memory(user_id, {
-            "awaiting_invoice_address": False,
-            "pending_address_user_id": None,
-        })
-
-        # Address is mandatory — 'cancel' aborts the invoice.
-        if message.strip().lower() in ("cancel", "stop", "abort", "nevermind"):
-            self.memory.update_user_memory(user_id, {"pending_invoice": None})
-            response = "No problem — invoice cancelled. Nothing was generated."
-            self._store_conversation(user_id, message, response)
-            return {"operation": "invoice_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-        # Merge into profile preferences (upsert merges, won't wipe name/etc.).
+    def _persist_invoice_address(self, addr_uid: str, address: str) -> bool:
+        """Save the invoicer's business address to profile preferences (merging, so
+        name/etc. are preserved). Shared by the gate flow and the 'update my
+        address' command."""
         prefs = {}
         existing = self.supabase.get_user_profile(addr_uid)
         if existing.get("ok") and existing.get("data"):
@@ -2133,13 +2118,58 @@ class IntentService:
                     prefs = {}
             elif isinstance(_p, dict):
                 prefs = _p
-        prefs["invoice_address"] = message.strip()
+        prefs["invoice_address"] = address.strip()
         prefs.pop("invoice_address_skipped", None)
         platform = "telegram" if str(addr_uid).isdigit() else "whatsapp"
         try:
             self.supabase.upsert_user_profile(addr_uid, platform, {"preferences": prefs})
+            return True
         except Exception as _e:
             logger.warning(f"[INVOICE_ADDR] Could not save invoice address: {_e}")
+            return False
+
+    def _handle_address_update(self, user_id: str, message: str, data_user_id: str) -> Dict:
+        """'update my address' / 'my address is X' — let the user set or correct
+        their saved business address at any time (not just during an invoice)."""
+        # Try to pull the new address inline ("...address to X" / "...address is X").
+        m = re.search(r'address\s*(?:to|is|:|=)\s*(.+)', message.strip(), re.IGNORECASE | re.DOTALL)
+        inline = (m.group(1).strip() if m else "")
+        if inline and len(inline) >= 4 and inline.lower() not in ("wrong", "incorrect"):
+            self._persist_invoice_address(data_user_id, inline)
+            response = f"Updated ✅ Your business address is now:\n\n{inline}\n\nIt'll appear on your invoices from now on."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "address_updated", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        # No inline address → prompt for it (standalone update, no pending invoice).
+        self.memory.update_user_memory(user_id, {
+            "awaiting_invoice_address": True,
+            "pending_address_user_id": data_user_id,
+            "pending_invoice": None,
+        })
+        response = ("Sure — what's your business address for the invoice header?\n\n"
+                    "(multiple lines are fine — send the full new address)")
+        self._store_conversation(user_id, message, response)
+        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_invoice_address_response(self, user_id: str, message: str) -> Dict:
+        """Store the invoicer's business address (mandatory) in profile preferences,
+        then re-enter the invoice flow. 'cancel' aborts the invoice."""
+        user_mem = self.memory.get_user_memory(user_id)
+        pending_invoice = user_mem.get("pending_invoice", {})
+        addr_uid = user_mem.get("pending_address_user_id") or user_id
+        self.memory.update_user_memory(user_id, {
+            "awaiting_invoice_address": False,
+            "pending_address_user_id": None,
+        })
+
+        # 'cancel' aborts the invoice (or, for a standalone update, just stops).
+        if message.strip().lower() in ("cancel", "stop", "abort", "nevermind"):
+            self.memory.update_user_memory(user_id, {"pending_invoice": None})
+            response = ("No problem — invoice cancelled. Nothing was generated." if pending_invoice
+                        else "Okay, address unchanged.")
+            self._store_conversation(user_id, message, response)
+            return {"operation": "invoice_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        self._persist_invoice_address(addr_uid, message.strip())
 
         if pending_invoice:
             self._store_conversation(user_id, message, "Saved — that address will appear on your invoices.")
@@ -3324,6 +3354,18 @@ class IntentService:
             # Check if user is awaiting name change (providing new name)
             if user_mem.get("awaiting_name_change"):
                 return self._process_name_change(user_id, message)
+
+            # 0b3.5b. "update my address" / "change my business address" — set or
+            # correct the saved invoice business address at any time.
+            _ADDRESS_UPDATE_TRIGGERS = [
+                "update my address", "change my address", "update my business address",
+                "change my business address", "update business address", "change business address",
+                "set my address", "edit my address", "update invoice address", "change invoice address",
+                "my address is", "my business address is", "wrong address", "address is wrong",
+                "fix my address", "correct my address",
+            ]
+            if any(t in msg_lower for t in _ADDRESS_UPDATE_TRIGGERS):
+                return self._handle_address_update(user_id, message, data_user_id)
 
             # 0b3.6. "what is my user id" / "my user id" — show user_id for account linking
             _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
