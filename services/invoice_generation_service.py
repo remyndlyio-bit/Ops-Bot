@@ -233,27 +233,34 @@ class InvoiceGenerationService:
                         brand_name_invoice = _bn
 
             client_display = sanitize_pdf_text(summary.get("client", ""))
-            pdf.set_font(font_family, "B", 11)
             pdf.set_text_color(*_DARK)
-            # Lead with client / billing name
-            if client_billing:
-                first_line = client_billing.split("\n")[0].strip()
-                pdf.cell(0, 6, sanitize_pdf_text(first_line), ln=1)
-                pdf.set_font(font_family, "", 9)
-                pdf.set_text_color(80, 80, 80)
-                for _bl in client_billing.split("\n")[1:]:
-                    _bl = _bl.strip()
-                    if _bl:
-                        pdf.cell(0, 5, sanitize_pdf_text(_bl), ln=1)
-            elif production_house and production_house.lower() not in ("none", ""):
-                pdf.cell(0, 6, sanitize_pdf_text(production_house), ln=1)
-            elif client_display:
-                pdf.cell(0, 6, client_display, ln=1)
 
+            # Build the company / billing block (name + any address lines).
+            billing_lines = []
+            if client_billing:
+                billing_lines = [l.strip() for l in client_billing.split("\n") if l.strip()]
+            elif production_house and production_house.lower() not in ("none", ""):
+                billing_lines = [production_house]
+            elif client_display:
+                billing_lines = [client_display]
+
+            # Address the invoice TO THE POC first (bold, prominent), with the
+            # company / billing details underneath. If there's no POC on file,
+            # fall back to leading with the company name.
             if poc_name:
+                pdf.set_font(font_family, "B", 11)
+                pdf.cell(0, 6, sanitize_pdf_text(poc_name), ln=1)
                 pdf.set_font(font_family, "", 9)
                 pdf.set_text_color(80, 80, 80)
-                pdf.cell(0, 5, sanitize_pdf_text(poc_name), ln=1)
+                for _bl in billing_lines:
+                    pdf.cell(0, 5, sanitize_pdf_text(_bl), ln=1)
+            elif billing_lines:
+                pdf.set_font(font_family, "B", 11)
+                pdf.cell(0, 6, sanitize_pdf_text(billing_lines[0]), ln=1)
+                pdf.set_font(font_family, "", 9)
+                pdf.set_text_color(80, 80, 80)
+                for _bl in billing_lines[1:]:
+                    pdf.cell(0, 5, sanitize_pdf_text(_bl), ln=1)
 
             # Brand line — right-aligned
             if brand_name_invoice:

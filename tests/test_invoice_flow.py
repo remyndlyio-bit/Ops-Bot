@@ -393,6 +393,38 @@ class TestInvoicePdfFeedbackFixes:
         joined = " ".join(t for (x, y, t) in addr_lines)
         assert "Prestige Lakeside Habitat" in joined and "Karnataka 560066" in joined
 
+    def test_invoice_to_leads_with_poc_then_company(self, tmp_path, monkeypatch):
+        """The 'Invoice To' block must be addressed TO THE POC first (the person),
+        with the company / billing details underneath — not the other way round."""
+        pypdf = __import__("pytest").importorskip("pypdf")
+        monkeypatch.chdir(tmp_path)
+        from services.invoice_generation_service import InvoiceGenerationService
+        svc = InvoiceGenerationService()
+        summary = {"client": "Spotify India", "month": "March", "year": 2026}
+        data = [{"brand_name": "Spotify", "poc_name": "Karan Mehta",
+                 "client_billing_details": "Spotify India Pvt Ltd\nLower Parel, Mumbai 400013",
+                 "job_description_details": "VO", "job_date": "2026-03-04",
+                 "fees": 10000, "bill_no": "SPO-0002"}]
+        bank = {"bank_name": "HDFC", "bank_account_number": "1234567890", "bank_ifsc": "HDFC0001234"}
+        prof = {"name": "Darshit Mody", "address": "12 MG Road"}
+        path = svc.generate_pdf(summary, data, bank_details=bank, user_profile=prof)
+
+        frags = []
+        def _vis(text, cm, tm, font_dict, font_size):
+            if text and text.strip():
+                frags.append((tm[5], text))
+        pypdf.PdfReader(path).pages[0].extract_text(visitor_text=_vis)
+
+        def _y_of(needle):
+            ys = [y for (y, t) in frags if needle in t]
+            return max(ys) if ys else None
+        poc_y = _y_of("Karan Mehta")
+        company_y = _y_of("Spotify India Pvt Ltd")
+        assert poc_y is not None, "POC name should be on the invoice"
+        assert company_y is not None, "company billing name should be on the invoice"
+        # Higher on the page == larger y in PDF user space.
+        assert poc_y > company_y, "POC name must sit above the company billing name"
+
     def test_invoice_address_handler_saves_and_resumes(self):
         from unittest.mock import patch, MagicMock
         with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
