@@ -692,3 +692,48 @@ class TestInvoiceAlreadyIssued:
         assert self._issued([{"invoice_date": None}, {"bill_no": "X-1"}]) is False
         assert self._issued([{}]) is False
         assert self._issued([]) is False
+
+
+class TestInvoiceTriggerSynonyms:
+    """Coverage for the generation action verbs and the regeneration keywords."""
+    from services.intent_service import IntentService
+    _action = staticmethod(IntentService._is_definite_invoice_action)
+    _regen = staticmethod(IntentService._is_regenerate_request)
+
+    @pytest.mark.parametrize("msg", [
+        "generate invoice for Pepsi", "send me the invoice for Pepsi",
+        "give me the invoice for Nike", "provide the invoice for Pepsi",
+        "produce the invoice for March", "raise an invoice for Acme",
+        "cut invoice for Star Studios", "forward the invoice to the client",
+        "genrate invoce for Acme",  # typos still work
+    ])
+    def test_definite_invoice_actions(self, msg):
+        assert self._action(msg) is True
+
+    @pytest.mark.parametrize("msg", [
+        "show unpaid invoices",                     # a read
+        "how many invoices did I raise last month", # a read
+        "issue with my invoice",                    # a problem, not a request
+        "what is my total billing this year",       # no invoice noun + read
+    ])
+    def test_not_a_definite_action(self, msg):
+        assert self._action(msg) is False
+
+    @pytest.mark.parametrize("msg", [
+        "regenerate invoice for Pepsi", "make it again", "generate again",
+        "update the invoice for Pepsi", "updated invoice please",
+        "fix the invoice for Nike", "correct the invoice", "reissue the invoice",
+        "send me a fresh pdf", "refresh the invoice", "do it again",
+        "make a new one", "rebuild invoice for X",
+    ])
+    def test_regenerate_phrases(self, msg):
+        assert self._regen(msg) is True
+
+    @pytest.mark.parametrize("msg", [
+        "send me the invoice for Pepsi",  # plain retrieval, NOT a rebuild
+        "invoice for Nike March",
+        "update invoice profile",         # a different command — must not force regen
+        "update my bank details",
+    ])
+    def test_not_a_regenerate(self, msg):
+        assert self._regen(msg) is False

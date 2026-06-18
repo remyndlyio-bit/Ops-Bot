@@ -511,6 +511,64 @@ class IntentService:
         than a fresh build — give back what exists, don't re-prompt for fields."""
         return any((r or {}).get("invoice_date") for r in (rows or []))
 
+    # ── Invoice trigger vocabulary ──────────────────────────────────────────
+    # Common misspellings of "invoice".
+    _INVOICE_TYPOS = ("invoce", "invoic", "invoise", "incoice", "invioce", "invocice")
+
+    # Verbs that, next to an invoice noun, mean "produce / hand me the invoice".
+    # These get the deterministic shortcut that overrides the read-classifier, so
+    # only UNAMBIGUOUS action verbs belong here. ("issue" is deliberately left to
+    # the LLM — "issue with my invoice" means a problem, not a request.)
+    _INVOICE_ACTION_VERBS = (
+        "generate", "genrate", "generat", "create", "make", "build", "prepare",
+        "send", "share", "email", "mail", "give", "get", "download", "fetch",
+        "provide", "produce", "raise", "cut", "forward",
+        "show me the invoice", "regenerate",
+    )
+
+    # Phrases that mean "rebuild it from current data — don't serve the cached
+    # copy". Pure substring match (no LLM); anything not listed reuses the cache.
+    _REGEN_KEYWORDS = (
+        "regenerate", "regen ", "regen.", "re-generate", "re generate",
+        "fresh copy", "fresh invoice", "fresh pdf", "new copy", "new pdf",
+        "redo invoice", "remake invoice", "rebuild invoice", "recreate invoice",
+        "force regenerate", "generate again", "make it again",
+        "updated invoice", "update the invoice", "update my invoice",
+        "fix the invoice", "fix my invoice", "correct the invoice",
+        "reissue", "re-issue", "re issue",
+        "refresh the invoice", "refresh invoice",
+        "redo it", "do it again", "make a fresh", "make a new one",
+    )
+
+    @staticmethod
+    def _is_definite_invoice_action(message: str) -> bool:
+        """True when the message is unambiguously an invoice ACTION: an invoice
+        noun plus an action verb at the start, or directly before the noun. The
+        hard shortcut that overrides the read-classifier (so "Generate invoice
+        for X" can't be mis-read as a query)."""
+        m = (message or "").strip().lower()
+        has_noun = (
+            "invoice" in m or bool(re.search(r"\bbill\b", m)) or "pdf" in m
+            or any(t in m for t in IntentService._INVOICE_TYPOS)
+        )
+        if not has_noun:
+            return False
+        verbs = IntentService._INVOICE_ACTION_VERBS
+        if any(m.startswith(v) for v in verbs):
+            return True
+        return any(
+            f"{v} invoice" in m or f"{v} bill" in m
+            or any(f"{v} {t}" in m for t in IntentService._INVOICE_TYPOS)
+            for v in verbs
+        )
+
+    @staticmethod
+    def _is_regenerate_request(message: str) -> bool:
+        """True when the user wants the invoice rebuilt from current data rather
+        than the cached copy returned."""
+        m = (message or "").strip().lower()
+        return any(kw in m for kw in IntentService._REGEN_KEYWORDS)
+
     def __init__(self):
         self.gemini = GeminiService()
         self.email = ResendEmailService()
@@ -3696,43 +3754,31 @@ class IntentService:
                     return {"operation": "invoice_feedback", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
+            # Broad verb list (logging/telemetry only — routing is driven by the
+            # invoice noun below + the AI classifier).
             _INVOICE_VERBS = ["get", "download", "send", "give", "show", "retrieve", "fetch",
                               "generate", "create", "make", "prepare", "need", "want", "share",
+                              "provide", "issue", "produce", "raise", "cut", "forward",
                               "regenerate", "redo", "rebuild"]
             has_verb = any(w in msg_lower for w in _INVOICE_VERBS)
-            # Also catch common verb typos
             _VERB_TYPOS = ["genrate", "generat", "crete", "creat", "mke", "prepre", "prepar"]
             has_verb = has_verb or any(t in msg_lower for t in _VERB_TYPOS)
-            # Catch common invoice/bill typos: invoce, invoic, invoise, incoice, bll, bil
-            _INVOICE_TYPOS = ["invoce", "invoic", "invoise", "incoice", "invioce", "invocice"]
             # "bill" must match as a whole word — "billing"/"billed"/"billable" are
             # financial/revenue terms and must NOT route to the invoice pipeline.
             _bill_as_word = bool(re.search(r'\bbill\b', msg_lower))
             has_invoice_word = (
                 "invoice" in msg_lower or _bill_as_word or "pdf" in msg_lower
-                or any(t in msg_lower for t in _INVOICE_TYPOS)
+                or any(t in msg_lower for t in self._INVOICE_TYPOS)
             )
-            # If a keyword match suggests this might be an invoice request, confirm with AI
-            # — many queries mention "invoice"/"bill" without actually asking to generate one
-            # (e.g. "jobs with invoice_date older than 60 days", "show unpaid invoices",
-            # "how many invoices last month"). AI is far more reliable than keyword lists.
+            # An invoice noun is what routes here; many such messages are actually
+            # READS ("show unpaid invoices", "how many invoices last month"), so the
+            # AI classifier confirms below. AI is far more reliable than keyword lists.
             is_retrieval = has_invoice_word
-            # Hard-keyword shortcut: if the message starts with a clear action verb
-            # followed by "invoice/bill/invoce/etc.", it is unambiguously an invoice
-            # action regardless of what any downstream AI classifier says. This prevents
-            # v2 READ_QUERY over-triggering on "Generate invoice for X for March".
-            _ACTION_VERBS = ("generate", "genrate", "generat", "create", "make", "build",
-                             "prepare", "send", "share", "email", "mail", "give", "get",
-                             "download", "fetch", "show me the invoice", "regenerate")
-            _invoice_action_definite = (
-                has_invoice_word
-                and (
-                    any(msg_lower.startswith(v) for v in _ACTION_VERBS)
-                    or any(f"{v} invoice" in msg_lower or f"{v} bill" in msg_lower
-                           or any(f"{v} {t}" in msg_lower for t in _INVOICE_TYPOS)
-                           for v in _ACTION_VERBS)
-                )
-            )
+            # Hard-keyword shortcut: a clear action verb + an invoice noun is
+            # unambiguously an invoice action, regardless of what the downstream AI
+            # classifier says — prevents v2 READ_QUERY over-triggering on e.g.
+            # "Generate invoice for X for March". (See _INVOICE_ACTION_VERBS.)
+            _invoice_action_definite = self._is_definite_invoice_action(message)
             if is_retrieval:
                 # First-line guard: defer to the v2 classifier when it confidently
                 # called this a READ. The legacy invoice keyword check used to
@@ -4224,14 +4270,8 @@ class IntentService:
                         if _already_invoiced else
                         f"On it — putting your invoice for {display_client} ({month_display}) together…"
                     )
-                    # Detect explicit "regenerate" intent — only then bypass the cached PDF.
-                    _regen_keywords = (
-                        "regenerate", "regen ", "regen.", "re-generate", "re generate",
-                        "fresh copy", "fresh invoice", "new copy", "new pdf",
-                        "redo invoice", "remake invoice", "rebuild invoice", "recreate invoice",
-                        "force regenerate", "generate again", "make it again",
-                    )
-                    _force_regen = any(kw in msg_lower for kw in _regen_keywords)
+                    # Explicit "rebuild it" intent — only then bypass the cached PDF.
+                    _force_regen = self._is_regenerate_request(message)
                     invoice_data = {
                         "client_name": display_client,
                         "month": month_display,
