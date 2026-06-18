@@ -1,4 +1,5 @@
 from fpdf import FPDF
+from fpdf.enums import XPos, YPos
 import os
 from datetime import datetime
 from num2words import num2words
@@ -145,17 +146,30 @@ class InvoiceGenerationService:
 
             pdf.set_font(font_family, "", 9)
             pdf.set_text_color(80, 80, 80)
+
+            # Left-column detail lines wrap inside a FIXED-WIDTH block under the
+            # name. Using multi_cell (not cell) means a long address can never run
+            # off its column and print over the invoice-number column on the right
+            # — it stacks onto extra lines instead. Small gutter before the right
+            # column keeps the two blocks visually separate.
+            detail_w = left_w - 4
+
+            def _left_detail(text):
+                pdf.set_x(pdf.l_margin)
+                pdf.multi_cell(detail_w, 5, sanitize_pdf_text(text), align="L",
+                               new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
             if invoicer_address:
                 for _line in sanitize_pdf_text(invoicer_address).split("\n"):
                     _line = _line.strip()
                     if _line:
-                        pdf.cell(left_w, 5, _line, ln=1)
+                        _left_detail(_line)
             if invoicer_email:
-                pdf.cell(left_w, 5, sanitize_pdf_text(f"Email ID: {invoicer_email}"), ln=1)
+                _left_detail(f"Email ID: {invoicer_email}")
             if invoicer_mobile:
-                pdf.cell(left_w, 5, sanitize_pdf_text(f"Mobile Number: {invoicer_mobile}"), ln=1)
+                _left_detail(f"Mobile Number: {invoicer_mobile}")
             if invoicer_pan:
-                pdf.cell(left_w, 5, sanitize_pdf_text(f"PAN: {invoicer_pan}"), ln=1)
+                _left_detail(f"PAN: {invoicer_pan}")
 
             after_left_y = pdf.get_y()
 

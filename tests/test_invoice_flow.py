@@ -350,6 +350,49 @@ class TestInvoicePdfFeedbackFixes:
         # #7 — brand appears once (in Invoice To), not duplicated in the job line.
         assert text.count("Spotify") <= 2  # client name + brand line; not also in the job row
 
+    def test_long_sender_address_wraps_and_clears_invoice_number(self, tmp_path, monkeypatch):
+        """A long sender address must wrap inside a FIXED-WIDTH block under the
+        name (multi_cell), not run off its column and print over the invoice
+        number in the right-hand column. Regression for 'the address line is
+        writing all over the invoice number'."""
+        pypdf = __import__("pytest").importorskip("pypdf")
+        monkeypatch.chdir(tmp_path)
+        from services.invoice_generation_service import InvoiceGenerationService
+        svc = InvoiceGenerationService()
+        long_addr = ("Flat 1203, Tower B, Prestige Lakeside Habitat, Varthur Road, "
+                     "Whitefield, Bengaluru, Karnataka 560066")
+        summary = {"client": "Spotify India", "month": "March", "year": 2026}
+        data = [{"brand_name": "Spotify", "poc_name": "karan",
+                 "client_billing_details": "Spotify India\nLower Parel",
+                 "job_description_details": "2 master films VO",
+                 "job_date": "2026-03-04", "fees": 10000, "bill_no": "SPO-0002"}]
+        bank = {"bank_name": "HDFC", "bank_account_name": "Darshit Mody",
+                "bank_account_number": "1234567890", "bank_ifsc": "HDFC0001234"}
+        prof = {"name": "Darshit Mody", "address": long_addr}
+        path = svc.generate_pdf(summary, data, bank_details=bank, user_profile=prof)
+
+        frags = []
+        def _vis(text, cm, tm, font_dict, font_size):
+            if text and text.strip():
+                frags.append((tm[4], tm[5], text))
+        pypdf.PdfReader(path).pages[0].extract_text(visitor_text=_vis)
+
+        addr_tokens = ("Prestige", "Whitefield", "Karnataka", "Varthur", "Tower", "Bengaluru")
+        addr_lines = [(x, y, t) for (x, y, t) in frags if any(tok in t for tok in addr_tokens)]
+        addr_ys = {round(y) for (x, y, t) in addr_lines}
+
+        # Wrapped onto >=2 lines instead of one overflowing line.
+        assert len(addr_ys) >= 2, "long sender address must wrap, not run off one line"
+        # Every address fragment sits in the LEFT column, never the right-hand
+        # invoice-meta column (which begins at ~x=320pt on A4).
+        assert all(x < 320 for (x, y, t) in addr_lines), "address bled into the right column"
+        # The invoice number still renders, in the right-hand column.
+        inv = [(x, y, t) for (x, y, t) in frags if "Invoice Number" in t]
+        assert inv and inv[0][0] > 300, "invoice number should sit in the right column"
+        # Full address content preserved (not truncated by wrapping).
+        joined = " ".join(t for (x, y, t) in addr_lines)
+        assert "Prestige Lakeside Habitat" in joined and "Karnataka 560066" in joined
+
     def test_invoice_address_handler_saves_and_resumes(self):
         from unittest.mock import patch, MagicMock
         with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
