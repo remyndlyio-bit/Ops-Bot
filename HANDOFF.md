@@ -1,149 +1,202 @@
-# Session Handoff — 2026-06-11
+# Session Handoff — 2026-06-17 / 18
 
-## What happened this session
+Big session. Three arcs: (1) a regression-fix sprint off a 156-row WhatsApp test
+sheet, (2) a deterministic query router that takes common queries off the LLM
+planner, and (3) a full invoice-generation overhaul plus two infra fixes
+(DB-backed memory, reminder-hijack). All 16 commits are on `main` and
+**auto-deploy to Railway on push** (see "Deploy" below — this is NOT midnight-only).
 
-Four bugs from the WhatsApp test matrix were fixed and an E2E live test suite was built. All fixes are on `main` and deployed.
+Test suite: **457 passing** (was ~280 at session start). New: `tests/test_query_router.py`,
+`tests/test_memory_service.py`, and many additions to `test_edge_cases.py` /
+`test_invoice_flow.py`.
 
 ---
 
-## Fixes shipped (commits on main)
+## Commits shipped (newest first)
 
 | Commit | What |
 |---|---|
-| `1ba38e0` | Fix Bug 1 + Bug 2 — aggregate keyword shortcuts + GROUP BY payload fix |
-| `e4f4cbb` | Add live E2E test suite (`tests/test_e2e_live.py`) |
-| `9fbcbc1` | Fix E2E mock (ILIKE without wildcards), raise token cap, retry on JSON fluke |
-| `ca4bc46` | Expand E2E to 33 test cases across 10 categories |
+| `2a30608` | "update my address" command — set/correct saved business address any time |
+| `02b2d2c` | **DB-backed MemoryService** — conversation/awaiting state → Supabase (survives redeploys + multi-instance) |
+| `76b19da` | **Mandatory-fields gate** for invoices — prompt for every required field, then generate |
+| `8756fef` | Close address-check gap on the bank-resume path |
+| `1eb838a` | **Hard guard** — never generate a bankless (unpayable) invoice |
+| `b61cab7` | Invoice PDF + generation: 7 client-feedback fixes |
+| `627d2c0` | Stop a stale pending reminder hijacking numeric / mid-flow messages |
+| `aecfb2c` | Don't rewrite aggregate/GROUP BY SQL to `SELECT *` for history questions |
+| `d66b5b8` | Keep POC email example in add-job prompt, drop "(optional)" label |
+| `1870f61` | Remove email from add-job prompt + warmer synthesizer tone |
+| `47f7ee8` | Two router bugs from re-testing the sheet (output/ dir crash; scope-qualifier) |
+| `19050e2` | Fix two incorrect E2E assertions (C9-01, C10-01) → suite effectively 33/33 |
+| `c661622` | Regression FAILs 37-45 (delete-last, pronoun resolution, declines, OOS) |
+| `9bf05a5` | Fix 36 regression FAILs + wire the query router into the pipeline |
+| `3a0e51a` | Add the deterministic-first query router (`services/query_router.py`) |
+| `1ee2ed9` | Harden E2E suite with `expected_db_rows` SQL-level validation |
 
 ---
 
-## Bug status after this session
+## 1. Deterministic query router — `services/query_router.py` (NEW)
 
-| Bug | Status | How confirmed |
-|---|---|---|
-| Bug 1: Planner refuses aggregates (biggest client, avg, owe me) | ✅ FIXED | E2E tests C3-01, C3-02, C4-01, C4-02 all pass |
-| Bug 2: Unfiltered COUNT crash | ✅ FIXED | E2E tests C1-01, C1-02 pass; planner emits metric=count correctly |
-| Bug 3: "Earnings" defaults to list | ✅ FIXED | E2E test C2-02 passes; "Earnings last quarter" → SUM not SELECT * |
-| Bug 4: Smart-capture misses "paid" | ✅ FIXED | E2E test C9-01 passes; "paid" extracted as `"true"` |
-| Bug 5: Zero-result aggregate phrasing | ❌ NOT FIXED | Never addressed this session. Still in CLAUDE.md as LOW. |
+**The architectural shift this session.** `route_common_query(message, user_id)` is a
+PURE function (no DB/LLM) mapping the ~20 common query shapes straight to SQL,
+run BEFORE the planner in `intent_service`. The planner is now the **fallback**
+for the long tail.
+
+- Routes: count_jobs, total_fees, average_fees, list_jobs, last_job, unpaid_list,
+  list_clients, biggest_client, earnings_by_client, top_bottom_job,
+  payment_status ("has X paid"), client_owes, clients_paid_list, date_lookup,
+  hinglish_earnings.
+- Wired in `intent_service._execute_routed_query`; `_keyword_sql_fallback` now
+  delegates to the same router (single source of truth).
+- `_has_scope_qualifier()` guard: the unfiltered routes (total/count/avg/list)
+  **defer to the planner** when a date period or specific client is present —
+  otherwise "Total billing for Nike" returned the grand total and "how many jobs
+  this quarter" ignored the date (both real bugs caught by re-testing).
+- Tests: `tests/test_query_router.py` (34 pure tests, no mocks).
+
+Why it exists: the planner (LLM → JSON plan → deterministic SQL) is fragile for
+simple queries. e.g. "highest paying job" came back sorted by **date** not fees,
+because the planner left `column` null. For unambiguous shapes we encode the
+mapping as code.
 
 ---
 
-## Root causes — only identified in this conversation
+## 2. Regression sprint — 45 FAILs off the WhatsApp sheet
 
-### Bug 1: why it produced "Two ways I could read that"
+Source: `~/Downloads/regression_results_20260611_202734 copy.xlsx` (156 rows,
+audited; a **"Fix Tracker"** tab tracks all 45). Result: **36 FIXED, 9 PARTIAL**.
 
-The failure path was `planner_failed`, NOT `clarification`. Specifically:
+- The 9 PARTIAL (#14, 21, 22, 27, 30, 31, 32, 36, 43) were transient live-API
+  blips / cascades; code verified, **not independently reproduced** → they need a
+  live re-test to close.
+- Notable fixes: CRITICAL "Yes deletes a job" (a bare "yes" in a numbered
+  disambiguation was treated as delete-all), bank-parser silently dropping
+  account number/holder, highest-paying-job sorting by date, Hinglish routing,
+  client/paid lists, "Has X paid", delete-last treating "last" as a client,
+  pronoun resolution ("invoice for them"), out-of-scope refusals.
 
+**Live verification:** E2E suite **33/33** (after fixing 2 bad assertions). A
+retest harness (`tests/retest_sheet.py`, hardcoded path to the Downloads sheet —
+left untracked) replayed the Query category live → **37/37**, and *that* run
+surfaced the two router bugs in `47f7ee8`.
+
+---
+
+## 3. Invoice overhaul
+
+### PDF rendering — `services/invoice_generation_service.py` (`b61cab7`)
+Seven issues from a client-annotated invoice:
+1. Stray "Billing infor is" label → `_strip_billing_label()` (capture + render).
+2. Sender address missing → now rendered when on file (see gate below for capture).
+3. Job line was `client|brand|poc|fees|date|bill` dump with no description →
+   rebuilt as a **Description | Date | Amount** table.
+4. Bank section blank → main.py fetched bank/profile by raw login id while the
+   pre-check used the resolved (linked) `data_user_id`; now both resolve the link.
+5. "Payment Terms: Immediate" contradicted the 30-day T&C → "Within 30 days".
+6. Always-"NA" GST / Job No. rows → omitted unless real.
+7. Brand printed twice → removed from the job line.
+
+### Mandatory-fields gate (`76b19da`) — the big behavior change
+`intent_service._invoice_readiness_check(user_id, data_user_id, invoice_data, rows)`
+is the single ordered gate. It returns a prompt for the FIRST missing field and
+arms the matching awaiting-state; the field's handler saves it and **re-enters
+the flow** (`_resume_invoice_flow`), so prompts chain until complete, then it
+generates. Runs for BOTH generate and email paths.
+
+**Mandatory** (confirmed with user): client billing details, POC name, a
+description per job, bank account number, business address. **Optional**: GST,
+POC email. The old per-field "skip → generate anyway" shortcuts are GONE;
+`cancel` aborts. New `_handle_job_description_response` + routing.
+
+### Hard guard (`1eb838a`)
+`has_usable_bank_details()` (account number must be non-empty) is enforced at the
+generation point in `main.py` — even if the gate is bypassed, it aborts + tells
+the user instead of emitting a bankless PDF.
+
+### Update address command (`2a30608`)
+"update my address [to X]" / "my business address is X" / "wrong address" →
+`_handle_address_update` → `_persist_invoice_address` (shared with the gate).
+
+---
+
+## 4. Infra fixes
+
+### DB-backed MemoryService (`02b2d2c`) — important
+Per-user state (awaiting_* flags, pending_invoice, conversation, form) was a
+**per-instance local JSON file** (`user_memory.json`). On Railway a redeploy = fresh
+disk, and multiple instances each have their own file → an in-flight
+`awaiting_invoice_address` set while prompting could vanish before the reply
+arrived, **orphaning the reply** (it then fell into `answer_feature_question`,
+which leaked its "USER ASKED:/Your reply:" template + hallucinated a question).
+
+Now backed by **`public.user_memory`** (jsonb per user, auto-created on init),
+file kept only as a dev fallback when `SUPABASE_DB_URL` is unset. Same public
+API; one reused, lock-guarded connection. Tests: `tests/test_memory_service.py`
+(incl. the redeploy/cross-instance case). Startup log to confirm it's live:
+`[MEMORY] Using Supabase-backed user memory`.
+
+### Reminder hijack (`627d2c0`)
+A stale `pending_reminders` row (persistent, no TTL) intercepted any numeric
+message: "add a job … 5 May 2025, 20k" was read as reminder selection #5.
+`_handle_pending_reminder` now (a) yields when any sub-flow is active and (b)
+requires a STANDALONE number (`re.fullmatch`), not a digit buried in free text.
+
+### History-rewrite vs aggregates (`aecfb2c`)
+The "history question → `SELECT *`" rewrite destroyed `SELECT ..., AVG(fees) AS
+result ... ORDER BY result` → Postgres `column "result" does not exist`.
+`_is_aggregate_sql()` now skips the rewrite for GROUP BY / aggregate SQL.
+
+---
+
+## Open items / known gaps
+
+1. **9 PARTIAL regression rows** — need a live re-test to confirm/close.
+2. **`answer_feature_question` prompt leak (Bug #2, NOT done)** — it can still echo
+   "USER ASKED:/Your reply:" and hallucinate. `02b2d2c` removes the main trigger
+   (orphaned replies) but the leak itself is unhardened. Prompt at
+   `gemini_service.py:~252/308/936`.
+3. **UPI "(optional)" not stripped** — users copy the prompt's example
+   "UPI: you@upi (optional)" verbatim and "(optional)" gets saved as the UPI. The
+   bank parser should strip a trailing "(optional)".
+4. **Invoice cache** — `process_and_send_invoice` reuses a cached PDF unless the
+   message has a "regenerate" keyword. After fixing data (address/poc), users must
+   say "regenerate invoice for X" to rebuild. Consider auto-invalidating a cached
+   PDF that predates having bank/address on file.
+5. **`direct SQL > planner` for complex queries** — user observed the
+   `generate_sql` fallback often beats the planner on long-tail queries (the
+   planner's JSON breaks). Option on the table: try direct SQL before the planner.
+6. Pre-existing AVG-synthesizer-refusal latent bug (from prior handoff) —
+   largely mitigated by synthesizer-prompt rules added this session, not formally
+   re-verified.
+
+---
+
+## Deploy & ops
+
+- **Railway auto-deploys on every push to `main`** — confirmed via the Railway
+  API (all of today's commits deployed within minutes on `web-production-02c14`).
+  The "we deploy at midnight" assumption is NOT how it's currently configured; if
+  midnight-only is wanted, disable auto-deploy on the prod environment in Railway.
+- Logs: `RAILWAY_API_TOKEN=… ./scripts/railway_logs.sh [limit]` (pulls the latest
+  SUCCESS deployment's logs only — a redeploy resets what's visible).
+- **Rotate secrets shared in chat this session**: the GitHub PAT used for pushes
+  (`ghp_…`), the two OpenRouter AI keys (`sk-or-v1-…`), and consider the Railway
+  token. These are in the conversation history.
+
+## Test / run
 ```
-execute_query_plan() → _error (LLM emitted invalid column → column validation failed)
-  ↓ planner_failed = True
-generate_sql() → also failed
-  ↓
-_keyword_sql_fallback() → returned None (no pattern for "biggest client")
-  ↓
-clarify_phrase(["How many jobs?", "Total fees for Garnier", "Last payment date"])
+python3 -m pytest tests/ -q                       # 457 passing
+AI_KEY=sk-or-... python3 tests/test_e2e_live.py   # live, 33/33, ~$0.25–0.50/run
 ```
-
-The `clarification` branch (lines 4140–4167) was NOT the path. The exact route was `intent_service.py:4184`. This matters if the bug re-appears — check `[PIPELINE] Planner failed` in logs first.
-
-### Bug 2: metric=null vs metric=count
-
-The planner prompt already had rules for "how many" → metric=count before this session. But when the planner emits a valid plan with metric=null (e.g. during LLM distraction), the fix is a post-plan correction in `execute_query_plan()` at line 951–954 in `query_planner.py`. This fires after Stage 3 (row resolver) and before Path 3 validation.
-
-### Bug 1 fix: keyword patterns fire REACTIVELY, not proactively
-
-Important: the new aggregate patterns in `_keyword_sql_fallback` (`biggest client`, `avg fees`, `owe me`) only fire when BOTH the planner AND `generate_sql` LLM both fail. They do NOT intercept a successful but wrong planner result.
-
-A proactive bypass (checking patterns BEFORE calling the planner) was attempted during this session but reverted because the if/else structure inside the huge planner block would have required re-indenting ~200 lines. The E2E tests confirm the planner itself now gets the right answer directly, so the keyword patterns serve as a safety net only.
-
-### GROUP BY payload fix in response_synthesis.py
-
-`build_clean_payload` had a bug: a single-row result with both an aggregate key ("result") AND dimension columns (e.g. "client_name") was being collapsed to a scalar aggregate, dropping client_name. Fixed by checking `_non_agg_keys` before collapsing. See `response_synthesis.py:95–103`.
-
----
-
-## Outstanding issues found but NOT fixed
-
-### AVG synthesizer occasionally refuses to answer
-
-In one E2E run, "Average fees per job" → SQL was correct (`SELECT AVG(fees) AS result`) → payload was `{"type": "aggregate", "data": {"result": 129000}}` → but the synthesizer responded: *"I can give you the total fees, but I don't calculate averages. Your total fees are ₹129,000."*
-
-Root cause: the aggregate payload only carries `{"result": 129000}` — the synthesizer doesn't know it was an AVG query vs. a SUM query. The AGGREGATE ANSWERS rule in the system prompt says "Never refuse" but the LLM ignores it occasionally when it doesn't see context distinguishing AVG from SUM.
-
-The test currently asserts any number `r"₹\s*\d[\d,]*"` so it passes even when the synthesizer says the wrong thing. This is a latent bug.
-
-**Potential fix**: Include the original metric type in the payload, e.g. `{"type": "aggregate", "metric": "avg", "data": {"result": 129000}}`, and update the synthesizer prompt to use it.
-
-### C10-02 typo detection: wrong test entry point
-
-The test "genrate invoce for Pedigree" uses `run_oos_test()` which calls `execute_query_plan()` directly. But the typo detection for invoice requests lives in `intent_service.py` lines 3276–3287, before the planner is even called. `execute_query_plan()` has no invoice routing.
-
-This test will always fail because it tests the wrong layer. The right fix is to either:
-a. Test through `IntentService.process_request()` (requires more setup), or
-b. Move the test to a unit test that checks the intent routing logic directly, or
-c. Accept that E2E invoice routing can only be tested via actual WhatsApp
-
-### `_expand_client_ilike` not applied in E2E test
-
-In production (`intent_service.py:4204`), `client_name ILIKE 'X'` gets expanded to `(client_name ILIKE '%X%' OR brand_name ILIKE '%X%' OR production_house ILIKE '%X%')`. This expansion does NOT happen in `execute_query_plan()`. The E2E mock was patched to handle `ILIKE 'X'` (without wildcards) to compensate, but the E2E test is testing slightly different SQL than what runs in production.
-
-### Bug 5 (zero-result aggregate phrasing) — still open
-
-When an aggregate returns 0 (e.g. "Earnings last quarter" with no matching rows), the response says "No matching records — total is 0" which reads like an error. The synthesizer prompt was NOT updated this session. This is LOW priority per CLAUDE.md.
-
----
-
-## E2E test suite — operational notes
-
-**Run command:**
-```
-AI_KEY=sk-or-v1-... python3 tests/test_e2e_live.py
-```
-
-**Token budget**: 33 tests × ~2 AI calls each = ~66 API calls × 700 tokens = ~46,200 tokens per run. Budget at least $0.25–$0.50 of OpenRouter credit per run.
-
-**Token cap**: `E2E_MAX_TOKENS=700` (default). Raise to `E2E_MAX_TOKENS=800` if seeing JSON truncation errors on complex plans. The planner JSON for GROUP BY + filters is the heaviest output (~400–500 tokens).
-
-**JSON fluke retries**: Both query and smart-capture runners retry once on JSON parse errors with 1.5s delay. This handles the ~10% of calls where Gemini 2.5 Flash returns malformed JSON under token pressure.
-
-**Test count discrepancy**: The file has 33 tests, not 30 as the user requested. 10 categories: C1(4)+C2(5)+C3(3)+C4(3)+C5(4)+C6(4)+C7(3)+C8(3)+C9(2)+C10(2)=33. Header says 30, reality is 33.
-
-**MockSupabaseService ILIKE handling**: The mock handles both `ILIKE '%X%'` (from keyword shortcut, with wildcards) and `ILIKE 'X'` (from planner, without wildcards). This was a mid-session bug fix — initial version only handled the wildcarded form, causing #24 "How much does Star Studios owe me?" to return the wrong total (all unpaid instead of just Star Studios unpaid).
-
-**C6-01 mildly wrong response**: "Show jobs from last month" → mock returns 1 row (Garnier/L'Oréal, May 8). Synthesizer says "I don't have any jobs from last month. I can show you the Skincare campaign job...". This is technically wrong (May 8 IS last month). The mock's date filter has an off-by-one or the synthesizer is misinterpreting the date range. Test passes because the assertion accepts "Garnier|₹" but the response is subtly confused.
-
----
-
-## Confirmed working via E2E (first successful full run)
-
-These all generated correct SQL AND synthesized correct natural language:
-
-- "How many jobs have I done?" → `SELECT COUNT(*) AS result` → "You've completed 8 jobs so far."
-- "Who is my biggest client?" → `GROUP BY client_name, SUM(fees), ORDER BY result DESC LIMIT 1` → "Your biggest client is Star Studios, with ₹350,000 in fees."
-- "Average fees per job" → `SELECT AVG(fees) AS result` → [correct number, sometimes refuses — see above]
-- "How much does Star Studios owe me?" → `SUM(fees) WHERE client_name ILIKE 'Star Studios' AND paid IS NULL` → "Star Studios owes you ₹200,000."
-- "Star Studios se paisa aaya kya?" → `SUM(fees) WHERE client_name ILIKE 'Star Studios' AND LOWER(COALESCE(paid,...)) IN ('true',...)` → "You've received ₹150,000 from Star Studios. ✅"
-- "Earnings last quarter" → `SELECT SUM(fees) WHERE job_date BETWEEN 2026-01-01 AND 2026-03-31` → "Your earnings last quarter were ₹645,000."
-- "Add a job for Acme, 25k, shoot, paid" → extracted: `{brand_name: "Acme", fees: 25000, paid: "true"}`
-- "Kiska payment baki hai" → `GROUP BY client_name, SUM(fees) WHERE paid IS NULL` → lists outstanding per client
-- "Isme se invoice kitne logon ko bheja hai" → `COUNT(*) WHERE bill_sent=yes AND poc_email IS NOT NULL` → "You've sent 5 invoices so far."
-- "Total billing this year" → `SELECT SUM(fees) WHERE job_date BETWEEN 2026-01-01 AND today`
-
----
-
-## WhatsApp live test status
-
-Only one live message was tested: "Who is my biggest client?" — confirmed failing ("Two ways I could read that 🤔") before the fix. Fix was pushed to main. No further live WhatsApp testing was done this session.
-
-The full 29-message test matrix from CLAUDE.md still needs a live run to update the 16✅/7⚠️/6❌ counts.
+Note: the prior "4 pre-existing PDF failures" were just **fpdf2 missing locally** —
+with it installed they pass; CI/prod always had it.
 
 ---
 
 ## Next session priorities
 
-1. Run the full 29-message WhatsApp matrix on the live bot to get updated pass/fail counts and update CLAUDE.md
-2. Investigate and fix the AVG synthesizer refusal issue (see above)
-3. Fix Bug 5: zero-result aggregate phrasing (LOW priority, simple synthesizer prompt change)
-4. Fix C10-02 E2E test: either test at a higher layer or rewrite as a unit test
-5. Consider updating CLAUDE.md Known Bugs section — Bugs 1–4 are likely fixed but "likely" needs live confirmation
+1. Live re-test the 9 PARTIAL regression rows; update the Fix Tracker.
+2. Harden `answer_feature_question` so it can never leak its template (Bug #2).
+3. Strip "(optional)" (and similar) from captured bank/UPI values.
+4. Decide on direct-SQL-before-planner for complex queries (user's observation).
+5. Optional: auto-invalidate cached invoices that predate bank/address on file.
