@@ -304,12 +304,14 @@ class InvoiceGenerationService:
                 for _bl in billing_lines[1:]:
                     pdf.cell(0, 4.8, S(_bl), ln=1)
 
-            # Brand — small tracked label, right-aligned.
+            # Brand — small tracked label inline beneath the billing block
+            # (left-aligned, part of the Invoice To group, not floating right).
             if brand_name_invoice:
+                pdf.ln(1)
                 pdf.set_font(BODY, "B", 7)
                 pdf.set_text_color(*_MUTE)
-                pdf.set_char_spacing(1.2)
-                pdf.cell(0, 5, S(f"Brand  {brand_name_invoice}").upper(), ln=1, align="R")
+                pdf.set_char_spacing(1.0)
+                pdf.cell(0, 4.5, S(f"Brand   {brand_name_invoice}").upper(), ln=1, align="L")
                 pdf.set_char_spacing(0)
 
             pdf.ln(4)
@@ -356,10 +358,14 @@ class InvoiceGenerationService:
                 total += fees_val
 
                 pdf.set_y(pdf.get_y() + 1.6)
+                pdf.set_font(BODY, "", 9.5)
                 pdf.set_text_color(*_INK)
                 pdf.cell(_desc_w, 6.4, S(desc_val), ln=0, align="L")
                 pdf.set_text_color(*_BODYC)
                 pdf.cell(_date_w, 6.4, date_val or "-", ln=0, align="C")
+                # Amount set in Playfair — its figures are oldstyle by default,
+                # giving the line items that refined editorial feel.
+                pdf.set_font(HEAD, "", 10.5)
                 pdf.set_text_color(*_INK)
                 pdf.cell(_amt_w, 6.4, S(f"Rs {fees_val:,.0f}"), ln=1, align="R")
                 _rule(_HAIR, width=0.15)
@@ -384,7 +390,7 @@ class InvoiceGenerationService:
             pdf.cell(panel_w - 5, 14, S(f"Rs {total:,.0f}"), ln=1, align="R")
             pdf.set_y(total_y + 14)
 
-            # In words (Lato italic).
+            # In words — tracked label + the amount spelled out in Playfair.
             try:
                 total_int = int(round(total))
                 total_words = num2words(total_int, lang="en_IN").capitalize() + " Only"
@@ -392,9 +398,14 @@ class InvoiceGenerationService:
                 total_words = ""
             if total_words:
                 pdf.ln(2)
-                pdf.set_font(BODY, "I", 8.5)
-                pdf.set_text_color(*_BODYC)
-                pdf.cell(0, 5, S(f"Amount in words   {total_words}"), ln=1)
+                pdf.set_font(BODY, "B", 6.5)
+                pdf.set_text_color(*_MUTE)
+                pdf.set_char_spacing(1.1)
+                pdf.cell(26, 5.5, "IN WORDS", ln=0)
+                pdf.set_char_spacing(0)
+                pdf.set_font(HEAD, "", 10)
+                pdf.set_text_color(*_INK)
+                pdf.cell(0, 5.5, S(total_words), ln=1)
 
             pdf.ln(5)
 
