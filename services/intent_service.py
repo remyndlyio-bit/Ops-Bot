@@ -5,6 +5,7 @@ from utils.date_utils import month_name_to_number, number_to_month_name
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
 from services.query_planner import execute_query_plan
+from services.query_guard import sql_reflects_message
 from services.query_router import (
     route_common_query,
     format_client_list,
@@ -4803,6 +4804,26 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # ── Layer 2: message<->SQL consistency gate (planner output) ─────
+            # The router self-validates (Layer 1); this catches the SAME class on
+            # the PLANNER's SQL — a dropped client/status/date, or a value/count
+            # question answered as a row dump. Fail closed: ask rather than run
+            # under-specified SQL and hand back a confident wrong number.
+            if sanitized_sql.upper().lstrip().startswith("SELECT"):
+                _g_ok, _g_reason = self._planner_sql_ok(message, sanitized_sql, data_user_id)
+                if not _g_ok:
+                    logger.warning(
+                        f"[GUARD] planner SQL dropped a qualifier ({_g_reason}) | "
+                        f"msg={message[:80]!r} | sql={sanitized_sql[:200]}"
+                    )
+                    response = clarify_phrase([
+                        "How much does Star Studios owe me?",
+                        "Show me Garnier jobs",
+                        "How many unpaid jobs do I have",
+                    ])
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             # INSERT (create): always show confirmation card before writing to DB.
             # The planner may have correctly parsed a Hinglish/typo job entry — but the user
             # must confirm before any row is inserted.  Route through _show_smart_capture_confirmation
@@ -5103,6 +5124,57 @@ class IntentService:
             "trigger_invoice": trigger_invoice,
             "invoice_data": invoice_data
         }
+
+    def _known_clients(self, data_user_id: str) -> set:
+        """Cached set of the user's client/brand/production-house names (lowercased),
+        used to sharpen the query guard's client detection on the fail-closed path.
+        Cached per-process for 5 min; staleness is safe (a miss only costs a
+        deferral/clarification, never a wrong answer)."""
+        import time as _t
+        now = _t.time()
+        cache = getattr(self, "_known_clients_cache", None)
+        if cache is None:
+            cache = self._known_clients_cache = {}
+        hit = cache.get(data_user_id)
+        if hit and now - hit[0] < 300:
+            return hit[1]
+        names: set = set()
+        try:
+            uid = (data_user_id or "").replace("'", "''")
+            nd = '("isDeleted" IS NOT TRUE)'
+            sql = (
+                "SELECT DISTINCT lower(x) AS n FROM ("
+                f" SELECT client_name AS x FROM public.job_entries WHERE user_id='{uid}' AND {nd}"
+                f" UNION SELECT brand_name FROM public.job_entries WHERE user_id='{uid}' AND {nd}"
+                f" UNION SELECT production_house FROM public.job_entries WHERE user_id='{uid}' AND {nd}"
+                ") t WHERE x IS NOT NULL AND TRIM(x) <> ''"
+            )
+            res = self.supabase.execute_sql(sql)
+            if res.get("ok"):
+                names = {(r.get("n") or "").strip() for r in res.get("rows", []) if (r.get("n") or "").strip()}
+        except Exception as e:
+            logger.warning(f"[GUARD] known-clients fetch failed (heuristic only): {e}")
+            names = set()
+        cache[data_user_id] = (now, names)
+        return names
+
+    def _planner_sql_ok(self, message: str, sql: str, data_user_id: str):
+        """Layer-2 gate: does the planner's SELECT honour the message's qualifiers?
+        Returns (ok, reason). Fails CLOSED on precise flags (status / value / count
+        / date — no DB). A CLIENT flag from the loose heuristic is only confirmed
+        against the known-client list (one cached DB read), so bare queries cost
+        nothing and we never raise a false clarification on a non-client noun."""
+        ok, reason = sql_reflects_message(message, sql)
+        if ok:
+            return True, ""
+        if "client" in reason:
+            # Heuristic flagged a client — confirm it's a REAL client before asking.
+            return sql_reflects_message(
+                message, sql,
+                known_clients=self._known_clients(data_user_id),
+                use_heuristic_client=False,
+            )
+        return False, reason
 
     def _execute_routed_query(self, routed, user_id: str, data_user_id: str,
                               message: str, conversation_history: list) -> Optional[Dict]:

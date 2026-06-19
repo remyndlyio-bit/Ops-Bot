@@ -82,3 +82,57 @@ class TestGuardAccepts:
 
     def test_bare_list_jobs_ok(self):
         assert chk("Show me all my jobs", SELECT_ALL)[0]
+
+
+class TestStrictClientMode:
+    """Fail-closed callers (Layer 2) disable the loose heuristic to avoid false
+    clarifications — only the known-client list flags a client."""
+
+    def test_heuristic_off_ignores_unknown_noun(self):
+        # "freelance jobs" would trip the heuristic, but it's not a known client.
+        assert chk("show me freelance jobs", SELECT_ALL, use_heuristic_client=False)[0]
+
+    def test_strict_flags_known_client(self):
+        ok, why = chk("show me garnier jobs", SELECT_ALL,
+                      known_clients=["garnier"], use_heuristic_client=False)
+        assert not ok and "garnier" in why.lower()
+
+    def test_strict_still_enforces_status_and_count(self):
+        assert not chk("how many unpaid jobs", COUNT_ALL, use_heuristic_client=False)[0]
+        assert not chk("how much is unpaid", SELECT_UNPAID, use_heuristic_client=False)[0]
+
+
+class TestLayer2Gate:
+    """The intent_service Layer-2 gate: cached known-clients + fail-closed decision."""
+
+    def _svc(self, names):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.supabase = MagicMock()
+        svc.supabase.execute_sql.return_value = {"ok": True, "rows": [{"n": n} for n in names]}
+        return svc
+
+    def test_known_clients_cached(self):
+        svc = self._svc(["garnier india", "garnier", "samsung"])
+        kc = svc._known_clients("u1")
+        assert "garnier" in kc and "samsung" in kc
+        svc._known_clients("u1")  # second call hits the cache
+        assert svc.supabase.execute_sql.call_count == 1
+
+    def test_gate_blocks_dropped_client(self):
+        svc = self._svc(["garnier india", "garnier"])
+        ok, _ = svc._planner_sql_ok("show me garnier jobs", SELECT_ALL, "u1")
+        assert not ok
+
+    def test_gate_passes_filtered_sql(self):
+        svc = self._svc(["garnier india", "garnier"])
+        ok, _ = svc._planner_sql_ok("show me garnier jobs", SELECT_CLIENT, "u1")
+        assert ok
+
+    def test_gate_no_false_positive_on_bare_query(self):
+        svc = self._svc(["garnier india", "garnier"])
+        ok, _ = svc._planner_sql_ok("show me all my jobs", SELECT_ALL, "u1")
+        assert ok

@@ -61,13 +61,18 @@ _NOT_CLIENT = {
 }
 
 
-def _client_in_message(m: str, known_clients: Iterable[str]):
+def _client_in_message(m: str, known_clients: Iterable[str], use_heuristic: bool = True):
     """Return a specific client named in the message, or None. Known clients win;
-    otherwise fall back to the leftover-noun / for-X heuristic."""
+    otherwise (when ``use_heuristic``) fall back to the leftover-noun / for-X
+    heuristic. The heuristic over-fires by design (safe for router abstention);
+    callers that FAIL CLOSED pass ``use_heuristic=False`` and rely on the
+    known-client list for precision."""
     for kc in (known_clients or ()):
         kc = (kc or "").strip().lower()
         if kc and len(kc) >= 2 and kc in m:
             return kc
+    if not use_heuristic:
+        return None
     for rx in (_NOUN_RE, _FORX_RE):
         mt = rx.search(m)
         if mt:
@@ -83,12 +88,14 @@ def _sql_has_client_filter(s: str) -> bool:
 
 
 def sql_reflects_message(message: str, sql: str,
-                         known_clients: Iterable[str] = ()) -> Tuple[bool, str]:
+                         known_clients: Iterable[str] = (),
+                         use_heuristic_client: bool = True) -> Tuple[bool, str]:
     """True if every qualifier in ``message`` is reflected in ``sql``.
 
     Returns (ok, reason). On ``ok is False`` the caller should NOT run the SQL —
-    abstain to the planner, or ask the user.
-    """
+    abstain to the planner, or ask the user. ``use_heuristic_client=False`` limits
+    client detection to ``known_clients`` (use when failing closed, to avoid
+    false clarifications)."""
     m = " " + (message or "").lower().strip() + " "
     s = (sql or "").lower()
     is_rows = bool(re.search(r"select\s+\*", s))
@@ -104,7 +111,7 @@ def sql_reflects_message(message: str, sql: str,
         return False, "paid/unpaid qualifier not reflected in SQL"
 
     # A specific client named but no client filter in the SQL.
-    client = _client_in_message(m, known_clients)
+    client = _client_in_message(m, known_clients, use_heuristic_client)
     if client and not _sql_has_client_filter(s):
         return False, f"client '{client}' not reflected in SQL"
 
