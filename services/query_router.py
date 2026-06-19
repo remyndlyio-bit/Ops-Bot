@@ -33,7 +33,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
+
+from services.query_guard import sql_reflects_message
 
 # ── Render kinds ────────────────────────────────────────────────────────────
 ROWS = "rows"                 # full job rows → job cards / excel / synthesiser
@@ -360,11 +362,19 @@ _ROUTES: List[Callable[[str, str], Optional[RoutedQuery]]] = [
 ]
 
 
-def route_common_query(message: str, user_id: str) -> Optional[RoutedQuery]:
+def route_common_query(message: str, user_id: str,
+                       known_clients: Iterable[str] = ()) -> Optional[RoutedQuery]:
     """Return a deterministic RoutedQuery for a common query shape, or None.
 
     PURE: no DB / LLM calls. The caller executes ``.sql`` and renders by
     ``.render``. None means "not a common shape — hand off to the LLM planner".
+
+    Each candidate is validated against the message (``sql_reflects_message``):
+    a route that DROPS a qualifier the user stated — "how many UNPAID jobs",
+    "show me GARNIER jobs" — must not answer with under-specified SQL, so it is
+    skipped and we abstain to the planner. High precision, not high recall.
+    ``known_clients`` (optional) sharpens client detection; without it a
+    leftover-noun heuristic is used.
     """
     if not message or not message.strip():
         return None
@@ -376,8 +386,12 @@ def route_common_query(message: str, user_id: str) -> Optional[RoutedQuery]:
         except Exception:
             # A misbehaving route must never break the request — skip it.
             result = None
-        if result is not None:
+        if result is None:
+            continue
+        ok, _reason = sql_reflects_message(message, result.sql, known_clients)
+        if ok:
             return result
+        # Route matched but its SQL ignores a stated qualifier → abstain to planner.
     return None
 
 
