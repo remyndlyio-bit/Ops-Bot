@@ -35,6 +35,29 @@ def _tokens(text: str) -> List[str]:
     return [t for t in re.findall(r"[a-z0-9']+", (text or "").lower()) if t not in _STOP]
 
 
+def _summarize_plan(p: Dict) -> str:
+    """Render a plan as a compact `key=value` hint — NOT raw JSON. Injecting raw
+    JSON objects made the planner echo/garble them and emit invalid JSON; a prose
+    summary teaches the same mapping without a blob to copy."""
+    parts = []
+    if p.get("metric"):
+        parts.append(f"metric={p['metric']}")
+    if p.get("column"):
+        parts.append(f"column={p['column']}")
+    for k, v in (p.get("filters") or {}).items():
+        parts.append(f"{k}={v}")
+    tr = p.get("time_range")
+    if tr and tr.get("value"):
+        parts.append(f"date={tr['value'].get('start')}..{tr['value'].get('end')}")
+    if p.get("group_by"):
+        parts.append(f"group_by={p['group_by']}")
+    if p.get("order"):
+        parts.append(f"order={p['order']}")
+    if p.get("limit"):
+        parts.append(f"limit={p['limit']}")
+    return ", ".join(parts) if parts else "return matching rows (a list)"
+
+
 class ExampleIndex:
     """Lexical index over the KnowledgeBook's worked examples."""
 
@@ -77,15 +100,18 @@ class ExampleIndex:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [e for _, e in scored[:k]]
 
+    EXAMPLES_HEADER = "# Reference — how to read similar questions (guidance only, do NOT copy verbatim):"
+
     def examples_block(self, query: str, k: int = 5) -> str:
-        """Prompt-ready block of nearest worked examples, or '' if none match."""
+        """Prompt-ready block of nearest worked examples as compact hints, or ''.
+        Hints are `"question" -> key=value` (never raw JSON), so the model can't
+        echo an example blob in place of its own JSON answer."""
         ex = self.retrieve(query, k)
         if not ex:
             return ""
-        lines = ["# Similar questions answered correctly before (match the plan shape):"]
+        lines = [self.EXAMPLES_HEADER]
         for e in ex:
-            lines.append(f"Q: {e['question']}")
-            lines.append(f"PLAN: {json.dumps(e['plan'], ensure_ascii=False)}")
+            lines.append(f"- \"{e['question']}\" -> {_summarize_plan(e['plan'])}")
         return "\n".join(lines)
 
 
@@ -106,7 +132,13 @@ def knowledge_context(query: str, k: int = 5) -> str:
     returns rules even if no example matches."""
     try:
         parts = [render_rules(), get_index().examples_block(query, k)]
-        return "\n\n".join(p for p in parts if p)
+        block = "\n\n".join(p for p in parts if p)
+        if block:
+            # Re-assert the output contract so the guidance never derails the
+            # planner's strict-JSON response.
+            block += ("\n\n# The above is guidance only. Now output ONLY the single "
+                      "JSON plan for the user's question, exactly per the schema below.")
+        return block
     except Exception:
         return ""
 

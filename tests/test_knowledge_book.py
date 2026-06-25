@@ -107,12 +107,10 @@ class TestRetriever:
         hits = self.r.retrieve("show me all Garnier work", k=5)
         assert hits and any("garnier" in h["question"].lower() for h in hits[:3])
 
-    def test_examples_block_is_prompt_ready(self):
+    def test_examples_block_is_compact_hints_not_json(self):
         block = self.r.examples_block("what's my total billing this period", k=3)
-        assert "PLAN:" in block and "Q:" in block
-        for line in block.splitlines():
-            if line.startswith("PLAN:"):
-                json.loads(line[len("PLAN:"):].strip())
+        assert "->" in block and '"' in block
+        assert "PLAN:" not in block and "{" not in block  # no raw JSON to echo
 
     def test_no_match_returns_empty(self):
         assert self.r.examples_block("xyzzy plugh frobnicate", k=3) == ""
@@ -133,13 +131,15 @@ class TestKnowledgeContext:
     def test_context_combines_rules_and_examples(self):
         ctx = knowledge_context("how much is still unpaid?", k=3)
         assert "KnowledgeBook" in ctx          # rules always on
-        assert "PLAN:" in ctx                  # examples retrieved
+        assert "Reference — how to read" in ctx  # examples retrieved
         assert "paid IS NULL" in ctx
+        assert "{" not in ctx                  # never injects raw JSON
+        assert "output ONLY the single" in ctx  # re-asserts the JSON contract
 
     def test_rules_present_even_with_no_example_match(self):
         ctx = knowledge_context("xyzzy plugh frobnicate", k=3)
         assert "KnowledgeBook" in ctx
-        assert "PLAN:" not in ctx              # no example matched, rules still there
+        assert "Reference — how to read" not in ctx  # no example matched, rules still there
 
 
 class TestPlannerWiring:
@@ -158,7 +158,7 @@ class TestPlannerWiring:
         cap = {}
         build_operation_plan("how much is unpaid", "query", "schema",
                              ["fees", "paid"], gemini_service=self._fake_gemini(cap))
-        assert "KnowledgeBook" in cap["prompt"] and "PLAN:" in cap["prompt"]
+        assert "KnowledgeBook" in cap["prompt"] and "output ONLY the single" in cap["prompt"]
 
     def test_not_injected_when_disabled(self, monkeypatch):
         from services.query_planner import build_operation_plan
