@@ -16,6 +16,7 @@ import re
 from datetime import date
 from typing import Dict, Any, List, Optional, Tuple
 from utils.logger import logger
+from services import knowledge_book
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -380,6 +381,17 @@ def build_operation_plan(
         message, operation, schema_description, allowed_columns,
         conversation_history, date_column, retry_feedback,
     )
+    # KnowledgeBook grounding (flagged): prepend domain rules + nearest worked
+    # examples so the planner applies our semantics instead of guessing. Off by
+    # default; flip KNOWLEDGE_BOOK=1 to enable. Never fatal.
+    if knowledge_book.is_enabled():
+        try:
+            _kb = knowledge_book.knowledge_context(message)
+            if _kb:
+                prompt = _kb + "\n\n" + prompt
+                logger.info("[PLANNER] KnowledgeBook grounding injected")
+        except Exception as _e:
+            logger.warning(f"[PLANNER] KnowledgeBook grounding skipped: {_e}")
     try:
         raw = gemini_service._call_api(prompt, generation_config={
             "responseMimeType": "application/json",

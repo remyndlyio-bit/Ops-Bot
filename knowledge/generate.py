@@ -1,11 +1,11 @@
 """
-Golden corpus generator.
+KnowledgeBook — examples generator.
 
 Expands templates × entities × paraphrases into {question, plan} pairs, then the
 oracle fills the correct `answer` from the seeded dataset. Run it to (re)build
-golden/corpus.jsonl — deterministic, so the corpus is reproducible.
+knowledge/examples.jsonl — deterministic, so the examples are reproducible.
 
-    python -m golden.generate            # writes golden/corpus.jsonl
+    python -m knowledge.generate         # writes knowledge/examples.jsonl
 
 Scaling 100 → 10k = add templates/paraphrases/entities here (and grow the
 dataset). Answers never need hand-labelling: the oracle computes them.
@@ -14,10 +14,10 @@ import os
 import json
 import calendar
 
-from golden.dataset import build_dataset, entities
-from golden.oracle import compute_answer
+from knowledge.dataset import build_dataset, entities
+from knowledge.oracle import compute_answer
 
-CORPUS_PATH = os.path.join(os.path.dirname(__file__), "corpus.jsonl")
+CORPUS_PATH = os.path.join(os.path.dirname(__file__), "examples.jsonl")
 
 
 def _month_range(month_name: str, year: int):

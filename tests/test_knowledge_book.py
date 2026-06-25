@@ -1,6 +1,7 @@
 """
-Tests for the golden source (Phase 1): oracle correctness, corpus integrity,
-generator reproducibility, and lexical retrieval relevance. All offline (no LLM).
+Tests for the KnowledgeBook (Phase 1): oracle correctness, examples integrity,
+generator reproducibility, rules/glossary rendering, lexical retrieval relevance,
+and the assembled grounding context. All offline (no LLM).
 """
 import os
 import sys
@@ -8,10 +9,11 @@ import json
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest
-from golden.dataset import build_dataset
-from golden.oracle import compute_answer, _is_paid, _client_of
-from golden.generate import build_corpus, CORPUS_PATH
-from services.golden_retriever import GoldenRetriever
+from knowledge.dataset import build_dataset
+from knowledge.oracle import compute_answer, _is_paid, _client_of
+from knowledge.generate import build_corpus, CORPUS_PATH
+from knowledge import rules as kb_rules
+from services.knowledge_book import ExampleIndex, knowledge_context
 
 
 ROWS = build_dataset()
@@ -72,7 +74,7 @@ class TestOracle:
 
 class TestCorpus:
     def test_corpus_file_present_and_valid(self):
-        assert os.path.exists(CORPUS_PATH), "run `python -m golden.generate`"
+        assert os.path.exists(CORPUS_PATH), "run `python -m knowledge.generate`"
         with open(CORPUS_PATH) as f:
             entries = [json.loads(l) for l in f if l.strip()]
         assert len(entries) >= 50
@@ -92,9 +94,9 @@ class TestCorpus:
 
 class TestRetriever:
     def setup_method(self):
-        self.r = GoldenRetriever()
+        self.r = ExampleIndex()
 
-    def test_loads_corpus(self):
+    def test_loads_examples(self):
         assert len(self.r.entries) >= 50
 
     def test_retrieves_relevant_status_query(self):
@@ -105,13 +107,63 @@ class TestRetriever:
         hits = self.r.retrieve("show me all Garnier work", k=5)
         assert hits and any("garnier" in h["question"].lower() for h in hits[:3])
 
-    def test_fewshot_block_is_prompt_ready(self):
-        block = self.r.fewshot_block("what's my total billing this period", k=3)
+    def test_examples_block_is_prompt_ready(self):
+        block = self.r.examples_block("what's my total billing this period", k=3)
         assert "PLAN:" in block and "Q:" in block
-        # the PLAN lines must be valid JSON
         for line in block.splitlines():
             if line.startswith("PLAN:"):
                 json.loads(line[len("PLAN:"):].strip())
 
     def test_no_match_returns_empty(self):
-        assert self.r.fewshot_block("xyzzy plugh frobnicate", k=3) == ""
+        assert self.r.examples_block("xyzzy plugh frobnicate", k=3) == ""
+
+
+class TestRules:
+    def test_render_has_rules_and_glossary(self):
+        block = kb_rules.render()
+        assert "KnowledgeBook" in block
+        # load-bearing conventions are present
+        assert "paid IS NULL" in block
+        assert "client_name OR brand_name OR production_house" in block
+        assert "glossary" in block.lower()
+        assert "earnings" in block.lower()
+
+
+class TestKnowledgeContext:
+    def test_context_combines_rules_and_examples(self):
+        ctx = knowledge_context("how much is still unpaid?", k=3)
+        assert "KnowledgeBook" in ctx          # rules always on
+        assert "PLAN:" in ctx                  # examples retrieved
+        assert "paid IS NULL" in ctx
+
+    def test_rules_present_even_with_no_example_match(self):
+        ctx = knowledge_context("xyzzy plugh frobnicate", k=3)
+        assert "KnowledgeBook" in ctx
+        assert "PLAN:" not in ctx              # no example matched, rules still there
+
+
+class TestPlannerWiring:
+    """The KnowledgeBook grounds the planner only when the flag is on."""
+
+    def _fake_gemini(self, cap):
+        class G:
+            def _call_api(self, prompt, generation_config=None):
+                cap["prompt"] = prompt
+                return '{"metric":"sum","column":"fees","filters":{"paid":"no"}}'
+        return G()
+
+    def test_injected_when_enabled(self, monkeypatch):
+        from services.query_planner import build_operation_plan
+        monkeypatch.setenv("KNOWLEDGE_BOOK", "1")
+        cap = {}
+        build_operation_plan("how much is unpaid", "query", "schema",
+                             ["fees", "paid"], gemini_service=self._fake_gemini(cap))
+        assert "KnowledgeBook" in cap["prompt"] and "PLAN:" in cap["prompt"]
+
+    def test_not_injected_when_disabled(self, monkeypatch):
+        from services.query_planner import build_operation_plan
+        monkeypatch.delenv("KNOWLEDGE_BOOK", raising=False)
+        cap = {}
+        build_operation_plan("how much is unpaid", "query", "schema",
+                             ["fees", "paid"], gemini_service=self._fake_gemini(cap))
+        assert "KnowledgeBook" not in cap["prompt"]
