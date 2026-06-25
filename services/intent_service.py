@@ -6,8 +6,12 @@ from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
 from services.query_planner import execute_query_plan
 from services.query_guard import sql_reflects_message
+from services import clarify, knowledge_book
 from services.query_router import (
     route_common_query,
+    CLIENT_EXPR as _CLIENT_EXPR,
+    NOT_DELETED as _NOT_DELETED,
+    PAID_TRUE as _PAID_TRUE,
     format_client_list,
     format_payment_status,
     ROWS as _RENDER_ROWS,
@@ -4523,6 +4527,17 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+            # ── Clarify genuine intent forks (KnowledgeBook, flagged) ─────────
+            # "How much have I MADE from X?" forks billed vs received. Resolve a
+            # pending offer first, else detect a new fork and answer-with-offer.
+            if knowledge_book.is_enabled():
+                _rv = self._resolve_value_fork(user_id, message)
+                if _rv is not None:
+                    return _rv
+                _fk = self._handle_value_fork(user_id, message, data_user_id)
+                if _fk is not None:
+                    return _fk
+
             # ── Deterministic-first routing ──────────────────────────────────
             # The ~20 common query shapes (counts, sums, lists, top-N, by-client,
             # paid/unpaid, date lookups) are mapped straight to SQL by the query
@@ -5175,6 +5190,59 @@ class IntentService:
                 use_heuristic_client=False,
             )
         return False, reason
+
+    def _scalar(self, sql: str):
+        """Run an aggregate SQL and return its single numeric value, or None."""
+        try:
+            res = self.supabase.execute_sql(sql)
+            if res.get("ok") and res.get("rows"):
+                v = list(res["rows"][0].values())[0]
+                return int(v) if v is not None else None
+        except Exception as e:
+            logger.warning(f"[CLARIFY] scalar query failed: {e}")
+        return None
+
+    def _resolve_value_fork(self, user_id: str, message: str) -> Optional[Dict]:
+        """If a billed-vs-received offer is pending and the reply picks one, answer it."""
+        pvf = (self.memory.get_user_memory(user_id) or {}).get("pending_value_fork")
+        if not pvf:
+            return None
+        choice = clarify.resolve_reply(message)
+        if not choice:
+            return None
+        self.memory.update_user_memory(user_id, {"pending_value_fork": None})
+        val = pvf["received"] if choice == "received" else pvf["billed"]
+        resp = f"{pvf['client']}: Rs {val:,.0f} {choice}."
+        self._store_conversation(user_id, message, resp)
+        return {"operation": "query", "response": resp, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_value_fork(self, user_id: str, message: str, data_user_id: str) -> Optional[Dict]:
+        """"How much have I MADE from X?" forks billed vs received. Answer the
+        likely reading (billed), state it, and offer the other — instead of
+        silently guessing. Returns a response dict, or None to fall through."""
+        fork = clarify.detect_value_fork(message, self._known_clients(data_user_id))
+        if not fork:
+            return None
+        client = fork["client"]
+        c = client.replace("'", "''")
+        uid = data_user_id.replace("'", "''")
+        base = (f"FROM public.job_entries WHERE user_id='{uid}' AND {_NOT_DELETED} "
+                f"AND ({_CLIENT_EXPR} ILIKE '%{c}%')")
+        billed = self._scalar(f"SELECT SUM(fees) AS r {base}")
+        if not billed:
+            return None  # no data for this client → let the normal pipeline handle it
+        received = self._scalar(f"SELECT SUM(fees) AS r {base} AND {_PAID_TRUE}") or 0
+        disp = client.title() if client.islower() else client
+        if received >= billed:
+            resp = f"{disp}: Rs {billed:,.0f} — all of it received."
+        else:
+            resp = (f"{disp} — Rs {billed:,.0f} billed in total; of that "
+                    f"Rs {received:,.0f} has actually been received. Showing billed — "
+                    f"reply \"received\" if you meant money in the bank.")
+            self.memory.update_user_memory(user_id, {
+                "pending_value_fork": {"client": disp, "billed": billed, "received": received}})
+        self._store_conversation(user_id, message, resp)
+        return {"operation": "query", "response": resp, "trigger_invoice": False, "invoice_data": {}}
 
     def _execute_routed_query(self, routed, user_id: str, data_user_id: str,
                               message: str, conversation_history: list) -> Optional[Dict]:
