@@ -496,3 +496,39 @@ class TestHistoryRewriteSkipsAggregates:
             sql = re.sub(r"(?i)^\s*SELECT\s+(?!\*).+?\s+FROM\s+", "SELECT * FROM ", sql, count=1)
         assert "AVG(fees) AS result" in sql, "aggregate alias was destroyed by the rewrite"
         assert "SELECT *" not in sql
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Client-filter expansion: a brand/client/production_house ILIKE filter must
+# widen to match across ALL THREE columns. Regression for the A/B finding that
+# "brand_name ILIKE 'Garnier'" returned a narrow wrong total (only the brand,
+# missing the "Garnier India" client + "Garnier Men" sibling brand).
+# ─────────────────────────────────────────────────────────────────────────────
+class TestClientFilterExpansion:
+    from services.intent_service import IntentService
+    _expand = staticmethod(IntentService._expand_client_filters)
+
+    def _has_all_three(self, sql, val):
+        s = sql.lower()
+        return all(f"{c} ilike '%{val}%'" in s for c in ("client_name", "brand_name", "production_house"))
+
+    def test_client_name_filter_expands(self):
+        out = self._expand("SELECT SUM(fees) FROM t WHERE client_name ILIKE 'Garnier'")
+        assert self._has_all_three(out, "garnier")
+
+    def test_brand_name_filter_expands(self):
+        # the bug: this used to stay narrow
+        out = self._expand("SELECT SUM(fees) FROM t WHERE brand_name ILIKE 'Garnier'")
+        assert self._has_all_three(out, "garnier")
+
+    def test_production_house_filter_expands(self):
+        out = self._expand("SELECT COUNT(*) FROM t WHERE production_house ILIKE 'Content Lab'")
+        assert self._has_all_three(out, "content lab")
+
+    def test_existing_wildcards_not_doubled(self):
+        out = self._expand("WHERE brand_name ILIKE '%Nike%'")
+        assert "'%nike%'" in out.lower() and "%%" not in out
+
+    def test_non_client_ilike_untouched(self):
+        out = self._expand("WHERE poc_email ILIKE '%garnier.com%'")
+        assert out == "WHERE poc_email ILIKE '%garnier.com%'"

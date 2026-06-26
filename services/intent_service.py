@@ -4756,15 +4756,12 @@ class IntentService:
             elif _is_history_q and _is_agg_sql:
                 logger.info("[PIPELINE] History question but aggregate/GROUP BY SQL — skipping SELECT * rewrite (would break the aggregate alias)")
 
-            # Expand AI-generated `client_name ILIKE 'X'` → `(client_name ILIKE '%X%' OR brand_name ILIKE '%X%')`
-            # Users say "Nike" meaning the brand; the actual client_name may be a production company.
-            # Also adds wildcard wrapping so partial names still match.
-            def _expand_client_ilike(m):
-                val = m.group(1)
-                # Strip any existing % wildcards the AI may have added
-                val = val.strip('%')
-                return f"(client_name ILIKE '%{val}%' OR brand_name ILIKE '%{val}%' OR production_house ILIKE '%{val}%')"
-            sql = re.sub(r"\bclient_name\s+ILIKE\s+'([^']*)'", _expand_client_ilike, sql, flags=re.IGNORECASE)
+            # Widen a single-column client/brand/production_house ILIKE filter to
+            # match across ALL THREE. Users name a BRAND ("Garnier") though the
+            # billing client may be "Garnier India", and the planner inconsistently
+            # filters on whichever column — so "brand_name ILIKE 'Garnier'" used to
+            # miss the client/production rows and return a wrong (narrow) total.
+            sql = self._expand_client_filters(sql)
 
             # Preserve filter context columns in the projection.
             # When SQL filters by a semantic column (paid, invoice_date, *_reminder_sent)
@@ -5190,6 +5187,22 @@ class IntentService:
                 use_heuristic_client=False,
             )
         return False, reason
+
+    @staticmethod
+    def _expand_client_filters(sql: str) -> str:
+        """Widen a `<col> ILIKE 'X'` filter on client_name / brand_name /
+        production_house to `(client_name OR brand_name OR production_house ILIKE
+        '%X%')`, with wildcard wrapping. The planner picks one of the three columns
+        inconsistently; matching across all three is what the user means by naming
+        a client/brand, and stops "brand_name ILIKE 'Garnier'" returning a narrow
+        wrong total."""
+        def _rep(m):
+            val = m.group(1).strip('%')
+            return (f"(client_name ILIKE '%{val}%' OR brand_name ILIKE '%{val}%' "
+                    f"OR production_house ILIKE '%{val}%')")
+        return re.sub(
+            r"\b(?:client_name|brand_name|production_house)\s+ILIKE\s+'([^']*)'",
+            _rep, sql, flags=re.IGNORECASE)
 
     def _scalar(self, sql: str):
         """Run an aggregate SQL and return its single numeric value, or None."""
