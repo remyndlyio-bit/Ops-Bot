@@ -27,10 +27,25 @@ def _month_range(month_name: str, year: int):
                                           "end": f"{year}-{mnum:02d}-{last:02d}"}}
 
 
-# Slot pools (kept small per category so the 100-seed stays balanced).
-_CLIENTS = entities()["clients"][:5]            # Star Studios, Garnier India, ...
-_BRANDS = ["Pepsi", "Nike", "Samsung", "Swiggy"]  # teach brand-vs-client matching
-_MONTHS = [("March", 2026), ("January", 2026), ("October", 2025), ("June", 2025)]
+# Slot pools.
+_CLIENTS = entities()["clients"][:6]            # billing clients
+_BRANDS = ["Pepsi", "Nike", "Samsung", "Swiggy", "Cadbury", "Maruti"]  # brand-vs-client
+_ENTS = _CLIENTS + _BRANDS                      # everything we slot into client cats
+_MONTHS = [("March", 2026), ("January", 2026), ("February", 2026), ("June", 2025)]
+
+# Paraphrase templates per intent: (template, lang). Scaling 100 -> 10k mostly
+# means growing these lists (and the entity pools) — answers stay free (oracle).
+_T_COUNT_CLIENT = [("how many jobs for {c}?", "en"), ("how many {c} jobs", "en"),
+                   ("number of {c} projects", "en"), ("{c} ke kitne jobs", "hi")]
+_T_TOTAL_CLIENT = [("total fees for {c}", "en"), ("how much have I billed {c}", "en"),
+                   ("{c} ka total billing", "hi"), ("{c} se total kitna aaya", "hi")]
+_T_LIST_CLIENT = [("show me {c} jobs", "en"), ("list all {c} work", "en"),
+                  ("{c} ka kaam dikhao", "hi")]
+_T_OWES = [("how much does {c} owe me", "en"), ("total unpaid for {c}", "en"),
+           ("{c} ka kitna baki hai", "hi")]
+_T_UNPAID_COUNT_CLIENT = [("how many unpaid jobs for {c}", "en"), ("{c} ke kitne unpaid hain", "hi")]
+_T_PAID_COUNT_CLIENT = [("how many paid jobs for {c}", "en")]
+_T_SENT_CLIENT = [("how many invoices sent to {c}", "en")]
 
 
 def _plan(metric=None, column=None, filters=None, time_range=None,
@@ -41,49 +56,66 @@ def _plan(metric=None, column=None, filters=None, time_range=None,
 
 def _entries():
     """Yield (category, question, plan, tags, lang) tuples."""
-    # 1–3 — bare aggregates
-    for q, lang in [("how many jobs do I have?", "en"), ("total number of jobs", "en"),
-                    ("kitne jobs hue", "hi")]:
-        yield "count_all", q, _plan(metric="count"), ["count", "bare"], lang
-    for q, lang in [("what's my total billing?", "en"), ("overall revenue so far", "en"),
-                    ("total kitna kamaya", "hi")]:
-        yield "total_all", q, _plan(metric="sum", column="fees"), ["sum", "bare"], lang
-    for q in ["average fee per job", "what's my average billing", "avg job value"]:
-        yield "avg_all", q, _plan(metric="avg", column="fees"), ["avg", "bare"], "en"
+    P = _plan
 
-    # 4–6 — client-scoped (clients + brands, formal/casual/Hinglish)
-    for c in _CLIENTS + _BRANDS:
+    # ── bare aggregates ──────────────────────────────────────────────────
+    for q, l in [("how many jobs do I have?", "en"), ("total number of jobs", "en"),
+                 ("how many projects in total", "en"), ("count my jobs", "en"),
+                 ("kitne jobs hue", "hi")]:
+        yield "count_all", q, P(metric="count"), ["count", "bare"], l
+    for q, l in [("what's my total billing?", "en"), ("overall revenue so far", "en"),
+                 ("what have I billed in total", "en"), ("sum of all my fees", "en"),
+                 ("total kitna kamaya", "hi")]:
+        yield "total_all", q, P(metric="sum", column="fees"), ["sum", "bare"], l
+    for q in ["average fee per job", "what's my average billing", "avg job value",
+              "mean fee per project"]:
+        yield "avg_all", q, P(metric="avg", column="fees"), ["avg", "bare"], "en"
+
+    # ── client-scoped (clients + brands) × paraphrases ───────────────────
+    for c in _ENTS:
         f = {"client_name": c}
-        yield "count_client", f"how many jobs for {c}?", _plan(metric="count", filters=f), ["count", "client"], "en"
-        yield "total_client", f"total fees for {c}", _plan(metric="sum", column="fees", filters=f), ["sum", "client"], "en"
-        yield "list_client", f"show me {c} jobs", _plan(filters=f), ["list", "client"], "en"
-    for c in _CLIENTS[:3]:
-        yield "total_client", f"{c} se total kitna aaya", _plan(metric="sum", column="fees", filters={"client_name": c}), ["sum", "client"], "hi"
+        for t, l in _T_COUNT_CLIENT:
+            yield "count_client", t.format(c=c), P(metric="count", filters=f), ["count", "client"], l
+        for t, l in _T_TOTAL_CLIENT:
+            yield "total_client", t.format(c=c), P(metric="sum", column="fees", filters=f), ["sum", "client"], l
+        for t, l in _T_LIST_CLIENT:
+            yield "list_client", t.format(c=c), P(filters=f), ["list", "client"], l
 
-    # 7–8 — payment status
-    for status, words in [("yes", "paid"), ("no", "unpaid")]:
-        yield f"count_{words}", f"how many {words} jobs do I have", _plan(metric="count", filters={"paid": status}), ["count", "status"], "en"
-        yield f"total_{words}", f"how much is {words} in total", _plan(metric="sum", column="fees", filters={"paid": status}), ["sum", "status"], "en"
-    yield "count_unpaid", "kitne unpaid hain", _plan(metric="count", filters={"paid": "no"}), ["count", "status"], "hi"
-    yield "total_unpaid", "total outstanding amount", _plan(metric="sum", column="fees", filters={"paid": "no"}), ["sum", "status"], "en"
+    # ── payment status (bare) ────────────────────────────────────────────
+    for status, w in [("yes", "paid"), ("no", "unpaid")]:
+        for q, l in [(f"how many {w} jobs do I have", "en"), (f"kitne {w} hain", "hi")]:
+            yield f"count_{w}", q, P(metric="count", filters={"paid": status}), ["count", "status"], l
+        for q, l in [(f"how much is {w} in total", "en"), (f"total {w} amount", "en")]:
+            yield f"total_{w}", q, P(metric="sum", column="fees", filters={"paid": status}), ["sum", "status"], l
+    for q, l in [("list my unpaid invoices", "en"), ("show unpaid jobs", "en"), ("kaunse unpaid hain", "hi")]:
+        yield "list_unpaid", q, P(filters={"paid": "no"}), ["list", "status"], l
 
-    # 9 — biggest client (grouped)
-    for q in ["who is my biggest client?", "top client by revenue", "sabse bada client kaun hai"]:
-        yield "biggest_client", q, _plan(metric="sum", column="fees", group_by="client_name", order="desc", limit=1), ["group", "client"], ("hi" if "kaun" in q else "en")
+    # ── invoices sent (bill_sent) ────────────────────────────────────────
+    for q, l in [("how many invoices have I sent", "en"), ("how many bills have I sent", "en"),
+                 ("kitne invoice bheje", "hi")]:
+        yield "count_sent", q, P(metric="count", filters={"bill_sent": "yes"}), ["count", "bill_sent"], l
 
-    # 10–11 — date ranges (month)
+    # ── client + status / bill_sent (multi-filter) ───────────────────────
+    for c in _ENTS:
+        for t, l in _T_OWES:
+            yield "client_owes", t.format(c=c), P(metric="sum", column="fees", filters={"client_name": c, "paid": "no"}), ["sum", "client", "status"], l
+        for t, l in _T_UNPAID_COUNT_CLIENT:
+            yield "count_client_unpaid", t.format(c=c), P(metric="count", filters={"client_name": c, "paid": "no"}), ["count", "client", "status"], l
+        for t, l in _T_PAID_COUNT_CLIENT:
+            yield "count_client_paid", t.format(c=c), P(metric="count", filters={"client_name": c, "paid": "yes"}), ["count", "client", "status"], l
+        for t, l in _T_SENT_CLIENT:
+            yield "count_client_sent", t.format(c=c), P(metric="count", filters={"client_name": c, "bill_sent": "yes"}), ["count", "client", "bill_sent"], l
+
+    # ── biggest client (grouped) ─────────────────────────────────────────
+    for q, l in [("who is my biggest client?", "en"), ("top client by revenue", "en"),
+                 ("sabse bada client kaun hai", "hi")]:
+        yield "biggest_client", q, P(metric="sum", column="fees", group_by="client_name", order="desc", limit=1), ["group", "client"], l
+
+    # ── date ranges (month) ──────────────────────────────────────────────
     for mname, yr in _MONTHS:
         tr = _month_range(mname, yr)
-        yield "count_month", f"how many jobs in {mname} {yr}", _plan(metric="count", time_range=tr), ["count", "date"], "en"
-        yield "total_month", f"total billing in {mname} {yr}", _plan(metric="sum", column="fees", time_range=tr), ["sum", "date"], "en"
-
-    # 12 — list unpaid
-    for q, lang in [("list my unpaid invoices", "en"), ("show unpaid jobs", "en"), ("kaunse unpaid hain", "hi")]:
-        yield "list_unpaid", q, _plan(filters={"paid": "no"}), ["list", "status"], lang
-
-    # client + status (owes)
-    for c in _CLIENTS[:4]:
-        yield "client_owes", f"how much does {c} owe me", _plan(metric="sum", column="fees", filters={"client_name": c, "paid": "no"}), ["sum", "client", "status"], "en"
+        yield "count_month", f"how many jobs in {mname} {yr}", P(metric="count", time_range=tr), ["count", "date"], "en"
+        yield "total_month", f"total billing in {mname} {yr}", P(metric="sum", column="fees", time_range=tr), ["sum", "date"], "en"
 
 
 def build_corpus(seed: int = 42):
