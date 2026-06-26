@@ -167,3 +167,30 @@ class TestPlannerWiring:
         build_operation_plan("how much is unpaid", "query", "schema",
                              ["fees", "paid"], gemini_service=self._fake_gemini(cap))
         assert "KnowledgeBook" not in cap["prompt"]
+
+
+class TestSynonymRetrieval:
+    """Synonym canonicalisation: words users actually type retrieve the right
+    examples even when the corpus phrases them differently."""
+    def setup_method(self):
+        self.r = ExampleIndex()
+
+    def _top_questions(self, q, k=3):
+        return [h["question"].lower() for h in self.r.retrieve(q, k)]
+
+    def test_pending_finds_unpaid_for_client(self):
+        hits = self.r.retrieve("how much is pending from Samsung", k=3)
+        assert hits and any("samsung" in h["question"].lower() and "status" in h["tags"] for h in hits)
+
+    def test_due_finds_unpaid(self):
+        hits = self.r.retrieve("what's due from Garnier", k=3)
+        assert hits and any("garnier" in h["question"].lower() and "status" in h["tags"] for h in hits)
+
+    def test_earnings_finds_total(self):
+        hits = self.r.retrieve("earnings from Nike", k=3)
+        assert hits and any("nike" in h["question"].lower() and "sum" in h["tags"] for h in hits)
+
+    def test_revenue_synonym_of_total(self):
+        # "revenue" and "billing" should land on the same bare-total cluster
+        hits = self.r.retrieve("overall revenue", k=3)
+        assert hits and any("total" in h["question"].lower() or "billing" in h["question"].lower() or "revenue" in h["question"].lower() for h in hits)

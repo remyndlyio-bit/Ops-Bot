@@ -26,13 +26,48 @@ from knowledge.rules import render as render_rules
 _EXAMPLES_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "knowledge", "examples.jsonl")
 _STOP = {
     "how", "many", "much", "the", "a", "an", "my", "me", "i", "do", "does", "did",
-    "is", "are", "have", "has", "of", "in", "on", "for", "to", "and", "or", "what",
-    "whats", "show", "list", "give", "get", "all", "total", "number", "jobs", "job",
+    "is", "are", "have", "has", "had", "of", "in", "on", "for", "to", "and", "or",
+    "what", "whats", "show", "list", "give", "get", "all", "jobs", "job", "please",
+    "from", "by", "with",
+    # Hinglish function words (low signal)
+    "ke", "ka", "ki", "hai", "hain", "hua", "hue", "se", "ko", "mein",
+    "mera", "meri", "mujhe", "kaun", "kaunse", "ko",
+}
+
+# Synonym canonicalisation — map the words users actually type to one token per
+# concept, so "pending"/"due"/"baki" all retrieve the "unpaid" examples and
+# "earnings"/"revenue"/"kamai" all retrieve the "total" ones. Mirrors the
+# KnowledgeBook glossary; applied to BOTH the index and the query.
+_SYN = {
+    # unpaid family
+    "unpaid": "unpaid", "outstanding": "unpaid", "pending": "unpaid", "owed": "unpaid",
+    "owe": "unpaid", "owes": "unpaid", "owing": "unpaid", "baki": "unpaid",
+    "baaki": "unpaid", "due": "unpaid",
+    # paid family
+    "paid": "paid", "cleared": "paid", "received": "paid", "settled": "paid",
+    "collected": "paid", "aaya": "paid", "aayi": "paid",
+    # value / total family
+    "total": "total", "sum": "total", "earnings": "total", "earning": "total",
+    "earned": "total", "earn": "total", "revenue": "total", "billing": "total",
+    "billed": "total", "kamai": "total", "kamaya": "total", "income": "total",
+    "made": "total", "worth": "total",
+    # invoice / sent family
+    "invoice": "invoice", "invoices": "invoice", "bill": "invoice", "bills": "invoice",
+    "send": "sent", "sent": "sent", "bheja": "sent", "bheje": "sent",
+    # count family
+    "count": "count", "kitne": "count", "kitna": "count", "number": "count",
+    # misc
+    "avg": "average", "average": "average",
 }
 
 
 def _tokens(text: str) -> List[str]:
-    return [t for t in re.findall(r"[a-z0-9']+", (text or "").lower()) if t not in _STOP]
+    out = []
+    for t in re.findall(r"[a-z0-9']+", (text or "").lower()):
+        if t in _STOP:
+            continue
+        out.append(_SYN.get(t, t))
+    return out
 
 
 def _summarize_plan(p: Dict) -> str:
