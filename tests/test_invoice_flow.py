@@ -645,6 +645,20 @@ class TestExplicitCommandsBeforeClassifier:
         assert r["operation"] == expected_op
         assert not svc.gemini.answer_feature_question.called, f"{msg!r} was refused as a feature question"
 
+    @pytest.mark.parametrize("msg", [
+        "Change my adress",      # the reported typo (missing a 'd')
+        "update my adress",
+        "fix my adres",
+        "change my addres please",
+    ])
+    def test_address_misspellings_still_route(self, msg):
+        # A misspelled "address" + an update verb must still hit the handler,
+        # not fall through to the v2 classifier (which refuses it).
+        svc = self._svc()
+        r = svc.process_request("u1", msg)
+        assert r["operation"] == "ACTION_TRIGGER"
+        assert not svc.gemini.answer_feature_question.called, f"{msg!r} fell through to the classifier"
+
 
 class TestInvoiceClientLabel:
     """Invoice should be labelled by what the user asked for. "invoice for pepsi"

@@ -3111,7 +3111,15 @@ class IntentService:
                 "my address is", "my business address is", "wrong address", "address is wrong",
                 "fix my address", "correct my address",
             ]
-            if any(t in msg_lower for t in _ADDRESS_UPDATE_TRIGGERS):
+            # Typo-tolerant: a common misspelling of "address" + an update intent
+            # still routes here. The triggers above all contain the correctly
+            # spelled "address", so "change my adress" used to miss every one and
+            # fall through to the v2 classifier (→ refusal). See _ADDRESS_TYPOS.
+            _ADDRESS_TYPOS = ("adress", "adres", "addres", "addresss", "addrress", "adddress")
+            _addr_intent = any(v in msg_lower for v in
+                               ("change", "update", "edit", "set", "fix", "correct", "wrong"))
+            if (any(t in msg_lower for t in _ADDRESS_UPDATE_TRIGGERS)
+                    or (_addr_intent and any(t in msg_lower for t in _ADDRESS_TYPOS))):
                 return self._handle_address_update(user_id, message, data_user_id)
 
             _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
