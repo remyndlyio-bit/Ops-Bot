@@ -659,6 +659,44 @@ class TestExplicitCommandsBeforeClassifier:
         assert r["operation"] == "ACTION_TRIGGER"
         assert not svc.gemini.answer_feature_question.called, f"{msg!r} fell through to the classifier"
 
+    @pytest.mark.parametrize("msg,expected_op", [
+        ("change my naem", "name_change_prompt"),
+        ("update my bnk details", "bank_details_prompt"),
+        ("show my bnk details", "bank_details_view"),
+    ])
+    def test_other_command_misspellings_route(self, msg, expected_op):
+        svc = self._svc()
+        r = svc.process_request("u1", msg)
+        assert r["operation"] == expected_op
+        assert not svc.gemini.answer_feature_question.called, f"{msg!r} fell through to the classifier"
+
+    def test_link_misspelling_routes(self):
+        svc = self._svc()
+        r = svc.process_request("u1", "link telegrm")
+        assert not svc.gemini.answer_feature_question.called, "misspelled link fell through to the classifier"
+
+
+class TestCmdWithTypos:
+    """Unit tests for the typo-tolerant command matcher."""
+    from services.intent_service import IntentService
+    _m = staticmethod(IntentService._cmd_with_typos)
+
+    def test_exact_trigger(self):
+        assert self._m("change my address", ["change my address"])
+
+    def test_typo_noun_plus_intent(self):
+        assert self._m("change my adress", ["change my address"], ("adress",), ("change", "update"))
+
+    def test_typo_without_intent_does_not_match(self):
+        # a misspelled noun alone (no update verb) must NOT route
+        assert not self._m("whats the adress on file", ["change my address"], ("adress",), ("change", "update"))
+
+    def test_full_phrase_typo(self):
+        assert self._m("link telegrm", ["link telegram"], ("link telegrm",), intents=("",))
+
+    def test_unrelated_message_no_match(self):
+        assert not self._m("how many jobs do I have", ["change my address"], ("adress",), ("change",))
+
 
 class TestInvoiceClientLabel:
     """Invoice should be labelled by what the user asked for. "invoice for pepsi"

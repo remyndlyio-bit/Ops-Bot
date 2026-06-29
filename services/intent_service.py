@@ -3092,16 +3092,24 @@ class IntentService:
             )
             if _has_bank_inline:
                 return self._handle_bank_details_response(user_id, message)
-            if any(t in msg_lower for t in self._UPDATE_BANK_TRIGGERS):
+            # Each explicit command is typo-tolerant (a misspelled target noun +
+            # an intent verb still routes here), so a typo can't silently fall
+            # through to the v2 classifier and get refused.
+            _BANK_TYPOS = ("bnk", "banck", "bnak", "detials", "detals", "deatils")
+            if self._cmd_with_typos(msg_lower, self._UPDATE_BANK_TRIGGERS, _BANK_TYPOS,
+                                    ("update", "change", "set", "edit", "add", "save", "new")):
                 return self._prompt_bank_details_format(user_id, message)
-            if any(t in msg_lower for t in self._VIEW_BANK_TRIGGERS):
+            if self._cmd_with_typos(msg_lower, self._VIEW_BANK_TRIGGERS, _BANK_TYPOS,
+                                    ("show", "view", "see", "get", "check", "my", "what")):
                 return self._show_bank_details(user_id, message)
 
             _NAME_CHANGE_TRIGGERS = [
                 "change my name", "update my name", "set my name",
                 "rename me", "my name is wrong", "fix my name",
             ]
-            if any(t in msg_lower for t in _NAME_CHANGE_TRIGGERS):
+            if self._cmd_with_typos(msg_lower, _NAME_CHANGE_TRIGGERS,
+                                    ("nme", "naem", "namee", "naame"),
+                                    ("change", "update", "set", "rename", "fix", "correct", "wrong")):
                 return self._handle_name_change(user_id, message)
 
             _ADDRESS_UPDATE_TRIGGERS = [
@@ -3111,15 +3119,9 @@ class IntentService:
                 "my address is", "my business address is", "wrong address", "address is wrong",
                 "fix my address", "correct my address",
             ]
-            # Typo-tolerant: a common misspelling of "address" + an update intent
-            # still routes here. The triggers above all contain the correctly
-            # spelled "address", so "change my adress" used to miss every one and
-            # fall through to the v2 classifier (→ refusal). See _ADDRESS_TYPOS.
-            _ADDRESS_TYPOS = ("adress", "adres", "addres", "addresss", "addrress", "adddress")
-            _addr_intent = any(v in msg_lower for v in
-                               ("change", "update", "edit", "set", "fix", "correct", "wrong"))
-            if (any(t in msg_lower for t in _ADDRESS_UPDATE_TRIGGERS)
-                    or (_addr_intent and any(t in msg_lower for t in _ADDRESS_TYPOS))):
+            if self._cmd_with_typos(msg_lower, _ADDRESS_UPDATE_TRIGGERS,
+                                    ("adress", "adres", "addres", "addresss", "addrress", "adddress"),
+                                    ("change", "update", "edit", "set", "fix", "correct", "wrong")):
                 return self._handle_address_update(user_id, message, data_user_id)
 
             _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
@@ -3134,7 +3136,10 @@ class IntentService:
                 "link my telegram", "link whatsapp", "link my whatsapp",
                 "connect account", "connect telegram", "connect whatsapp",
             ]
-            if any(t in msg_lower for t in _LINK_TRIGGERS):
+            if self._cmd_with_typos(msg_lower, _LINK_TRIGGERS,
+                                    ("lnk account", "conect account", "link telegrm",
+                                     "link whatsap", "conect telegram", "conect whatsapp"),
+                                    intents=("",)):  # typos are full phrases
                 return self._handle_link_account(user_id, message)
 
             # ── FlowMachine v2 — session 1 (classifier + IDLE leaf routing) ──
@@ -5195,6 +5200,17 @@ class IntentService:
                 use_heuristic_client=False,
             )
         return False, reason
+
+    @staticmethod
+    def _cmd_with_typos(msg_lower, exact, typos=(), intents=()):
+        """True if the message matches an exact trigger, OR carries a misspelled
+        target noun (``typos``) together with an intent verb (``intents``). Stops a
+        typo like "change my adress" / "updaet bank details" from missing every
+        substring trigger and falling through to the v2 classifier (which refuses
+        it). Pass intents=("",) when the typos are full phrases."""
+        if any(t in msg_lower for t in exact):
+            return True
+        return bool(typos) and any(i in msg_lower for i in intents) and any(t in msg_lower for t in typos)
 
     @staticmethod
     def _expand_client_filters(sql: str) -> str:
