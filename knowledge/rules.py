@@ -42,6 +42,13 @@ RULES = [
     ("made_from_x_ambiguous",
      "\"made / earned from X\" is ambiguous: billed = SUM(fees); received = SUM(fees) where "
      "paid = yes. Default to billed, but if it's genuinely unclear, ask."),
+    ("no_spurious_filters",
+     "Apply ONLY the filters the question states. Do NOT invent extra conditions: "
+     "\"invoices sent\" / \"invoice bheje\" is bill_sent = yes ALONE — never also require "
+     "poc_email or invoice_date. \"paid\" is paid = yes ALONE."),
+    ("how_many_clients_is_distinct",
+     "\"how many clients\" / \"kitne logon ko\" / \"how many people\" → COUNT(DISTINCT client), "
+     "not COUNT(*) of jobs."),
     ("currency_is_inr",
      "Amounts are Indian Rupees; format with Indian grouping (e.g. Rs 1,75,000)."),
 ]
@@ -49,11 +56,15 @@ RULES = [
 # What users type  →  the canonical meaning.
 GLOSSARY = {
     "earnings": "SUM(fees)", "billing": "SUM(fees)", "revenue": "SUM(fees)",
-    "kamai": "SUM(fees)", "income": "SUM(fees)",
+    "kamai": "SUM(fees)", "kamaya": "SUM(fees)", "income": "SUM(fees)",
     "unpaid": "paid = no", "outstanding": "paid = no", "pending": "paid = no",
-    "owed": "paid = no", "baki": "paid = no", "due": "paid = no",
+    "owed": "paid = no", "baki": "paid = no", "baaki": "paid = no", "due": "paid = no",
+    "milna baki": "paid = no", "aana baki": "paid = no",
     "paid": "paid = yes", "cleared": "paid = yes", "received": "paid = yes",
+    "aaya": "paid = yes", "aayi": "paid = yes", "mil gaya": "paid = yes",
     "invoice sent": "bill_sent = yes", "billed": "bill_sent = yes",
+    "invoice bheja": "bill_sent = yes", "invoice bheje": "bill_sent = yes",
+    "kaam": "job", "kitne logon ko": "COUNT(DISTINCT client)",
     "biggest client": "group by client, SUM(fees), top 1",
     "average fee": "AVG(fees)",
 }

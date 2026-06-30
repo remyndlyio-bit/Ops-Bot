@@ -106,6 +106,15 @@ def _entries():
         for t, l in _T_SENT_CLIENT:
             yield "count_client_sent", t.format(c=c), P(metric="count", filters={"client_name": c, "bill_sent": "yes"}), ["count", "client", "bill_sent"], l
 
+    # ── Hinglish idioms, client-scoped (the phrasings real users send) ───
+    for c in _CLIENTS[:4] + _BRANDS[:3]:
+        f = {"client_name": c}
+        yield "h_client_sum", f"{c} se kitna kamaya", P(metric="sum", column="fees", filters=f), ["sum", "client"], "hi"
+        yield "h_client_unpaid", f"{c} ka paisa baki hai", P(metric="sum", column="fees", filters={"client_name": c, "paid": "no"}), ["sum", "client", "status"], "hi"
+        yield "h_client_aana_baki", f"{c} se kitna aana baki hai", P(metric="sum", column="fees", filters={"client_name": c, "paid": "no"}), ["sum", "client", "status"], "hi"
+        yield "h_client_sent", f"{c} ko kitne invoice bheje", P(metric="count", filters={"client_name": c, "bill_sent": "yes"}), ["count", "client", "bill_sent"], "hi"
+        yield "h_client_count", f"{c} ka kitna kaam hua", P(metric="count", filters=f), ["count", "client"], "hi"
+
     # ── biggest client (grouped) ─────────────────────────────────────────
     for q, l in [("who is my biggest client?", "en"), ("top client by revenue", "en"),
                  ("sabse bada client kaun hai", "hi")]:
