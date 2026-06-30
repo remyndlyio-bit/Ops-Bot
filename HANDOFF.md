@@ -1,3 +1,130 @@
+# Session Handoff — 2026-06-18 → 06-30
+
+Long session, several arcs on top of the prior handover (kept below). All commits
+on `main`, auto-deploy to Railway. **Test suite: 599 passing** (was 457).
+
+## Headline outcome (read this first)
+The durable wins were **deterministic**; the LLM-grounding experiment (the
+KnowledgeBook) did **not** show a robust accuracy lift. Detail in the arcs below.
+
+## Commits shipped this session (newest first)
+| Commit | What |
+|---|---|
+| `3e8858d` | KnowledgeBook expansion 255→290 (rules + Hinglish idioms) — accuracy benefit **unproven** |
+| `860b75e` | Typo-tolerant routing for ALL explicit commands (name/bank/link), via `_cmd_with_typos` |
+| `fc2327a` | Typo-tolerant "change my address" (the reported "adress" bug) |
+| `9fba67b` | Synonym-aware KnowledgeBook retrieval (glossary canonicalisation) |
+| `4ea2e25` | KnowledgeBook corpus 63→255 (template-driven, oracle-verified) |
+| `327ed91` | **Fix brand/client filter expansion** — widen any of the 3 client columns |
+| `21e541d` | Clarify "billed vs received" fork — answer-with-assumption + offer |
+| `ca5d1d9` | KnowledgeBook guidelines system (rename golden/→knowledge/) |
+| `ffa2f40` | Harden KB injection (compact hints, not raw JSON) |
+| `311a72b` | Golden source phase 1 (corpus engine + lexical retriever) |
+| `c6f9d5e` | **Layer 2** — gate planner SQL against the message (fail closed) |
+| `8926f06` | **Layer 1** — router self-validates against the message + golden CI net |
+| `d8841bd` | Widen invoice generate/regenerate verb vocabulary |
+| `39ba107` | Saner invoice retrieval (label by what was asked; don't re-build) |
+| `a670861` | Invoice polish — Playfair oldstyle amounts, brand inline |
+| `29aac95` | Editorial invoice redesign (Playfair + Lato fonts) |
+| `e19d4bb` | Invoice addressed to POC first |
+| `8763aca` | Wrap sender address (no overlap with invoice number) |
+| `3f51576` | Route all explicit account commands before the v2 classifier |
+| `201b8e7` | Route "change my address" before the v2 classifier |
+
+---
+
+## 1. Query-correctness guard — `services/query_guard.py` (the real win)
+The bug class (from 20-query live testing): a generator emits *well-formed* SQL
+that silently DROPS a qualifier ("how many UNPAID jobs"→COUNT(*); "show me
+GARNIER jobs"→SELECT * with no client filter) → confident wrong answer.
+
+- **`sql_reflects_message(message, sql)`** — pure check that every qualifier in the
+  message (status / value-vs-count intent / client / date) is reflected in the SQL.
+- **Layer 1** (`route_common_query`): each router candidate is validated; a route
+  that drops a qualifier ABSTAINS → planner. High precision, not high recall.
+- **Layer 2** (`intent_service._planner_sql_ok`): the planner's SQL is gated the
+  same way before executing; on a clear violation it FAILS CLOSED (asks). Client
+  detection here uses the known-client list (`_known_clients`, cached) to avoid
+  false clarifications.
+- **Golden CI net**: `tests/test_golden_queries.py` + `tests/golden_dataset.py`
+  (seeded, no LLM) — MUST_ANSWER cases assert the right number, MUST_DEFER assert
+  the router abstains. Runs in CI; catches the dropped-qualifier class.
+
+## 2. Brand/client expansion fix — `327ed91` (live bug)
+`intent_service._expand_client_filters` previously widened only `client_name
+ILIKE 'X'` across client/brand/production_house. When the planner filtered on
+`brand_name ILIKE 'Garnier'` it stayed narrow → wrong totals. Now widens ANY of
+the three columns. Tested in `test_planner_boundary.py::TestClientFilterExpansion`.
+
+## 3. Typo-tolerant explicit commands — `fc2327a`, `860b75e`
+Root cause of the "change my adress refused" report: the explicit-command triggers
+(address/name/bank/link) are substring-matched against correct spellings, so a
+misspelled noun missed every trigger and fell through to the v2 classifier (which
+refuses it as a FEATURE_QUESTION). Fixed with `intent_service._cmd_with_typos`
+(exact trigger OR misspelled-noun + intent verb). NOTE: covers misspelled **nouns**,
+not misspelled **verbs** ("updaet" still misses) — open item.
+
+## 4. Clarify "billed vs received" — `services/clarify.py` (`21e541d`)
+"How much have I MADE from X?" forks billed vs received. Instead of guessing,
+answer billed + state it + offer received in one line; the reply resolves it (both
+figures pre-computed). `intent_service._handle_value_fork` / `_resolve_value_fork`.
+**Gated by `KNOWLEDGE_BOOK`** (off in prod).
+
+## 5. KnowledgeBook — `knowledge/` + `services/knowledge_book.py` (HONEST: no proven lift)
+A guidelines system: RULES + GLOSSARY (`knowledge/rules.py`) + worked
+`{question→plan}` EXAMPLES (`knowledge/examples.jsonl`, 290, oracle-computed via
+`knowledge/oracle.py` + `knowledge/dataset.py`), assembled into a prompt block by
+`knowledge_book.knowledge_context()` and injected into the planner **behind the
+`KNOWLEDGE_BOOK` flag (default OFF)**.
+
+**A/B verdict (real measurement, multiple flaky 1-hr OpenRouter keys):**
+- Synthetic queries: KB-off == KB-on (36/36 both) — no headroom; the planner is
+  already at ceiling on clean shapes.
+- Real WhatsApp/Hinglish phrasings: one run showed a win on "kitne invoice bheje"
+  (KB-off added a spurious `poc_email` filter; KB-on clean), BUT it **did not
+  replicate** — on re-measurement KB-on ALSO adds the spurious filter. Net: parity.
+- **Conclusion:** the prose rule ("invoices sent = bill_sent alone, never require
+  poc_email") does NOT reliably override the model's prior. KB grounding is safe
+  but its accuracy value is unproven. The invoices-sent over-reasoning should be
+  fixed **deterministically** (strip the unrequested `poc_email` predicate), like #2.
+- A/B harness lives at `/tmp/kb_ab.py` (real queries + SQLite grading vs the
+  oracle; uses the production `_expand_client_filters`).
+
+## 6. Invoice overhaul (`8763aca`→`d8841bd`)
+Editorial redesign (Playfair Display + Lato, in `fonts/`, OFL-licensed; oldstyle
+figures), POC-addressed first, fixed-width sender address (no overlap), retrieval
+framing ("Pulling up your invoice" when already issued; skip the mandatory-field
+gate for already-invoiced rows), label-by-what-was-asked (brand vs client_name),
+wider generate/regenerate verb vocab. All in `services/invoice_generation_service.py`
++ `intent_service`. Note: cached PDFs — say "regenerate invoice for X" to rebuild.
+
+---
+
+## Open items / recommendations
+1. **Deterministic fix for invoices-sent over-reasoning** — strip an unrequested
+   `poc_email IS NOT NULL` predicate from a bill_sent COUNT/aggregate. This is the
+   real fix for the case the KB couldn't (consistent with #1/#2). HIGH value.
+2. **Decide KnowledgeBook's fate** — keep flag-off as reference, or remove. Don't
+   invest in scaling it for accuracy without evidence it helps (it didn't here).
+   If pursued: build the **anonymized-real eval** (sanitized `job_entries` export +
+   a name→pseudonym scrubber) — synthetic queries have no headroom to show lift.
+3. **Verb-typo tolerance** — `_cmd_with_typos` covers misspelled nouns only;
+   "updaet bank details" / "chnage my address" still fall through.
+4. **Flags in prod:** `FLOW_MACHINE_V2` is ON (the v2 classifier that refuses
+   unknown commands); `KNOWLEDGE_BOOK` is OFF (grounding + clarify-fork).
+5. **Rotate secrets** — many OpenRouter keys + the GitHub PAT were pasted in chat
+   this session; all should be rotated.
+
+## Flags
+| Env | Default | Effect |
+|---|---|---|
+| `FLOW_MACHINE_V2` | on (prod) | v2 LLM classifier for idle messages; refuses unknown commands → why explicit commands must route before it |
+| `KNOWLEDGE_BOOK` | off | inject KB grounding into the planner + enable the billed-vs-received clarify fork |
+| `STRICT_PLAN_VALIDATION` | 1 | PATH_3 strict plan validation + retry |
+
+---
+---
+
 # Session Handoff — 2026-06-17 / 18
 
 Big session. Three arcs: (1) a regression-fix sprint off a 156-row WhatsApp test
