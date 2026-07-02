@@ -162,11 +162,54 @@ class TestPlannerWiring:
 
     def test_not_injected_when_disabled(self, monkeypatch):
         from services.query_planner import build_operation_plan
-        monkeypatch.delenv("KNOWLEDGE_BOOK", raising=False)
+        # KB is default-ON now, so the disabled path requires an explicit 0.
+        monkeypatch.setenv("KNOWLEDGE_BOOK", "0")
         cap = {}
         build_operation_plan("how much is unpaid", "query", "schema",
                              ["fees", "paid"], gemini_service=self._fake_gemini(cap))
         assert "KnowledgeBook" not in cap["prompt"]
+
+    def test_injected_by_default_when_flag_absent(self, monkeypatch):
+        # Default flipped ON (2026-07-02) after the held-out A/B showed +3.
+        from services.query_planner import build_operation_plan
+        monkeypatch.delenv("KNOWLEDGE_BOOK", raising=False)
+        cap = {}
+        build_operation_plan("how much is unpaid", "query", "schema",
+                             ["fees", "paid"], gemini_service=self._fake_gemini(cap))
+        assert "KnowledgeBook" in cap["prompt"]
+
+
+class TestFlagDefault:
+    """is_enabled() default semantics after the 2026-07-02 flip to ON."""
+
+    def test_on_by_default(self, monkeypatch):
+        from services.knowledge_book import is_enabled
+        monkeypatch.delenv("KNOWLEDGE_BOOK", raising=False)
+        assert is_enabled() is True
+
+    @pytest.mark.parametrize("val", ["0", "false", "no", "off", ""])
+    def test_explicit_off_values(self, monkeypatch, val):
+        from services.knowledge_book import is_enabled
+        monkeypatch.setenv("KNOWLEDGE_BOOK", val)
+        assert is_enabled() is False
+
+    @pytest.mark.parametrize("val", ["1", "true", "yes", "on"])
+    def test_explicit_on_values(self, monkeypatch, val):
+        from services.knowledge_book import is_enabled
+        monkeypatch.setenv("KNOWLEDGE_BOOK", val)
+        assert is_enabled() is True
+
+    def test_value_fork_off_by_default(self, monkeypatch):
+        # The unvalidated billed-vs-received fork must NOT ride the grounding flag.
+        from services.knowledge_book import value_fork_enabled
+        monkeypatch.delenv("KB_VALUE_FORK", raising=False)
+        monkeypatch.setenv("KNOWLEDGE_BOOK", "1")   # grounding on
+        assert value_fork_enabled() is False        # fork still off
+
+    def test_value_fork_opt_in(self, monkeypatch):
+        from services.knowledge_book import value_fork_enabled
+        monkeypatch.setenv("KB_VALUE_FORK", "1")
+        assert value_fork_enabled() is True
 
 
 class TestSynonymRetrieval:

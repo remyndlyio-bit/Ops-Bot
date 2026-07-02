@@ -4540,10 +4540,13 @@ class IntentService:
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            # ── Clarify genuine intent forks (KnowledgeBook, flagged) ─────────
+            # ── Clarify genuine intent forks (own flag, default OFF) ──────────
             # "How much have I MADE from X?" forks billed vs received. Resolve a
             # pending offer first, else detect a new fork and answer-with-offer.
-            if knowledge_book.is_enabled():
+            # Gated by KB_VALUE_FORK (NOT KNOWLEDGE_BOOK): this path is unvalidated
+            # and runs _known_clients on every query, so it must not ride the
+            # A/B-proven grounding flag.
+            if knowledge_book.value_fork_enabled():
                 _rv = self._resolve_value_fork(user_id, message)
                 if _rv is not None:
                     return _rv

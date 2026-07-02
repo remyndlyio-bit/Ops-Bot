@@ -179,6 +179,19 @@ def knowledge_context(query: str, k: int = 5) -> str:
 
 
 def is_enabled() -> bool:
-    """KnowledgeBook grounding is gated by an env flag so we can A/B it and keep
-    prod on the current path until we flip it on."""
-    return (os.getenv("KNOWLEDGE_BOOK", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    """KnowledgeBook grounding. DEFAULT ON as of 2026-07-02: the held-out A/B
+    (knowledge/ab_run.py over knowledge/eval_hard.py) showed a small, replicable
+    lift — KB-OFF 43/50 (86%) -> KB-ON 46/50 (92%), +3, zero regressions, two
+    identical runs. Set KNOWLEDGE_BOOK=0 (or false/no/off/empty) to revert to the
+    pre-KB path."""
+    return (os.getenv("KNOWLEDGE_BOOK", "1") or "").strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def value_fork_enabled() -> bool:
+    """The billed-vs-received clarify fork (`intent_service._handle_value_fork`)
+    is a SEPARATE, still-unvalidated feature that historically rode the same
+    KNOWLEDGE_BOOK flag. It stays OFF by its OWN flag so flipping KB grounding on
+    — the A/B-validated win — does NOT also ship the untested fork (nor its
+    per-query `_known_clients` lookup on every message). Set KB_VALUE_FORK=1 to
+    enable once it's been measured."""
+    return (os.getenv("KB_VALUE_FORK", "") or "").strip().lower() in ("1", "true", "yes", "on")
