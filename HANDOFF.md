@@ -167,7 +167,13 @@ KB fixed/regressed. `ab_run.py` RETRIES on `_error`, removing that confound. Res
     every filter the planner can legitimately emit (`invoice_date`, `bill_sent`,
     `paid`, `poc_email`, client, date). A missing one silently mis-grades correct
     plans. `sent-04/09` were NOT a product bug — the planner was right.
-  - Actionable follow-ups: (a) tighten eval gold on list-vs-count ambiguity;
+  - Actionable follow-ups: (a) ~~tighten eval gold on list-vs-count ambiguity~~
+    **DONE** — reworded 6 ambiguous noun-phrase questions to explicit intent
+    ("Show me…"/"List every…"/"Saare … dikhao" for lists; "How many…" for a
+    count) so a correct planner isn't dinged for a coin-flip; `owe-16` kept as-is
+    (already "Show me…", so its list gold stands and the planner's SUM was a real
+    miss). Corpus regenerated leak-free. Re-run A/B on a fresh key to confirm the
+    3 soft regressions (comp-06/comp-11/hi-02) clear.
     (b) ~~`agg-17` top-earner grouping~~ **FIXED** — "earner"/"account" was in
     `query_router._JOB_WORD`, sending "top earner" to the highest-paying-JOB
     route; moved it to `_CLIENT_WORD` and taught the planner prompt that an
