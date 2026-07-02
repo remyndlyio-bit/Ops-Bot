@@ -112,6 +112,28 @@ A guidelines system: RULES + GLOSSARY (`knowledge/rules.py`) + worked
 - A/B harness lives at `/tmp/kb_ab.py` (real queries + SQLite grading vs the
   oracle; uses the production `_expand_client_filters`).
 
+**UPDATE (2026-07-02) — KB DOES show a small, replicable lift once JSON noise is
+controlled.** New held-out eval: `knowledge/eval_hard.py` (50 HARD questions NOT
+in the corpus) + `knowledge/ab_run.py` (grades the planner's PLAN via the oracle,
+KB off vs on). The earlier "parity" reads were **confounded by LLM JSON-truncation
+flakiness** — `build_operation_plan` swallows a malformed-JSON response into
+`_error`, and the old harness scored that as a miss, so truncations masqueraded as
+KB fixed/regressed. `ab_run.py` RETRIES on `_error`, removing that confound. Result
+(replicated twice, identical):
+  - **KB-OFF 43/50 (86%) → KB-ON 46/50 (92%). Net +3, fixed 3, regressed 0.**
+  - KB fixes were `bill_sent`/invoiced semantics: "total value of invoices raised"
+    (off summed ALL rows), "which jobs haven't been invoiced" (off dropped the
+    filter → all 120), "clients with no email" (off emitted a ranking not a list).
+  - **The `poc_email` over-reasoning trap fires on BOTH arms identically (3/3)** —
+    "how many invoices sent" returns 69 not 86 (86 − 17 no-email rows) regardless
+    of KB. Confirms the prose rule can't override the base prompt's own
+    `poc_email IS NOT NULL` instruction (query_planner `_build_planner_prompt`,
+    ~L275) → the deterministic SQL-strip (shipped, commit `4d02502`) is the right
+    fix, not KB.
+  - Still-shared misses neither arm gets: `comp-07` (compound bill_sent+paid+date)
+    and `comp-04` (arguably a soft gold — "paid Samsung work" summed vs listed).
+  - Full per-case detail: `knowledge/ab_results.json`.
+
 ## 6. Invoice overhaul (`8763aca`→`d8841bd`)
 Editorial redesign (Playfair Display + Lato, in `fonts/`, OFL-licensed; oldstyle
 figures), POC-addressed first, fixed-width sender address (no overlap), retrieval
