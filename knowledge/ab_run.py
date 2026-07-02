@@ -1,5 +1,5 @@
 """
-KnowledgeBook A/B runner over the 50 hard held-out cases (knowledge/eval_hard.py).
+KnowledgeBook A/B runner over the 200 hard held-out cases (knowledge/eval_hard.py).
 
 For each case it calls the REAL planner (services.query_planner.build_operation_plan)
 twice — KNOWLEDGE_BOOK off vs on — then grades each emitted plan by computing its
@@ -7,7 +7,7 @@ answer with the oracle over the seeded dataset and comparing to the gold answer.
 Grading the PLAN (not live SQL) is deliberate: the KB influences the plan, and it
 keeps the run fully offline apart from the one planner LLM call per arm.
 
-  AI_KEY=sk-or-... python -m knowledge.ab_run                 # full 50x2 run
+  AI_KEY=sk-or-... python -m knowledge.ab_run                 # full 200x2 run
   AI_KEY=sk-or-... python -m knowledge.ab_run --limit 10      # first 10 cases
   AI_KEY=sk-or-... python -m knowledge.ab_run --arm off       # one arm only
 
