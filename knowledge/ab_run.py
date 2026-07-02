@@ -67,6 +67,18 @@ def _norm_filters(raw: Dict) -> Tuple[Dict, bool]:
             else:
                 f["poc_email"] = "not_null"
                 poc_added = True
+        elif key == "invoice_date":
+            # The planner correctly maps "invoiced"/"raised" -> invoice_date IS
+            # [NOT] NULL. In the seeded dataset invoice_date is set IFF bill_sent
+            # is truthy (dataset.py), so this selects the SAME rows as bill_sent —
+            # map it through so a correct invoice_date plan grades correctly
+            # instead of being read as "no filter". setdefault: never override an
+            # explicit bill_sent already present.
+            s = (sval or "").replace(" ", "")
+            if val is None or s in ("isnull", "null"):
+                f.setdefault("bill_sent", "no")
+            elif "notnull" in s or s in ("not_null", "any", "*"):
+                f.setdefault("bill_sent", "yes")
     return f, poc_added
 
 

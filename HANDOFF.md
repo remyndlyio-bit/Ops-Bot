@@ -134,28 +134,41 @@ KB fixed/regressed. `ab_run.py` RETRIES on `_error`, removing that confound. Res
     and `comp-04` (arguably a soft gold — "paid Samsung work" summed vs listed).
   - Full per-case detail: `knowledge/ab_results.json`.
 
-**UPDATE 2 (2026-07-02) — scaled to 200 held-out cases + 1000-query corpus; lift
-holds.** `eval_hard.py` expanded 50→200 (oracle-graded, leak-checked); corpus
-`generate.py` scaled 290→~1000 (excludes all 200 eval questions). Full 200×2 A/B:
-  - **KB-OFF 174/200 (87%) → KB-ON 183/200 (92%). Net +9, fixed 13, regressed 4.**
-    poc_email trap fired: off 14, on 12 (KB nudges it down slightly, doesn't cure).
-  - **13 fixes** are again `bill_sent`/invoiced + compound semantics (e.g. "total
-    already invoiced to Star Studios", "how many jobs are billed but unpaid",
-    "paid jobs for Content Lab in H1", "next year earnings"→Rs0).
-  - **4 regressions are mostly SOFT-GOLD shape flips**: KB's aggregate-heavy
-    examples push `list`→`count`/`rank` on list-ish phrasings (comp-06, comp-11,
-    hi-02 — the COUNT is right, the shape isn't) + 1 JSON flake (hi-27=ERR). Not
-    KB breaking real answers.
-  - **Persistent both-wrong cluster (13):** the `poc_email` trap (sent-01/07/20,
-    hi-06 → 69 not 86 — neutralised in PROD by the deterministic strip `4d02502`,
-    which the plan-level A/B doesn't apply); a dropped-`bill_sent`-filter bug
-    (sent-04/09 → sum ALL rows = 19.35M vs 12.915M); `agg-17` (top-earner didn't
-    group); and list-vs-aggregate soft gold (poc-01/04, owe-16/24, comp-04).
-  - **Verdict: KB is a real, replicable win (+4–5pp, ~3–4× more fixes than
-    regressions, regressions mostly cosmetic).** Both flags are ON in prod.
-  - Actionable follow-ups: (a) tighten eval gold on list-vs-count ambiguity; (b)
-    fix the dropped-`bill_sent`-filter bug (sent-04/09) and `agg-17` grouping — both
-    are planner misses independent of KB.
+**UPDATE 2 (2026-07-02) — scaled to 200 held-out cases + 1000-query corpus.**
+`eval_hard.py` expanded 50→200 (oracle-graded, leak-checked); corpus
+`generate.py` scaled 290→~1000 (excludes all 200 eval questions). Full 200×2 A/B.
+
+  ⚠️ **CORRECTED numbers (a harness bug inflated the first read).** The initial
+  run reported +9 (174→183). But `ab_run._norm_filters` didn't understand the
+  `invoice_date IS [NOT] NULL` filter — which the planner CORRECTLY emits for
+  "invoiced"/"raised" and which, in the seeded data, selects the SAME rows as
+  `bill_sent` (invoice_date is set iff bill_sent). So correct `invoice_date` plans
+  were mis-graded as "no filter → sum all rows". This inflated the lift: many
+  "KB fixes" were just cases where KB-off used `invoice_date` (ungradeable) and
+  KB-on used `bill_sent` (gradeable). Fixed the harness (map `invoice_date`→
+  `bill_sent`) and RE-GRADED the same stored plans offline (no new API calls):
+  - **KB-OFF 182/200 (91%) → KB-ON 185/200 (92%). Net +3, fixed 7, regressed 4.**
+    poc_email trap: off 14, on 12.
+  - **True KB fixes (7):** `comp-07, comp-20, comp-21, comp-26, sent-14, hi-25,
+    date-16` — compound `client+status+date` + one zero-result. Real but modest.
+  - **4 regressions:** 3 SOFT-GOLD shape flips (`comp-06, comp-11, hi-02` — KB's
+    aggregate-heavy corpus pushes `list`→`count`/`rank`; the number is right, the
+    shape isn't) + 1 JSON flake (`hi-27`=ERR).
+  - **Persistent both-wrong (11):** the `poc_email` trap (`sent-01/07/20, hi-06`
+    → 69 not 86 — neutralised in PROD by the deterministic strip `4d02502`, which
+    the plan-level A/B doesn't apply); `agg-17` (top-earner didn't group); `agg-16`
+    (avg slightly off); list-vs-aggregate soft gold (`poc-01/04, owe-16/24,
+    comp-04`).
+  - **Verdict: KB is a genuine but MODEST win (+3 / ~1.5pp, 7 fixed vs 4 mostly-
+    cosmetic regressions, never breaks a real answer).** Weaker than the inflated
+    +9 first suggested. Both flags remain ON in prod (net-positive, zero real-
+    answer regressions).
+  - **Lesson:** the A/B grades the PLAN via the oracle, so the harness must model
+    every filter the planner can legitimately emit (`invoice_date`, `bill_sent`,
+    `paid`, `poc_email`, client, date). A missing one silently mis-grades correct
+    plans. `sent-04/09` were NOT a product bug — the planner was right.
+  - Actionable follow-ups: (a) tighten eval gold on list-vs-count ambiguity;
+    (b) `agg-17` top-earner grouping is a genuine planner miss worth a look.
 
 ## 6. Invoice overhaul (`8763aca`→`d8841bd`)
 Editorial redesign (Playfair Display + Lato, in `fonts/`, OFL-licensed; oldstyle

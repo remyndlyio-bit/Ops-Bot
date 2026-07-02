@@ -112,6 +112,38 @@ class TestCorpus:
         assert len(qs) == len(set(qs)), "duplicate questions in corpus"
 
 
+class TestABGradingNormaliser:
+    """The A/B harness grades the planner's PLAN via the oracle, so it must model
+    every filter the planner can legitimately emit. invoice_date IS [NOT] NULL
+    ("invoiced"/"raised") selects the same rows as bill_sent in the seeded data;
+    a missing mapping silently mis-graded correct plans (sent-04/09)."""
+
+    def test_invoice_date_not_null_maps_to_bill_sent_yes(self):
+        from knowledge.ab_run import _norm_filters
+        for v in ("IS NOT NULL", "not_null", "isnotnull"):
+            f, _ = _norm_filters({"invoice_date": v})
+            assert f == {"bill_sent": "yes"}, v
+
+    def test_invoice_date_null_maps_to_bill_sent_no(self):
+        from knowledge.ab_run import _norm_filters
+        assert _norm_filters({"invoice_date": None})[0] == {"bill_sent": "no"}
+        assert _norm_filters({"invoice_date": "IS NULL"})[0] == {"bill_sent": "no"}
+
+    def test_explicit_bill_sent_not_overridden(self):
+        from knowledge.ab_run import _norm_filters
+        f, _ = _norm_filters({"bill_sent": "yes", "invoice_date": "IS NULL"})
+        assert f == {"bill_sent": "yes"}   # explicit wins, no clobber
+
+    def test_invoice_date_and_bill_sent_agree_on_seeded_data(self):
+        # The equivalence the mapping relies on: invoice_date set IFF bill_sent.
+        from knowledge.ab_run import _plan_to_oracle
+        p_inv, _ = _plan_to_oracle({"metric": "sum", "column": "fees",
+                                    "filters": {"invoice_date": "IS NOT NULL"}})
+        p_bs, _ = _plan_to_oracle({"metric": "sum", "column": "fees",
+                                   "filters": {"bill_sent": "yes"}})
+        assert compute_answer(p_inv, ROWS) == compute_answer(p_bs, ROWS)
+
+
 class TestRetriever:
     def setup_method(self):
         self.r = ExampleIndex()
