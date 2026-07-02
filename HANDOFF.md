@@ -134,6 +134,29 @@ KB fixed/regressed. `ab_run.py` RETRIES on `_error`, removing that confound. Res
     and `comp-04` (arguably a soft gold — "paid Samsung work" summed vs listed).
   - Full per-case detail: `knowledge/ab_results.json`.
 
+**UPDATE 2 (2026-07-02) — scaled to 200 held-out cases + 1000-query corpus; lift
+holds.** `eval_hard.py` expanded 50→200 (oracle-graded, leak-checked); corpus
+`generate.py` scaled 290→~1000 (excludes all 200 eval questions). Full 200×2 A/B:
+  - **KB-OFF 174/200 (87%) → KB-ON 183/200 (92%). Net +9, fixed 13, regressed 4.**
+    poc_email trap fired: off 14, on 12 (KB nudges it down slightly, doesn't cure).
+  - **13 fixes** are again `bill_sent`/invoiced + compound semantics (e.g. "total
+    already invoiced to Star Studios", "how many jobs are billed but unpaid",
+    "paid jobs for Content Lab in H1", "next year earnings"→Rs0).
+  - **4 regressions are mostly SOFT-GOLD shape flips**: KB's aggregate-heavy
+    examples push `list`→`count`/`rank` on list-ish phrasings (comp-06, comp-11,
+    hi-02 — the COUNT is right, the shape isn't) + 1 JSON flake (hi-27=ERR). Not
+    KB breaking real answers.
+  - **Persistent both-wrong cluster (13):** the `poc_email` trap (sent-01/07/20,
+    hi-06 → 69 not 86 — neutralised in PROD by the deterministic strip `4d02502`,
+    which the plan-level A/B doesn't apply); a dropped-`bill_sent`-filter bug
+    (sent-04/09 → sum ALL rows = 19.35M vs 12.915M); `agg-17` (top-earner didn't
+    group); and list-vs-aggregate soft gold (poc-01/04, owe-16/24, comp-04).
+  - **Verdict: KB is a real, replicable win (+4–5pp, ~3–4× more fixes than
+    regressions, regressions mostly cosmetic).** Both flags are ON in prod.
+  - Actionable follow-ups: (a) tighten eval gold on list-vs-count ambiguity; (b)
+    fix the dropped-`bill_sent`-filter bug (sent-04/09) and `agg-17` grouping — both
+    are planner misses independent of KB.
+
 ## 6. Invoice overhaul (`8763aca`→`d8841bd`)
 Editorial redesign (Playfair Display + Lato, in `fonts/`, OFL-licensed; oldstyle
 figures), POC-addressed first, fixed-width sender address (no overlap), retrieval
