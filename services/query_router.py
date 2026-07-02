@@ -64,9 +64,12 @@ class RoutedQuery:
 
 
 # A "client word" and a "count word" reused across routes.
-_CLIENT_WORD = r"(?:clients?|brands?|companies|compan(?:y|ies)|customers?)"
+# "earner"/"account" belong here, NOT with the job words: freelancers say "my top
+# earner" / "biggest account" to mean the top CLIENT, never a single job. (Was
+# mis-listed under _JOB_WORD, sending "top earner" to the highest-paying-JOB route.)
+_CLIENT_WORD = r"(?:clients?|brands?|companies|compan(?:y|ies)|customers?|earners?|accounts?)"
 _COUNT_WORD = r"(?:how\s+many|count|kitne|number\s+of)"
-_JOB_WORD = r"\b(?:job|project|work|gig|invoice|earner|payday|paycheck)\b"
+_JOB_WORD = r"\b(?:job|project|work|gig|invoice|payday|paycheck)\b"
 
 # Time/period tokens that are NOT a client name in a "for X" / "from X" phrase.
 _TIME_TOKENS = {

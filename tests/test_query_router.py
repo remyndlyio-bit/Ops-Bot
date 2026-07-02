@@ -120,6 +120,29 @@ class TestTopBottomJob:
         r = _route("who is my biggest client")
         assert r and r.name == "biggest_client"
 
+    @pytest.mark.parametrize("msg", [
+        "who is my top earner",
+        "my biggest earner",
+        "biggest account by revenue",
+    ])
+    def test_top_earner_routes_to_client_not_job(self, msg):
+        # "earner"/"account" is a CLIENT, not a single job. (Was in _JOB_WORD,
+        # sending "top earner" to the highest-paying-JOB route.)
+        r = _route(msg)
+        assert r and r.name == "biggest_client", f"{msg} -> {r and r.name}"
+
+    def test_highest_paying_job_still_a_job(self):
+        # The job route must be untouched by the earner move.
+        r = _route("what was my highest paying job")
+        assert r and r.name == "top_bottom_job"
+
+    def test_top_earner_with_paid_qualifier_abstains(self):
+        # "top earner among the PAID jobs" — the biggest-client route has no paid
+        # filter, so the guard must abstain (hand to the planner), never answer a
+        # paid-qualified question with an all-time client ranking.
+        r = _route("top earner among the paid jobs")
+        assert r is None or r.name != "biggest_client"
+
 
 # ── Guards: routes that must NOT fire (hand off to the planner) ─────────────
 

@@ -168,7 +168,11 @@ KB fixed/regressed. `ab_run.py` RETRIES on `_error`, removing that confound. Res
     `paid`, `poc_email`, client, date). A missing one silently mis-grades correct
     plans. `sent-04/09` were NOT a product bug — the planner was right.
   - Actionable follow-ups: (a) tighten eval gold on list-vs-count ambiguity;
-    (b) `agg-17` top-earner grouping is a genuine planner miss worth a look.
+    (b) ~~`agg-17` top-earner grouping~~ **FIXED** — "earner"/"account" was in
+    `query_router._JOB_WORD`, sending "top earner" to the highest-paying-JOB
+    route; moved it to `_CLIENT_WORD` and taught the planner prompt that an
+    'earner'/'account' is a CLIENT (keep any paid/date filter). Live-verified:
+    "top earner among the paid jobs" now → group_by client + paid, top 1 (=gold).
 
 ## 6. Invoice overhaul (`8763aca`→`d8841bd`)
 Editorial redesign (Playfair Display + Lato, in `fonts/`, OFL-licensed; oldstyle
