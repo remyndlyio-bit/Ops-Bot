@@ -7,6 +7,28 @@ on `main`, auto-deploy to Railway. **Test suite: 599 passing** (was 457).
 The durable wins were **deterministic**; the LLM-grounding experiment (the
 KnowledgeBook) did **not** show a robust accuracy lift. Detail in the arcs below.
 
+## ▶ NEXT SESSION — START HERE (the one concrete follow-up)
+**Deterministically fix the "invoices sent → spurious poc_email" over-reasoning.**
+This is a real, reproducible wrong-answer bug, and the thing the KnowledgeBook
+*couldn't* fix (both KB arms do it), so it must be code, not a prompt rule.
+
+- **Repro:** ask the planner "how many invoices have I sent" / "kitne invoice
+  bheje". It emits:
+  `... AND LOWER(COALESCE(bill_sent,'')) IN (...) AND poc_email IS NOT NULL AND TRIM(poc_email) <> '' ...`
+  The `poc_email` condition is invented (you don't need an email to have *sent* an
+  invoice) → undercounts. Truth for the seeded set is 86; it returns fewer.
+- **Fix:** in `services/intent_service` (next to `_expand_client_filters`, applied
+  to the planner SQL before execute), strip an unrequested `poc_email IS NOT NULL`
+  / `TRIM(poc_email) <> ''` predicate when the message is about `bill_sent`
+  (sent/billed/bheja) and does NOT mention email/contact. Keep it narrow (only when
+  the user didn't ask about email).
+- **Test:** add to `tests/test_planner_boundary.py` — a bill_sent count SQL with a
+  spurious poc_email predicate gets it stripped; a genuine "invoices with an email"
+  query keeps it.
+- **Measure:** `/tmp/kb_ab.py` harness is set up (real Hinglish queries, SQLite
+  grading vs the oracle). Needs a live OpenRouter key (they expire ~1hr; the burst
+  of ~50 calls can exhaust cheap keys — keep runs ≤ ~30 calls or throttle).
+
 ## Commits shipped this session (newest first)
 | Commit | What |
 |---|---|
