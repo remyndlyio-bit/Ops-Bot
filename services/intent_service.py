@@ -4776,6 +4776,12 @@ class IntentService:
             # miss the client/production rows and return a wrong (narrow) total.
             sql = self._expand_client_filters(sql)
 
+            # Strip an unrequested poc_email predicate from bill_sent queries —
+            # the planner over-reasons "how many invoices have I sent" into also
+            # requiring a contactable email, which undercounts (bill_sent alone
+            # means the invoice WAS sent; poc_email is not a precondition of that).
+            sql = self._strip_spurious_poc_email_filter(message, sql)
+
             # Preserve filter context columns in the projection.
             # When SQL filters by a semantic column (paid, invoice_date, *_reminder_sent)
             # but the SELECT drops it, the synthesizer sees a bare list and contradicts
@@ -5227,6 +5233,30 @@ class IntentService:
         return re.sub(
             r"\b(?:client_name|brand_name|production_house)\s+ILIKE\s+'([^']*)'",
             _rep, sql, flags=re.IGNORECASE)
+
+    @staticmethod
+    def _strip_spurious_poc_email_filter(message: str, sql: str) -> str:
+        """Drop an unrequested `poc_email IS NOT NULL` predicate from bill_sent
+        queries. "How many invoices have I sent" only needs bill_sent — the
+        planner has repeatedly (across both KnowledgeBook A/B arms) also
+        required a contactable email, which silently undercounts. Narrow by
+        design: only strips when the SQL is filtering on bill_sent AND the
+        message itself never mentions email/contact (so "invoices with no
+        email on file" keeps its poc_email predicate untouched)."""
+        msg_lower = message.lower()
+        if "email" in msg_lower or "contact" in msg_lower:
+            return sql
+        if "bill_sent" not in sql.lower():
+            return sql
+        combined = (
+            r"\(?poc_email\s+IS\s+NOT\s+NULL\s+AND\s+TRIM\(\s*poc_email\s*\)\s*<>\s*''\)?"
+            r"|\(?TRIM\(\s*poc_email\s*\)\s*<>\s*''\s+AND\s+poc_email\s+IS\s+NOT\s+NULL\)?"
+        )
+        single = r"poc_email\s+IS\s+NOT\s+NULL|TRIM\(\s*poc_email\s*\)\s*<>\s*''"
+        for pat in (combined, single):
+            sql = re.sub(rf"\s+AND\s+(?:{pat})", "", sql, flags=re.IGNORECASE)
+            sql = re.sub(rf"(?:{pat})\s+AND\s+", "", sql, flags=re.IGNORECASE)
+        return sql
 
     def _scalar(self, sql: str):
         """Run an aggregate SQL and return its single numeric value, or None."""

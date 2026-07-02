@@ -532,3 +532,52 @@ class TestClientFilterExpansion:
     def test_non_client_ilike_untouched(self):
         out = self._expand("WHERE poc_email ILIKE '%garnier.com%'")
         assert out == "WHERE poc_email ILIKE '%garnier.com%'"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _strip_spurious_poc_email_filter — the "invoices sent" over-reasoning bug.
+# "How many invoices have I sent" only needs bill_sent; the planner has
+# repeatedly also required a contactable email (poc_email IS NOT NULL),
+# which undercounts. Deterministic fix, narrow to bill_sent queries where
+# the message never mentions email/contact. See HANDOFF.md.
+# ─────────────────────────────────────────────────────────────────────────────
+class TestStripSpuriousPocEmailFilter:
+    from services.intent_service import IntentService
+    _strip = staticmethod(IntentService._strip_spurious_poc_email_filter)
+
+    def test_strips_from_bill_sent_count_query(self):
+        sql = ("SELECT COUNT(*) FROM job_entries WHERE user_id='u' "
+               "AND LOWER(COALESCE(bill_sent,'')) IN ('yes') "
+               "AND poc_email IS NOT NULL AND TRIM(poc_email) <> ''")
+        out = self._strip("how many invoices have I sent", sql)
+        assert "poc_email" not in out.lower()
+        assert "bill_sent" in out.lower()
+
+    def test_strips_reverse_order(self):
+        sql = ("SELECT COUNT(*) FROM job_entries WHERE bill_sent = 'Yes' "
+               "AND TRIM(poc_email) <> '' AND poc_email IS NOT NULL")
+        out = self._strip("kitne invoice bheje", sql)
+        assert "poc_email" not in out.lower()
+
+    def test_strips_when_predicate_leads_where_clause(self):
+        sql = ("SELECT COUNT(*) FROM job_entries WHERE poc_email IS NOT NULL "
+               "AND TRIM(poc_email) <> '' AND bill_sent = 'Yes'")
+        out = self._strip("how many invoices have I sent", sql)
+        assert "poc_email" not in out.lower()
+        assert "WHERE bill_sent" in out
+
+    def test_keeps_predicate_when_message_mentions_email(self):
+        sql = ("SELECT COUNT(*) FROM job_entries WHERE bill_sent = 'Yes' "
+               "AND poc_email IS NOT NULL AND TRIM(poc_email) <> ''")
+        out = self._strip("how many invoices sent to clients with an email", sql)
+        assert "poc_email" in out.lower()
+
+    def test_untouched_when_sql_not_about_bill_sent(self):
+        sql = "SELECT COUNT(*) FROM job_entries WHERE poc_email IS NOT NULL"
+        out = self._strip("how many clients have an email on file", sql)
+        assert out == sql
+
+    def test_untouched_when_no_poc_email_predicate(self):
+        sql = "SELECT COUNT(*) FROM job_entries WHERE bill_sent = 'Yes'"
+        out = self._strip("how many invoices have I sent", sql)
+        assert out == sql
