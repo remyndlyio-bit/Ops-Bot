@@ -199,16 +199,24 @@ class TestFlagDefault:
         monkeypatch.setenv("KNOWLEDGE_BOOK", val)
         assert is_enabled() is True
 
-    def test_value_fork_off_by_default(self, monkeypatch):
-        # The unvalidated billed-vs-received fork must NOT ride the grounding flag.
+    def test_value_fork_on_by_default(self, monkeypatch):
+        # Fork flipped ON (2026-07-02) after value_fork_eval hit 100% precision.
+        # It is its OWN flag, independent of KNOWLEDGE_BOOK.
         from services.knowledge_book import value_fork_enabled
         monkeypatch.delenv("KB_VALUE_FORK", raising=False)
-        monkeypatch.setenv("KNOWLEDGE_BOOK", "1")   # grounding on
-        assert value_fork_enabled() is False        # fork still off
+        assert value_fork_enabled() is True
 
-    def test_value_fork_opt_in(self, monkeypatch):
+    @pytest.mark.parametrize("val", ["0", "false", "no", "off", ""])
+    def test_value_fork_explicit_off(self, monkeypatch, val):
         from services.knowledge_book import value_fork_enabled
-        monkeypatch.setenv("KB_VALUE_FORK", "1")
+        monkeypatch.setenv("KB_VALUE_FORK", val)
+        assert value_fork_enabled() is False
+
+    def test_fork_flag_independent_of_grounding(self, monkeypatch):
+        # Turning grounding OFF must not turn the fork off (separate flags).
+        from services.knowledge_book import value_fork_enabled
+        monkeypatch.setenv("KNOWLEDGE_BOOK", "0")
+        monkeypatch.delenv("KB_VALUE_FORK", raising=False)
         assert value_fork_enabled() is True
 
 

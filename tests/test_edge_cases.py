@@ -114,11 +114,19 @@ class TestNoData:
         # The deterministic router runs FIRST ('list_jobs'); on 0 rows it falls
         # through to the planner path, which then hits the no-data check.
         svc.gemini.parse_user_intent.return_value = {"operation": "GEMINI_ERROR", "parameters": {}}
-        svc.supabase.execute_sql.side_effect = [
-            {"ok": True, "rows": []},           # router 'list_jobs' SELECT → 0 rows → fall through
-            {"ok": True, "rows": []},           # planner keyword-fallback SELECT → 0 rows
-            {"ok": True, "rows": [{"cnt": 0}]}, # "do you have any data?" check → no
-        ]
+
+        # Route by SQL content, not call order: the live value fork issues a
+        # _known_clients DISTINCT/UNION query up front, so a positional
+        # side_effect list is fragile. Every data SELECT returns 0 rows; the
+        # "do you have any data?" COUNT returns 0 → the no-data path must fire.
+        def _exec(sql):
+            s = sql.lower()
+            if "distinct" in s and "union" in s:      # _known_clients lookup
+                return {"ok": True, "rows": []}
+            if "count(" in s:                          # "any data?" check → no
+                return {"ok": True, "rows": [{"cnt": 0}]}
+            return {"ok": True, "rows": []}            # every data SELECT → 0 rows
+        svc.supabase.execute_sql.side_effect = _exec
 
         result = svc.process_request("user1", "Show my jobs")
         resp = result.get("response", "").lower()

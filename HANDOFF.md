@@ -155,8 +155,9 @@ wider generate/regenerate verb vocab. All in `services/invoice_generation_servic
 3. **Verb-typo tolerance** — `_cmd_with_typos` covers misspelled nouns only;
    "updaet bank details" / "chnage my address" still fall through.
 4. **Flags in prod:** `FLOW_MACHINE_V2` is ON (the v2 classifier that refuses
-   unknown commands); `KNOWLEDGE_BOOK` is now ON (planner grounding only);
-   the clarify-fork was split to `KB_VALUE_FORK` (still off).
+   unknown commands); `KNOWLEDGE_BOOK` is now ON (planner grounding);
+   `KB_VALUE_FORK` is now ON too (clarify-fork, measured 100% precision after a
+   date guard).
 5. **Rotate secrets** — many OpenRouter keys + the GitHub PAT were pasted in chat
    this session; all should be rotated.
 
@@ -165,7 +166,7 @@ wider generate/regenerate verb vocab. All in `services/invoice_generation_servic
 |---|---|---|
 | `FLOW_MACHINE_V2` | on (prod) | v2 LLM classifier for idle messages; refuses unknown commands → why explicit commands must route before it |
 | `KNOWLEDGE_BOOK` | **ON (flipped 2026-07-02)** | inject KB grounding into the planner. Default flipped after the held-out A/B (+3, 86%→92%, 0 regressions, replicated). Set `KNOWLEDGE_BOOK=0` to revert. **No longer gates the clarify fork** (decoupled below). |
-| `KB_VALUE_FORK` | off | billed-vs-received clarify fork (`_handle_value_fork`). Split out of `KNOWLEDGE_BOOK` so the A/B-proven grounding could ship without this UNVALIDATED path (it runs `_known_clients` on every query). Measure before enabling. |
+| `KB_VALUE_FORK` | **ON (flipped 2026-07-02)** | billed-vs-received clarify fork (`_handle_value_fork`). Measured via `knowledge/value_fork_eval.py` (deterministic, 34 labelled msgs): **100% precision / 100% recall** after adding a date guard to `clarify.detect_value_fork` (was 62% precision — it hijacked dated value queries like "earnings from Nike last quarter" and dropped the date). Own flag; set `KB_VALUE_FORK=0` to revert. |
 | `STRICT_PLAN_VALIDATION` | 1 | PATH_3 strict plan validation + retry |
 
 ---

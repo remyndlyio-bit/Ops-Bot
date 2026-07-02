@@ -38,6 +38,19 @@ class TestDetector:
     def test_no_value_word_no_fork(self):
         assert detect_value_fork("show me Garnier jobs", KC) is None
 
+    @pytest.mark.parametrize("msg", [
+        "how much did I earn from Garnier last quarter",   # last <period>
+        "earnings from Samsung this month",                # this <period>
+        "what have I made from Pepsi in 2026",             # year
+        "Samsung se pichle mahine kitna kamaya",           # hinglish period
+        "how much have I earned from Garnier this year",   # this year
+        "total made from Pepsi in March",                  # month name
+    ])
+    def test_dated_value_query_no_fork(self, msg):
+        # The fork's SQL is all-time; a date window means the planner must answer,
+        # else the fork silently drops the date and returns an all-time figure.
+        assert detect_value_fork(msg, KC) is None
+
     def test_resolve_reply(self):
         assert resolve_reply("received please") == "received"
         assert resolve_reply("the billed total") == "billed"

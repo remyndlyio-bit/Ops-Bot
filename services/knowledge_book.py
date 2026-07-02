@@ -188,10 +188,10 @@ def is_enabled() -> bool:
 
 
 def value_fork_enabled() -> bool:
-    """The billed-vs-received clarify fork (`intent_service._handle_value_fork`)
-    is a SEPARATE, still-unvalidated feature that historically rode the same
-    KNOWLEDGE_BOOK flag. It stays OFF by its OWN flag so flipping KB grounding on
-    — the A/B-validated win — does NOT also ship the untested fork (nor its
-    per-query `_known_clients` lookup on every message). Set KB_VALUE_FORK=1 to
-    enable once it's been measured."""
-    return (os.getenv("KB_VALUE_FORK", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    """The billed-vs-received clarify fork (`intent_service._handle_value_fork`).
+    DEFAULT ON as of 2026-07-02: measured via knowledge/value_fork_eval.py
+    (deterministic detector, 34 labelled messages) — 100% precision / 100% recall
+    AFTER adding the date guard that stops it hijacking dated value queries (it
+    was 62% precision before). Kept on its OWN flag (separate from KNOWLEDGE_BOOK)
+    so each can be reverted independently. Set KB_VALUE_FORK=0 to revert."""
+    return (os.getenv("KB_VALUE_FORK", "1") or "").strip().lower() not in ("0", "false", "no", "off", "")
