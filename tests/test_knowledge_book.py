@@ -91,6 +91,26 @@ class TestCorpus:
         for e in build_corpus():
             assert e["answer"] == compute_answer(e["plan"], ROWS), f"stale answer: {e['id']}"
 
+    def test_no_eval_leakage(self):
+        # The corpus must never contain a held-out eval_hard question, else KB-on
+        # would win the A/B by memorisation instead of generalisation.
+        import re
+        from knowledge.eval_hard import cases
+
+        def norm(s):
+            return re.sub(r"\s+", " ", (s or "").strip().lower()).rstrip("?.! ")
+
+        evalq = {norm(c["question"]) for c in cases()}
+        corpusq = {norm(e["question"]) for e in build_corpus()}
+        leaked = sorted(evalq & corpusq)
+        assert not leaked, f"eval questions leaked into the corpus: {leaked}"
+
+    def test_corpus_scaled_and_unique(self):
+        corpus = build_corpus()
+        assert len(corpus) >= 900, f"corpus shrank unexpectedly: {len(corpus)}"
+        qs = [e["question"].lower() for e in corpus]
+        assert len(qs) == len(set(qs)), "duplicate questions in corpus"
+
 
 class TestRetriever:
     def setup_method(self):
