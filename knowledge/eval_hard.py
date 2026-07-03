@@ -222,7 +222,7 @@ _CASES = [
     ("date-02", "How much did I make this month?",
      _plan("sum", "fees", {}, _abs(_THIS_MONTH)),
      ["date", "sum", "zero-result"], "en"),
-    ("date-03", "Jobs in Q1 this year",
+    ("date-03", "Show me jobs in Q1 this year",
      _plan(None, None, {}, _abs(_Q1_2026)),
      ["date", "list"], "en"),
     ("date-04", "Total billing for the first half of the year",
