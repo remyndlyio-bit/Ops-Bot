@@ -92,6 +92,155 @@ _T_PAID_TOTAL_CLIENT = [("how much has {c} paid me", "en"), ("total received fro
                         ("{c} se kitna paisa mila", "hi")]
 _T_SENT_CLIENT = [("how many invoices sent to {c}", "en"), ("{c} ko kitne invoice bheje", "hi")]
 
+# ══════════════════════════════════════════════════════════════════════════════
+# NEW COVERAGE AREAS (from live WhatsApp transcripts, 2026-07). Four intents the
+# planner kept fumbling. Every template below maps to an oracle-computable plan.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Area A — COLLECTIONS: who hasn't paid / who owes / chase ──────────────────
+# The people-centric framing of "unpaid" (IMG 1: "who hasnt paid me yet"). Global
+# phrasings default to the unpaid LIST (the set of jobs/clients still owing).
+_A_BARE_LIST = [
+    ("who hasn't paid me yet", "en"), ("who still owes me money", "en"),
+    ("which clients haven't paid me", "en"), ("show me everyone who owes me", "en"),
+    ("who do I need to chase for payment", "en"), ("who should I follow up with for payment", "en"),
+    ("list everyone with a pending payment", "en"), ("which payments are still outstanding", "en"),
+    ("show me all my pending collections", "en"), ("who hasn't cleared their dues yet", "en"),
+    ("which clients still need to pay me", "en"), ("show me who is yet to pay", "en"),
+    ("who owes me at the moment", "en"), ("list the clients that still owe me", "en"),
+    ("kisne abhi tak payment nahi kiya", "hi"), ("kaun kaun paisa dena baki hai", "hi"),
+    ("kis kis ka payment pending hai", "hi"), ("kis se paisa lena baki hai", "hi"),
+    ("kaun log payment nahi kiye", "hi"), ("abhi tak kaun nahi paya", "hi"),
+    ("kiska kiska paisa fasa hua hai", "hi"),
+]
+_A_BARE_COUNT = [
+    ("how many clients still owe me", "en"), ("how many payments are pending", "en"),
+    ("how many are yet to pay me", "en"), ("how many jobs are still unpaid", "en"),
+    ("kitne log payment nahi kiye", "hi"), ("kitne payment pending hain", "hi"),
+]
+_A_BARE_SUM = [
+    ("how much money is stuck in unpaid invoices", "en"),
+    ("how much are people yet to pay me in total", "en"),
+    ("what's my total pending collection", "en"),
+    ("how much am I owed altogether", "en"),
+    ("kitna paisa abhi aana baki hai", "hi"),
+]
+# "who owes the MOST" → group_by client over unpaid rows, top 1.
+_A_OWES_TOP = [
+    ("who owes me the most", "en"), ("which client owes me the most money", "en"),
+    ("my biggest outstanding client", "en"), ("sabse zyada kiska paisa baki hai", "hi"),
+]
+_A_OWES_RANK = [
+    ("rank my clients by how much they owe", "en"),
+    ("which clients owe me the most, in order", "en"),
+]
+# Per-client "still owes" phrasings (distinct strings from _T_OWES) → unpaid sum.
+_A_CLIENT = [
+    ("is there anything pending from {c}", "en"), ("does {c} still owe me", "en"),
+    ("what does {c} still need to pay", "en"), ("how much is stuck with {c}", "en"),
+    ("{c} se kitna lena baki hai", "hi"),
+]
+
+# ── Area B — MONEY BUCKETS: earnings vs received vs outstanding ───────────────
+# IMG 2 bug: "total earning from all jobs" must be SUM of ALL fees (no paid
+# filter) — NOT the unpaid figure. Three buckets, kept strictly separate.
+_B_TOTAL_ALL = [        # sum, NO filter — everything earned/billed
+    ("what is my total earning from all jobs", "en"),
+    ("total earnings from all jobs so far", "en"),
+    ("how much have I earned in total across all jobs", "en"),
+    ("my total earnings to date", "en"), ("what have I earned overall", "en"),
+    ("grand total of all my job fees", "en"), ("sum of every job's fee", "en"),
+    ("total value of all my work", "en"),
+    ("how much have I made from all jobs combined", "en"),
+    ("everything I've earned so far", "en"), ("total income from all my projects", "en"),
+    ("total lifetime earnings", "en"), ("add up all my job fees", "en"),
+    ("what's the total across every job", "en"),
+    ("saare jobs se kul kitna kamaya", "hi"), ("ab tak sabhi kaam se kitna kamaya", "hi"),
+    ("meri total kamai kitni hai", "hi"), ("sab milakar kitna banaya", "hi"),
+]
+_B_RECEIVED = [         # sum, paid=yes — money actually in
+    ("how much money have I actually received", "en"),
+    ("how much has landed in my account", "en"),
+    ("total payment received so far", "en"),
+    ("how much have clients actually paid me", "en"),
+    ("how much have I collected so far", "en"), ("total cleared payments", "en"),
+    ("how much money has come in", "en"), ("what's my received total", "en"),
+    ("how much is actually in the bank from my jobs", "en"),
+    ("kitna paisa actually aaya", "hi"), ("kitna payment mil chuka hai", "hi"),
+    ("ab tak kitna received hua", "hi"), ("kitna paisa account me aaya", "hi"),
+]
+_B_OUTSTANDING = [      # sum, paid=no — still owed (IMG 2: "total outstanding payment")
+    ("what is my total outstanding payment", "en"),
+    ("total outstanding amount owed to me", "en"),
+    ("how much is still to come in", "en"),
+    ("how much are clients yet to pay me in total", "en"),
+    ("my total dues outstanding", "en"),
+    ("how much payment is still pending overall", "en"),
+    ("of everything I've billed how much is still unpaid", "en"),
+    ("how much of my earnings is still uncollected", "en"),
+    ("total billed but not yet paid", "en"),
+    ("kitna paisa abhi aana hai", "hi"), ("total bakaya kitna hai", "hi"),
+]
+# Per-client three-way split (novel strings): earned(all) / received(paid) / owed(unpaid)
+_B_CLIENT_EARNED = [("what's my grand total from {c}", "en"), ("{c} se total kitni kamai hui", "hi")]
+_B_CLIENT_RECEIVED = [("how much has {c} cleared so far", "en"), ("{c} ne kitna clear kiya", "hi")]
+_B_CLIENT_OWED = [("how much is {c} yet to pay", "en"), ("{c} ka kitna bakaya hai", "hi")]
+
+# ── Area C — CONTACT / RECIPIENT LOOKUP (poc_email) ──────────────────────────
+# IMG 3 bug: "email for the Wilson job" dumped ALL jobs. Teach: scope to the one
+# client (client-filtered list) — the row carries poc_email.
+_C_CLIENT_EMAIL = [
+    ("what's the email for {c}", "en"), ("do you have the recipient email for {c}", "en"),
+    ("who do I send {c}'s invoice to", "en"), ("what's the contact email for {c}", "en"),
+    ("what email should the {c} invoice go to", "en"), ("{c} ka email address kya hai", "hi"),
+]
+_C_NO_EMAIL = [         # list, poc_email null
+    ("which clients don't have an email on file", "en"),
+    ("which clients are missing an email", "en"),
+    ("who doesn't have an email on file", "en"),
+    ("show me jobs with no contact email", "en"),
+    ("list clients without an email address", "en"),
+    ("which contacts are missing their email", "en"),
+    ("kis client ka email nahi hai", "hi"), ("kaunse jobs me email nahi hai", "hi"),
+    ("email nahi hai aise clients dikhao", "hi"),
+]
+_C_HAS_EMAIL = [        # list, poc_email not_null
+    ("which clients have an email on file", "en"),
+    ("show me jobs that have a contact email", "en"),
+    ("list clients with an email address", "en"),
+    ("who do I have emails for", "en"),
+    ("kis client ka email hai", "hi"), ("email wale jobs dikhao", "hi"),
+]
+
+# ── Area D — INVOICE DISPATCH: which bills sent / pending to raise ────────────
+# IMG 1: "payment reminder sent?" → list of what's gone out vs still pending.
+_D_SENT_LIST = [        # list, bill_sent yes
+    ("which invoices have I already sent", "en"), ("show me the invoices I've sent", "en"),
+    ("list the bills that have gone out", "en"), ("show me everything I've invoiced", "en"),
+    ("which clients have I billed already", "en"), ("kaunse invoice bhej diye", "hi"),
+]
+_D_NOTSENT_LIST = [     # list, bill_sent no
+    ("which invoices haven't gone out yet", "en"), ("show me invoices still to send", "en"),
+    ("which jobs still need invoicing", "en"), ("who am I yet to invoice", "en"),
+    ("list the bills pending to be sent", "en"), ("show me the invoices I still have to raise", "en"),
+    ("show me who still needs an invoice", "en"), ("which clients haven't been invoiced yet", "en"),
+    ("kaunse invoice bhejne baki hain", "hi"), ("kis kis ka invoice bhejna hai", "hi"),
+    ("abhi kiska bill nahi bheja", "hi"), ("bhejne wale invoice dikhao", "hi"),
+]
+_D_SENT_COUNT = [       # count, bill_sent yes
+    ("how many bills have gone out so far", "en"), ("how many invoices did I already raise", "en"),
+    ("what's the count of invoices sent out", "en"),
+]
+_D_NOTSENT_COUNT = [    # count, bill_sent no
+    ("how many invoices are still to go out", "en"), ("how many bills haven't I sent yet", "en"),
+    ("how many clients still need invoicing", "en"), ("kitne invoice bhejne reh gaye", "hi"),
+]
+_D_CLIENT_SENT = [      # per client, list, bill_sent yes
+    ("did I invoice {c}", "en"), ("have I billed {c} yet", "en"),
+    ("show me the invoices sent to {c}", "en"), ("has {c}'s invoice gone out", "en"),
+    ("{c} ko invoice bheja kya", "hi"),
+]
+
 
 def _plan(metric=None, column=None, filters=None, time_range=None,
           group_by=None, order=None, limit=None):
@@ -222,6 +371,59 @@ def _entries():
         for phrase, tr in _REL:
             yield "client_date_total", f"total billing for {c} {phrase}", P(metric="sum", column="fees", filters={"client_name": c}, time_range=tr), ["sum", "client", "date"], "en"
             yield "client_date_count", f"how many {c} jobs {phrase}", P(metric="count", filters={"client_name": c}, time_range=tr), ["count", "client", "date"], "en"
+
+    # ══ Area A — collections: who hasn't paid / owes / chase ═════════════
+    UNPAID = {"paid": "no"}
+    for q, l in _A_BARE_LIST:
+        yield "who_unpaid", q, P(filters=UNPAID), ["list", "status", "collections"], l
+    for q, l in _A_BARE_COUNT:
+        yield "how_many_owe", q, P(metric="count", filters=UNPAID), ["count", "status", "collections"], l
+    for q, l in _A_BARE_SUM:
+        yield "total_pending", q, P(metric="sum", column="fees", filters=UNPAID), ["sum", "status", "collections"], l
+    for q, l in _A_OWES_TOP:
+        yield "owes_most", q, P(metric="sum", column="fees", filters=UNPAID, group_by="client_name", order="desc", limit=1), ["group", "status", "collections"], l
+    for q, l in _A_OWES_RANK:
+        yield "owes_rank", q, P(metric="sum", column="fees", filters=UNPAID, group_by="client_name", order="desc"), ["group", "ranking", "collections"], l
+    for c in _CLIENTS:                       # billing clients only (you chase a client, not a brand)
+        for t, l in _A_CLIENT:
+            yield "client_chase", t.format(c=c), P(metric="sum", column="fees", filters={"client_name": c, "paid": "no"}), ["sum", "client", "status", "collections"], l
+
+    # ══ Area B — money buckets: earnings vs received vs outstanding ══════
+    for q, l in _B_TOTAL_ALL:
+        yield "earnings_all", q, P(metric="sum", column="fees"), ["sum", "bare", "earnings"], l
+    for q, l in _B_RECEIVED:
+        yield "received_all", q, P(metric="sum", column="fees", filters={"paid": "yes"}), ["sum", "status", "received"], l
+    for q, l in _B_OUTSTANDING:
+        yield "outstanding_all", q, P(metric="sum", column="fees", filters={"paid": "no"}), ["sum", "status", "outstanding"], l
+    for c in _CLIENTS:
+        for t, l in _B_CLIENT_EARNED:
+            yield "client_earned", t.format(c=c), P(metric="sum", column="fees", filters={"client_name": c}), ["sum", "client", "earnings"], l
+        for t, l in _B_CLIENT_RECEIVED:
+            yield "client_received", t.format(c=c), P(metric="sum", column="fees", filters={"client_name": c, "paid": "yes"}), ["sum", "client", "status", "received"], l
+        for t, l in _B_CLIENT_OWED:
+            yield "client_owed", t.format(c=c), P(metric="sum", column="fees", filters={"client_name": c, "paid": "no"}), ["sum", "client", "status", "outstanding"], l
+
+    # ══ Area C — contact / recipient lookup (poc_email) ═════════════════
+    for c in _CLIENTS:                       # you email a billing client, not a brand
+        for t, l in _C_CLIENT_EMAIL:
+            yield "email_for_client", t.format(c=c), P(filters={"client_name": c}), ["list", "client", "poc_email"], l
+    for q, l in _C_NO_EMAIL:
+        yield "no_email", q, P(filters={"poc_email": "null"}), ["list", "poc_email"], l
+    for q, l in _C_HAS_EMAIL:
+        yield "has_email", q, P(filters={"poc_email": "not_null"}), ["list", "poc_email"], l
+
+    # ══ Area D — invoice dispatch: sent / pending to raise ══════════════
+    for q, l in _D_SENT_LIST:
+        yield "sent_list", q, P(filters={"bill_sent": "yes"}), ["list", "bill_sent", "dispatch"], l
+    for q, l in _D_NOTSENT_LIST:
+        yield "notsent_list", q, P(filters={"bill_sent": "no"}), ["list", "bill_sent", "dispatch"], l
+    for q, l in _D_SENT_COUNT:
+        yield "sent_count", q, P(metric="count", filters={"bill_sent": "yes"}), ["count", "bill_sent", "dispatch"], l
+    for q, l in _D_NOTSENT_COUNT:
+        yield "notsent_count", q, P(metric="count", filters={"bill_sent": "no"}), ["count", "bill_sent", "dispatch"], l
+    for c in _CLIENTS:
+        for t, l in _D_CLIENT_SENT:
+            yield "client_sent_list", t.format(c=c), P(filters={"client_name": c, "bill_sent": "yes"}), ["list", "client", "bill_sent", "dispatch"], l
 
 
 def build_corpus(seed: int = 42):

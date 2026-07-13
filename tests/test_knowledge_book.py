@@ -297,3 +297,68 @@ class TestSynonymRetrieval:
         # "revenue" and "billing" should land on the same bare-total cluster
         hits = self.r.retrieve("overall revenue", k=3)
         assert hits and any("total" in h["question"].lower() or "billing" in h["question"].lower() or "revenue" in h["question"].lower() for h in hits)
+
+    def test_contraction_is_not_a_signal_token(self):
+        # "what's" is filler — the tokenizer keeps the apostrophe, so it must be
+        # stop-listed explicitly (plain "whats" won't catch it). If it leaks
+        # through it dominates every "what's ..." exemplar and drowns the intent.
+        from services.knowledge_book import _tokens
+        assert "what's" not in _tokens("what's due from Garnier")
+        assert _tokens("what's due from Garnier") == ["unpaid", "garnier"]
+
+
+class TestNewCoverageAreas:
+    """The four intents added from the 2026-07 WhatsApp transcripts. Each must be
+    represented AND retrievable by the natural phrasing that exposed the bug."""
+
+    def setup_method(self):
+        self.r = ExampleIndex()
+
+    def _plans(self, q, k=3):
+        return [h["plan"] for h in self.r.retrieve(q, k)]
+
+    # ── Area B — the headline bug: earnings != outstanding (IMG 2) ──────────
+    def test_total_earnings_is_unfiltered_sum_not_unpaid(self):
+        # "total earning from all jobs" must retrieve a SUM-with-NO-paid-filter
+        # exemplar — not an outstanding/unpaid one. This is the exact confusion
+        # in the transcript (₹75k "earnings" wrongly equated to the unpaid figure).
+        plans = self._plans("what is my total earning from all jobs")
+        assert any(p.get("metric") == "sum" and not (p.get("filters") or {}).get("paid")
+                   for p in plans), "earnings must map to an unfiltered sum"
+
+    def test_earnings_received_outstanding_reconcile(self):
+        # The three buckets are distinct and add up: received + outstanding = all.
+        allb = compute_answer(_plan(metric="sum", column="fees"), ROWS)["value"]
+        recv = compute_answer(_plan(metric="sum", column="fees", filters={"paid": "yes"}), ROWS)["value"]
+        outs = compute_answer(_plan(metric="sum", column="fees", filters={"paid": "no"}), ROWS)["value"]
+        assert recv + outs == allb and recv != allb and outs != allb
+
+    def test_received_maps_to_paid_sum(self):
+        plans = self._plans("how much money have I actually received")
+        assert any((p.get("filters") or {}).get("paid") == "yes" and p.get("metric") == "sum" for p in plans)
+
+    # ── Area A — collections: who hasn't paid (IMG 1) ───────────────────────
+    def test_who_hasnt_paid_retrieves_unpaid(self):
+        plans = self._plans("who hasn't paid me yet")
+        assert any((p.get("filters") or {}).get("paid") == "no" for p in plans)
+
+    def test_who_owes_most_is_grouped_ranking(self):
+        plans = self._plans("who owes me the most")
+        assert any(p.get("group_by") == "client_name" and (p.get("filters") or {}).get("paid") == "no"
+                   for p in plans)
+
+    # ── Area C — contact / recipient lookup, scoped to ONE client (IMG 3) ───
+    def test_email_for_client_scopes_to_that_client(self):
+        # The bug dumped ALL jobs; the exemplar must filter to the named client.
+        plans = self._plans("do you have the recipient email for Samsung India")
+        assert any((p.get("filters") or {}).get("client_name") for p in plans), \
+            "email-for-X must scope to that client, not list everything"
+
+    def test_missing_email_maps_to_poc_null(self):
+        plans = self._plans("which clients don't have an email on file")
+        assert any((p.get("filters") or {}).get("poc_email") == "null" for p in plans)
+
+    # ── Area D — invoice dispatch status (IMG 1: "payment reminder sent?") ───
+    def test_pending_to_invoice_maps_to_bill_sent_no(self):
+        plans = self._plans("which invoices haven't gone out yet")
+        assert any((p.get("filters") or {}).get("bill_sent") == "no" for p in plans)

@@ -28,7 +28,10 @@ _STOP = {
     "how", "many", "much", "the", "a", "an", "my", "me", "i", "do", "does", "did",
     "is", "are", "have", "has", "had", "of", "in", "on", "for", "to", "and", "or",
     "what", "whats", "show", "list", "give", "get", "all", "jobs", "job", "please",
-    "from", "by", "with",
+    "from", "by", "with", "still", "yet",
+    # contractions: the tokenizer keeps the apostrophe, so these are single tokens
+    # and must be stop-listed explicitly (plain "whats" above won't catch "what's").
+    "what's", "i've", "who's", "haven't", "hasn't", "don't", "doesn't", "isn't",
     # Hinglish function words (low signal)
     "ke", "ka", "ki", "hai", "hain", "hua", "hue", "se", "ko", "mein",
     "mera", "meri", "mujhe", "kaun", "kaunse", "ko",
@@ -46,11 +49,15 @@ _SYN = {
     # paid family
     "paid": "paid", "cleared": "paid", "received": "paid", "settled": "paid",
     "collected": "paid", "aaya": "paid", "aayi": "paid",
-    # value / total family
-    "total": "total", "sum": "total", "earnings": "total", "earning": "total",
-    "earned": "total", "earn": "total", "revenue": "total", "billing": "total",
-    "billed": "total", "kamai": "total", "kamaya": "total", "income": "total",
-    "made": "total", "worth": "total",
+    # money-value family — a distinct concept from the bare quantifier "total"
+    # (which also appears in COUNT questions like "total number of jobs"). Keeping
+    # them separate lets "total earning"/"revenue"/"kamai" retrieve SUM exemplars
+    # instead of tying with counts on the shared word "total".
+    "sum": "earnings", "earnings": "earnings", "earning": "earnings",
+    "earned": "earnings", "earn": "earnings", "revenue": "earnings",
+    "billing": "earnings", "billed": "earnings", "kamai": "earnings",
+    "kamaya": "earnings", "income": "earnings", "made": "earnings", "worth": "earnings",
+    "total": "total",
     # invoice / sent family
     "invoice": "invoice", "invoices": "invoice", "bill": "invoice", "bills": "invoice",
     "send": "sent", "sent": "sent", "bheja": "sent", "bheje": "sent",
