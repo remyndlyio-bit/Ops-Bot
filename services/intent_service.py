@@ -2851,6 +2851,18 @@ class IntentService:
         """Handle WhatsApp replies to the overdue-audit message.
         Accepts: 'paid <n>' / 'paid' / 'all paid' / 'paid all' / 'later' / 'skip'.
         Returns a response dict, or None if reply wasn't recognized."""
+        # A genuine reply to the audit nudge is short and imperative. Reject
+        # anything question-shaped BEFORE the loose 'paid' substring check below
+        # can fire on it — otherwise "Do these include paid and unpaid?" (a
+        # question about an unrelated earlier answer) matches "paid" and silently
+        # marks a job paid. This flag is a dangling background nudge the user may
+        # not even remember exists, so it must not hijack an ordinary sentence.
+        if "?" in message or re.search(
+            r"^\s*(do|does|did|is|are|was|were|can|could|would|should|why|what|when|which|who|how)\b",
+            msg_lower,
+        ):
+            return None
+
         # 'later' / 'remind later' — push the next nag out by stamping NOW().
         if msg_lower in ("later", "remind later", "remind me later", "next week", "not now"):
             ids = [p.get("id") for p in pending if p.get("id")]

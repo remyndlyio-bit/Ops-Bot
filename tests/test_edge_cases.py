@@ -939,3 +939,60 @@ class TestReminderDoesNotHijack:
         """When no sub-flow is active, 'skip' clears the reminders as before."""
         res = self._run("skip", {})
         assert res is not None and "skip" in res.get("response", "").lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Live-transcript bug (2026-07): a dangling overdue-audit flag silently marked
+# a job "paid" because "paid" in msg_lower matched the substring inside "Do
+# these include, paid and unpaid?" — a QUESTION about an earlier answer, not a
+# reply to the (invisible-to-the-user) audit nudge. No UPDATE may fire unless
+# the message actually reads like a reply.
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestAuditReplyDoesNotHijackQuestions:
+    AUDIT_PENDING = [{"id": "j1", "client_name": "Clink Films", "bill_no": "CLI-150526-01",
+                       "fees": 15000, "_audit_row": True}]
+
+    def _run(self, message):
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {}
+        with patch("services.intent_service.get_pending", return_value=self.AUDIT_PENDING), \
+             patch("services.intent_service.clear_pending"), \
+             patch("services.intent_service.remove_single"):
+            result = svc._handle_pending_reminder("u1", message)
+        return svc, result
+
+    def test_question_containing_paid_is_not_treated_as_confirmation(self):
+        """The exact production case: a clarifying question must fall through
+        (return None) and must NOT issue an UPDATE."""
+        svc, result = self._run("Do these include, paid and unpaid?")
+        assert result is None, f"Question was misread as an audit reply: {result}"
+        for call in svc.supabase.execute_sql.call_args_list:
+            sql = call.args[0].lower() if call.args else ""
+            assert "update" not in sql, f"A question triggered a DB write: {sql}"
+
+    @pytest.mark.parametrize("msg", [
+        "Do these include paid and unpaid?",
+        "Does this include paid invoices?",
+        "Is this the paid total?",
+        "What does paid mean here?",
+        "Why is this marked paid?",
+        "Which ones are paid?",
+    ])
+    def test_other_question_shapes_fall_through(self, msg):
+        svc, result = self._run(msg)
+        assert result is None, f"{msg!r} was treated as a reply: {result}"
+        assert not any("update" in (c.args[0].lower() if c.args else "")
+                       for c in svc.supabase.execute_sql.call_args_list)
+
+    def test_genuine_reply_still_marks_paid(self):
+        """Guard against over-correcting: a real one-word confirmation must
+        still work."""
+        svc, result = self._run("paid")
+        assert result is not None and result.get("operation") == "audit_paid"
+        assert any("update" in (c.args[0].lower() if c.args else "")
+                   for c in svc.supabase.execute_sql.call_args_list)
+
+    def test_genuine_numbered_reply_still_works(self):
+        svc, result = self._run("paid 1")
+        assert result is not None and result.get("operation") == "audit_paid"
