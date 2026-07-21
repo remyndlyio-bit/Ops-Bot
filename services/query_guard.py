@@ -23,6 +23,25 @@ from typing import Iterable, Tuple
 # ── message-side detectors (closed, schema-bounded vocabularies) ─────────────
 _UNPAID = r"unpaid|not\s+paid|pending|outstanding|overdue|owe[sd]?|owing|baki|baaki"
 _STATUS_RE = re.compile(rf"\b(?:{_UNPAID}|paid|cleared|received|settled)\b")
+
+# bill_sent (invoice dispatch) status — a SEPARATE qualifier from paid/unpaid.
+# "who am I yet to invoice" / "which invoices haven't gone out" must be
+# reflected by a bill_sent predicate; before this, the guard had NO vocabulary
+# for invoice-dispatch language at all, so a planner SQL that silently dropped
+# bill_sent sailed through ungated (confirmed live: "Who are you yet to send
+# the invoice?" returned all 4 jobs, 3 of which already had an invoice date).
+# Requires an invoice/bill NOUN near a dispatch-status VERB (not just either
+# alone) — "what's the invoice number for Wilson" must NOT trigger this, since
+# it has the noun but no dispatch verb.
+_INVOICE_NOUN = r"invoic(?:e|es|ed|ing)|bill(?:s|ed)?"
+_DISPATCH_VERB = (
+    r"sent|raised|gone\s+out|(?:still\s+)?pending|outstanding|yet\s+to|"
+    r"still\s+(?:need|have)\s+to|haven'?t|not\s+(?:yet\s+)?(?:sent|raised|gone|out)"
+)
+_DISPATCH_RE = re.compile(
+    rf"\b(?:{_INVOICE_NOUN})\b.{{0,25}}\b(?:{_DISPATCH_VERB})\b"
+    rf"|\b(?:{_DISPATCH_VERB})\b.{{0,25}}\b(?:{_INVOICE_NOUN})\b"
+)
 _VALUE_RE = re.compile(
     r"\b(?:how\s+much|total|sum|amount|earn(?:ed|ings)?|revenue|kamai|made|worth|owe[sd]?)\b")
 _COUNT_RE = re.compile(r"\b(?:how\s+many|number\s+of|count|kitne|kitni)\b")
@@ -109,6 +128,11 @@ def sql_reflects_message(message: str, sql: str,
     # "paid"/"unpaid" stated but no payment predicate in the SQL.
     if _STATUS_RE.search(m) and "paid" not in s:
         return False, "paid/unpaid qualifier not reflected in SQL"
+
+    # Invoice-dispatch status ("yet to invoice", "invoices sent") stated but no
+    # bill_sent predicate in the SQL — a DIFFERENT qualifier from paid/unpaid.
+    if _DISPATCH_RE.search(m) and "bill_sent" not in s:
+        return False, "invoice-sent qualifier not reflected in SQL"
 
     # A specific client named but no client filter in the SQL.
     client = _client_in_message(m, known_clients, use_heuristic_client)

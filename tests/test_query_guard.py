@@ -48,6 +48,54 @@ class TestGuardRejects:
         assert not ok
 
 
+class TestGuardRejectsDispatchStatus:
+    """P1 fix: the guard had NO vocabulary for invoice-dispatch language
+    ("yet to invoice", "invoices sent") — only paid/unpaid. Confirmed live:
+    'Who are you yet to send the invoice?' returned all 4 jobs unfiltered
+    (3 of which already had an invoice date) and nothing caught it."""
+
+    def test_the_exact_production_bug(self):
+        ok, why = chk("Who are you yet to send the invoice?", SELECT_ALL)
+        assert not ok and "invoice" in why.lower()
+
+    def test_invoices_havent_gone_out(self):
+        ok, _ = chk("which invoices haven't gone out yet", SELECT_ALL)
+        assert not ok
+
+    def test_invoices_sent_count_without_bill_sent(self):
+        ok, _ = chk("how many invoices have I sent?", COUNT_ALL)
+        assert not ok
+
+    def test_still_pending_to_send(self):
+        ok, _ = chk("invoices still pending to send", SELECT_ALL)
+        assert not ok
+
+    def test_with_bill_sent_filter_passes(self):
+        sql = SELECT_ALL.replace("LIMIT 25", "AND bill_sent IS NULL LIMIT 25")
+        assert chk("Who are you yet to send the invoice?", sql)[0]
+
+    def test_sent_count_with_bill_sent_filter_passes(self):
+        sql = COUNT_ALL + " AND LOWER(COALESCE(bill_sent,'')) IN ('true','t','yes','1','sent')"
+        assert chk("how many invoices have I sent?", sql)[0]
+
+
+class TestDispatchGuardNoFalsePositive:
+    """The invoice/bill NOUN alone (no dispatch verb) must NOT trigger — asking
+    for an invoice NUMBER or invoice DATE isn't asking about sent/pending
+    status, so requiring bill_sent there would be a false clarification."""
+
+    def test_invoice_number_lookup_not_flagged(self):
+        sql = "SELECT bill_no FROM public.job_entries WHERE user_id='u' AND client_name ILIKE '%wilson%'"
+        assert chk("what's the invoice number for Wilson", sql)[0]
+
+    def test_invoice_date_lookup_not_flagged(self):
+        sql = "SELECT invoice_date FROM public.job_entries WHERE user_id='u' AND client_name ILIKE '%nike%'"
+        assert chk("what's the invoice date for Nike", sql)[0]
+
+    def test_bare_list_not_flagged(self):
+        assert chk("show me all my jobs", SELECT_ALL)[0]
+
+
 class TestGuardAccepts:
     """Correct routes must pass untouched."""
 
