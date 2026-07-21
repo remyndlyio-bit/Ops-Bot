@@ -1136,6 +1136,17 @@ class IntentService:
                 return {"operation": "modify_disambiguate", "response": resp, "trigger_invoice": False, "invoke_data": {}}
             target_id = rows[0]["id"]
 
+        return self._apply_modify_update(user_id, message, target_id, field, value)
+
+    def _apply_modify_update(self, user_id: str, message: str, target_id: str, field: str, value) -> Dict:
+        """Normalise + write a single field/value change to a resolved row id, with
+        change-history appended to notes. Shared by _handle_modify_intent's own
+        row-resolution (pinned context / single client-filter match) AND
+        _handle_disambiguation_reply's numbered pick — a modify-triggered
+        disambiguation has no 'sql'/'updates' to replay, only a field+value
+        pending the user's row choice, so the reply handler must come back
+        through here rather than building its own (generic, delete-oriented)
+        targeted SQL."""
         # Normalize value
         if field == "paid":
             sv = str(value).strip().lower()
@@ -1310,20 +1321,23 @@ class IntentService:
             "due": ["due", "due_date", "due date", "duedate", "deadline"],
         }
         
-        # First check for exact column match
+        # First check for exact column match. Word-boundary, not bare substring —
+        # short column names like "id" are substrings of ordinary words ("paid",
+        # "unpaid" both contain "id"), so a raw `in` check made almost any status
+        # question misfire as a request for the "id" column.
         for col in columns:
             col_lower = col.lower().replace("_", " ").replace("-", " ")
             col_variants = [col_lower, col_lower.replace(" ", "")]
             for variant in col_variants:
-                if variant in msg_lower:
+                if re.search(rf"\b{re.escape(variant)}\b", msg_lower):
                     return col
-        
-        # Then check aliases
+
+        # Then check aliases (same word-boundary reasoning).
         for canonical, aliases in field_aliases.items():
             for alias in aliases:
-                if alias in msg_lower:
+                if re.search(rf"\b{re.escape(alias)}\b", msg_lower):
                     return canonical  # Return the canonical name, we'll match it to columns later
-        
+
         return None
 
     def _try_answer_from_context(self, user_id: str, message: str, columns: List[str]) -> Optional[str]:
@@ -5782,6 +5796,19 @@ class IntentService:
             return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         chosen_id = rows[idx].get("id", "")
+
+        # A modify-triggered disambiguation ("change Nike's fee to 30k" matched 2
+        # rows) has no 'sql'/'updates' to replay — it carries field+value, pending
+        # only the row choice. Route it through the same apply path
+        # _handle_modify_intent uses for its own single-match resolution, instead
+        # of falling into the generic (delete-oriented) targeted-SQL logic below,
+        # which silently no-ops on empty SQL and reports false success.
+        if pending.get("type") == "modify":
+            self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
+            return self._apply_modify_update(
+                user_id, message, chosen_id, pending.get("field"), pending.get("value")
+            )
+
         data_uid = pending.get("data_user_id", user_id).replace("'", "''")
         original_sql = pending.get("sql", "")
 
