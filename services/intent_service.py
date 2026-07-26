@@ -2338,6 +2338,26 @@ class IntentService:
                 "(the point-of-contact name — or 'cancel' to stop)"
             )
 
+        # 2b. POC email — needed to actually DELIVER the invoice.
+        # Previously only checked in the SEND_EMAIL branch, i.e. at send time,
+        # so "generate invoice for X" happily produced a PDF for a client with
+        # no email on file and the dead end only surfaced later. Worse, an
+        # unpaid job with no poc_email is invisible to payment chasing forever:
+        # supabase_service.fetch_reminder_targets requires
+        # `poc_email IS NOT NULL`, so those rows are silently skipped by every
+        # reminder tier. Catching it here is the last point where the user is
+        # still in context to supply it.
+        if not any(_present(r.get("poc_email")) for r in rows):
+            return _prompt(
+                {"awaiting_invoice_poc_email": True, "pending_poc_email_client": display_client,
+                 "pending_poc_email_user_id": data_user_id,
+                 "pending_poc_email_row_ids": [r["id"] for r in rows if r.get("id")]},
+                f"What email should {display_client}'s invoice go to?\n\n"
+                "Any address works (e.g. accounts@agency.com or their gmail). "
+                "Without it I can't email the invoice — and I can't chase the "
+                "payment for you later.\n\n(or 'cancel' to stop)"
+            )
+
         # 3. Job description — every line item needs one
         _missing = [r for r in rows if not _present(r.get("job_description_details"))]
         if _missing:
@@ -2498,6 +2518,88 @@ class IntentService:
         response = f"POC name saved as {poc_name}."
         self._store_conversation(user_id, message, response)
         return {"operation": "poc_saved", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_invoice_poc_email_response(self, user_id: str, message: str) -> Dict:
+        """Handle the POC email supplied to the pre-generation readiness gate.
+
+        Distinct from _handle_poc_email_response, which serves the SEND-time
+        flow (a PDF already exists and is emailed immediately). This one runs
+        BEFORE generation: save the address, then re-enter the invoice flow so
+        the gate re-runs and either asks for the next missing field or
+        generates.
+        """
+        user_mem = self.memory.get_user_memory(user_id)
+        pending_invoice = user_mem.get("pending_invoice", {})
+        client_name = user_mem.get("pending_poc_email_client", "")
+        data_user_id = user_mem.get("pending_poc_email_user_id", user_id)
+        row_ids = user_mem.get("pending_poc_email_row_ids", []) or []
+
+        self.memory.update_user_memory(user_id, {
+            "awaiting_invoice_poc_email": False,
+            "pending_poc_email_client": None,
+            "pending_poc_email_user_id": None,
+            "pending_poc_email_row_ids": None,
+        })
+
+        if message.strip().lower() in ("cancel", "stop", "abort", "nevermind"):
+            self.memory.update_user_memory(user_id, {"pending_invoice": None})
+            response = "No problem — invoice cancelled. Nothing was generated."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "invoice_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Accept an address embedded in a sentence ("send it to a@b.com").
+        _m = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", message)
+        email = (_m.group(0) if _m else message).strip()
+        if not self._is_valid_email(email):
+            # Re-arm and re-ask. Any domain is fine — only the format matters.
+            self.memory.update_user_memory(user_id, {
+                "awaiting_invoice_poc_email": True,
+                "pending_poc_email_client": client_name,
+                "pending_poc_email_user_id": data_user_id,
+                "pending_poc_email_row_ids": row_ids,
+            })
+            response = (
+                f"'{message.strip()}' doesn't look like an email address. "
+                "Please send it like name@company.com (or 'cancel' to stop)."
+            )
+            self._store_conversation(user_id, message, response)
+            return {"operation": "invoice_poc_email_retry", "response": response,
+                    "trigger_invoice": False, "invoice_data": {}}
+
+        safe_email = email.replace("'", "''")
+        safe_uid = str(data_user_id).replace("'", "''")
+        if row_ids:
+            id_list = ", ".join(f"'{str(r).replace(chr(39), chr(39) * 2)}'" for r in row_ids)
+            update_sql = (
+                f"UPDATE public.job_entries SET poc_email = '{safe_email}' "
+                f"WHERE user_id = '{safe_uid}' AND id IN ({id_list}) "
+                f"AND (\"isDeleted\" IS NOT TRUE)"
+            )
+        elif client_name:
+            safe_client = client_name.replace("'", "''")
+            update_sql = (
+                f"UPDATE public.job_entries SET poc_email = '{safe_email}' "
+                f"WHERE user_id = '{safe_uid}' "
+                f"AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%' "
+                f"OR production_house ILIKE '%{safe_client}%') "
+                f"AND (\"isDeleted\" IS NOT TRUE)"
+            )
+        else:
+            update_sql = None
+        if update_sql:
+            result = self.supabase.execute_sql(update_sql)
+            if result.get("ok"):
+                logger.info(f"[POC] Saved poc_email='{email}' for {client_name}")
+            else:
+                logger.warning(f"[POC] Failed to save poc_email: {result.get('error')}")
+
+        if pending_invoice:
+            return self._resume_invoice_flow(user_id, pending_invoice)
+
+        response = f"Saved {email} for {client_name}."
+        self._store_conversation(user_id, message, response)
+        return {"operation": "poc_email_saved", "response": response,
+                "trigger_invoice": False, "invoice_data": {}}
 
     def _prompt_bank_details_format(self, user_id: str, message: str) -> Dict:
         """Ask the user to send all bank details in a single structured message."""
@@ -2744,6 +2846,7 @@ class IntentService:
                 "awaiting_client_billing", "awaiting_poc_name", "awaiting_name_change",
                 "awaiting_link_id", "awaiting_modify_field", "awaiting_compound_response",
                 "awaiting_invoice_address", "awaiting_job_description",
+                "awaiting_invoice_poc_email",
             )
         )
         if _active_subflow:
@@ -3203,6 +3306,10 @@ class IntentService:
                             "pending_poc_client":         None,
                             "pending_poc_user_id":        None,
                             "pending_poc_row_ids":        None,
+                            "awaiting_invoice_poc_email": False,
+                            "pending_poc_email_client":   None,
+                            "pending_poc_email_user_id":  None,
+                            "pending_poc_email_row_ids":  None,
                             "awaiting_poc_email":         False,
                             "poc_email_client":           None,
                             "awaiting_job_input":         False,
@@ -3272,7 +3379,7 @@ class IntentService:
                         "awaiting_poc_name", "awaiting_bank_details", "awaiting_name_change",
                         "awaiting_modify_field", "pending_disambiguation",
                         "awaiting_invoice_address", "awaiting_job_description",
-                        "awaiting_link_id",
+                        "awaiting_link_id", "awaiting_invoice_poc_email",
                     )
                     _is_idle = (
                         not any(user_mem.get(k) for k in _idle_blockers)
@@ -3447,6 +3554,7 @@ class IntentService:
                 "awaiting_send_confirmation": "a yes/no confirmation to send the invoice over email",
                 "awaiting_client_billing":   "client billing details (name, address, GST)",
                 "awaiting_poc_name":         "a POC name to address the invoice to",
+                "awaiting_invoice_poc_email": "the client's email address for the invoice",
                 "awaiting_bank_details":     "the user's own bank details",
                 "awaiting_name_change":      "the user's new display name",
             }
@@ -3498,6 +3606,11 @@ class IntentService:
             # 0b1.8. Check if user is providing POC name for an invoice
             if user_mem.get("awaiting_poc_name"):
                 return self._handle_poc_name_response(user_id, message)
+
+            # 0b1.8a. POC email supplied to the pre-generation readiness gate
+            # (distinct from awaiting_poc_email, which is the send-time flow).
+            if user_mem.get("awaiting_invoice_poc_email"):
+                return self._handle_invoice_poc_email_response(user_id, message)
 
             # 0b1.9. Check if user is providing their business address for the invoice (#2)
             if user_mem.get("awaiting_invoice_address"):

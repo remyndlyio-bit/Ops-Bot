@@ -482,12 +482,14 @@ class TestBankHardGuard:
 
 class TestInvoiceReadinessGate:
     """_invoice_readiness_check is the mandatory-fields gate: it returns a prompt
-    for the FIRST missing required field (billing, POC, job description, bank,
-    address), in order, and None only when the invoice is complete."""
+    for the FIRST missing required field (billing, POC name, POC email, job
+    description, bank, address), in order, and None only when the invoice is
+    complete."""
 
     COMPLETE_ROW = {
         "id": "r1", "client_name": "Spotify", "client_billing_details": "Spotify India",
-        "poc_name": "karan", "job_description_details": "2 master films english VO",
+        "poc_name": "karan", "poc_email": "karan@spotify.com",
+        "job_description_details": "2 master films english VO",
         "job_date": "2026-03-04", "fees": 10000,
     }
     INVOICE = {"client_name": "Spotify", "month": "March", "year": 2026}
@@ -537,6 +539,138 @@ class TestInvoiceReadinessGate:
         # Both billing AND bank missing → billing is asked first.
         r = self._check(self._svc({"client_billing_details": ""}, bank=False))
         assert "billing" in r["response"].lower() and "bank" not in r["response"].lower()
+
+    # ── POC email gate ────────────────────────────────────────────────────
+    # Added 2026-07. Previously poc_email was only checked in the SEND_EMAIL
+    # branch, so "generate invoice for X" produced a PDF for a client with no
+    # email and the dead end surfaced only at send time. Worse: an unpaid job
+    # with no poc_email is invisible to every reminder tier
+    # (fetch_reminder_targets requires poc_email IS NOT NULL), so the payment
+    # silently never gets chased.
+
+    def test_missing_poc_email_blocks_generation(self):
+        r = self._check(self._svc({"poc_email": ""}))
+        assert r is not None, "invoice generated for a client with no email on file"
+        assert "email" in r["response"].lower()
+        assert r["trigger_invoice"] is False
+
+    def test_missing_poc_email_null_also_blocks(self):
+        r = self._check(self._svc({"poc_email": None}))
+        assert r is not None and "email" in r["response"].lower()
+
+    def test_poc_email_literal_none_string_blocks(self):
+        # _present() treats the string "None" as absent — a real shape that
+        # shows up when a null round-trips through str().
+        r = self._check(self._svc({"poc_email": "None"}))
+        assert r is not None and "email" in r["response"].lower()
+
+    def test_poc_name_asked_before_poc_email(self):
+        r = self._check(self._svc({"poc_name": "", "poc_email": ""}))
+        assert "addressed to" in r["response"].lower()
+
+    def test_poc_email_asked_before_job_description(self):
+        r = self._check(self._svc({"poc_email": "", "job_description_details": ""}))
+        assert "email" in r["response"].lower()
+        assert "description" not in r["response"].lower()
+
+    def test_gate_does_not_restrict_to_corporate_domains(self):
+        """Any address is acceptable — a freelancer's client may well use gmail.
+        The prompt must not imply otherwise, and a gmail address must satisfy
+        the gate."""
+        assert self._check(self._svc({"poc_email": "karan@gmail.com"})) is None
+        r = self._check(self._svc({"poc_email": ""}))
+        assert "gmail" in r["response"].lower(), "prompt should signal any address is fine"
+
+
+class TestInvoicePocEmailHandler:
+    """_handle_invoice_poc_email_response — the reply to the pre-generation
+    email gate. Distinct from _handle_poc_email_response (the send-time flow
+    that emails an already-generated PDF)."""
+
+    def _svc(self, mem=None):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.supabase = MagicMock(); svc.memory = MagicMock()
+        base = {
+            "pending_invoice": {"client_name": "Spotify", "month": "March", "year": 2026},
+            "pending_poc_email_client": "Spotify",
+            "pending_poc_email_user_id": "u1",
+            "pending_poc_email_row_ids": ["r1", "r2"],
+        }
+        base.update(mem or {})
+        svc.memory.get_user_memory.return_value = base
+        svc.supabase.execute_sql.return_value = {"ok": True, "rows": []}
+        svc._resume_invoice_flow = MagicMock(return_value={"operation": "resumed", "response": "ok"})
+        return svc
+
+    def _updates(self, svc):
+        return [c.args[0] for c in svc.supabase.execute_sql.call_args_list
+                if c.args and c.args[0].strip().upper().startswith("UPDATE")]
+
+    @pytest.mark.parametrize("email", [
+        "karan@gmail.com",          # free provider — must be accepted
+        "accounts@agency.com",
+        "first.last+inv@gmail.com",  # plus-addressing
+        "a@b.co.in",
+    ])
+    def test_any_valid_email_accepted_and_saved(self, email):
+        svc = self._svc()
+        result = svc._handle_invoice_poc_email_response("u1", email)
+        upd = self._updates(svc)
+        assert len(upd) == 1 and email in upd[0]
+        assert "poc_email" in upd[0]
+        assert result["operation"] == "resumed", "must re-enter the invoice flow"
+
+    def test_email_extracted_from_a_sentence(self):
+        svc = self._svc()
+        svc._handle_invoice_poc_email_response("u1", "send it to karan@gmail.com please")
+        assert "karan@gmail.com" in self._updates(svc)[0]
+
+    def test_scopes_update_to_the_pending_row_ids(self):
+        svc = self._svc()
+        svc._handle_invoice_poc_email_response("u1", "karan@gmail.com")
+        sql = self._updates(svc)[0]
+        assert "'r1'" in sql and "'r2'" in sql
+
+    def test_falls_back_to_client_match_when_no_row_ids(self):
+        svc = self._svc({"pending_poc_email_row_ids": []})
+        svc._handle_invoice_poc_email_response("u1", "karan@gmail.com")
+        sql = self._updates(svc)[0]
+        assert "ILIKE" in sql.upper() and "spotify" in sql.lower()
+
+    def test_malformed_email_rearms_and_does_not_write(self):
+        svc = self._svc()
+        result = svc._handle_invoice_poc_email_response("u1", "karan@notanemail")
+        assert result["operation"] == "invoice_poc_email_retry"
+        assert self._updates(svc) == []
+        rearmed = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
+                   if c.args[1].get("awaiting_invoice_poc_email")]
+        assert rearmed, "must re-arm so the next message is still read as the email"
+        assert rearmed[-1]["pending_poc_email_row_ids"] == ["r1", "r2"], "context must survive the retry"
+
+    @pytest.mark.parametrize("msg", ["cancel", "stop", "abort", "nevermind"])
+    def test_cancel_aborts_invoice_without_writing(self, msg):
+        svc = self._svc()
+        result = svc._handle_invoice_poc_email_response("u1", msg)
+        assert result["operation"] == "invoice_cancelled"
+        assert self._updates(svc) == []
+        svc._resume_invoice_flow.assert_not_called()
+
+    def test_sql_quote_escaped(self):
+        svc = self._svc({"pending_poc_email_row_ids": [],
+                         "pending_poc_email_client": "O'Brien"})
+        svc._handle_invoice_poc_email_response("u1", "a@b.com")
+        assert "o''brien" in self._updates(svc)[0].lower()
+
+    def test_clears_awaiting_state_on_success(self):
+        svc = self._svc()
+        svc._handle_invoice_poc_email_response("u1", "karan@gmail.com")
+        cleared = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
+                   if "awaiting_invoice_poc_email" in c.args[1]]
+        assert cleared and cleared[0]["awaiting_invoice_poc_email"] is False
 
 
 class TestAddressUpdateCommand:
