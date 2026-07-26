@@ -3,6 +3,7 @@ import json
 import httpx
 from typing import List, Dict, Optional
 from utils.logger import logger
+from utils.telemetry import note_llm_call
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemini-2.5-flash"
@@ -100,6 +101,10 @@ class GeminiService:
                 payload["temperature"] = generation_config["temperature"]
             if generation_config.get("responseMimeType") == "application/json":
                 payload["response_format"] = {"type": "json_object"}
+        # WP-0 telemetry: count every real network call, whether it succeeds,
+        # errors, or returns an unexpected shape below — the point is "how
+        # many round-trips did this turn cost", not "how many succeeded".
+        note_llm_call()
         try:
             with httpx.Client(timeout=30.0) as client:
                 response = client.post(

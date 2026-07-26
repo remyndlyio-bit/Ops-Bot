@@ -33,6 +33,7 @@ from services.response_synthesis import build_clean_payload, build_field_answer_
 from utils.memory_service import MemoryService
 from utils.pending_reminders import get_pending, clear_pending, remove_single
 from utils.logger import logger
+from utils.telemetry import Turn
 from typing import Dict, List, Optional
 import json
 import os
@@ -384,6 +385,34 @@ def _generate_jobs_excel(rows: list, user_id: str) -> str:
     except Exception as _pdf_err:
         logger.warning(f"[EXCEL] PDF sister write failed (xlsx/csv still usable): {_pdf_err}")
     return path
+
+
+def _flow_machine_v2_enabled_for(user_id: str) -> bool:
+    """FLOW_MACHINE_V2 accepts two shapes, so the same env var covers both a
+    hard global switch and a canary rollout without a DB round-trip:
+
+      FLOW_MACHINE_V2=true                 -> on for every user
+      FLOW_MACHINE_V2=751256859,919876543  -> on ONLY for these user_ids
+                                               (comma-separated, whitespace
+                                               tolerant) — the WP-0 canary
+                                               cohort. Anything else -> off.
+
+    Deliberately NOT reusing supabase.is_user_allowed() (the beta-gate
+    allowlist table): that table's semantics are "who may use the bot at
+    all", a different concern from "who gets the new dispatch code", and
+    piggybacking would add a DB call to the hot path for a decision an env
+    var already makes for free.
+    """
+    raw = (os.getenv("FLOW_MACHINE_V2", "") or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if low in ("1", "true", "yes", "on"):
+        return True
+    if low in ("0", "false", "no", "off"):
+        return False
+    canary_ids = {u.strip() for u in raw.split(",") if u.strip()}
+    return user_id in canary_ids
 
 
 class IntentService:
@@ -3131,6 +3160,17 @@ class IntentService:
         return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def process_request(self, user_id: str, message: str) -> Dict:
+        """Public entry point — wraps _process_request_impl with WP-0
+        telemetry (turn_ms, llm_calls, fallback rate) so every later work
+        package has a baseline to beat. The implementation is unchanged;
+        this wrapper only observes it."""
+        with Turn(user_id) as t:
+            result = self._process_request_impl(user_id, message)
+            t.operation = result.get("operation")
+            t.response_text = result.get("response") or ""
+            return result
+
+    def _process_request_impl(self, user_id: str, message: str) -> Dict:
         """
         Main handler: keyword-based branches for reminder/invoice/overdue;
         then LLM query plan → validate → resolve time → execute → format.
@@ -3278,7 +3318,7 @@ class IntentService:
             # Read/write intents shadow-only (telemetry); SMALL_TALK / FEATURE_QUESTION
             # / UNKNOWN are owned by v2 for instant on-brand replies.
             try:
-                _v2_enabled = os.getenv("FLOW_MACHINE_V2", "").strip().lower() in ("1", "true", "yes", "on")
+                _v2_enabled = _flow_machine_v2_enabled_for(user_id)
             except Exception:
                 _v2_enabled = False
             # Lift the verdict out of the v2 block so the legacy INVOICE_CHECK
