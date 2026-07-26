@@ -181,7 +181,19 @@ Table: public.job_entries
 - client_billing_details (text): billing instructions or special terms for this client.
 - fees (integer): amount in rupees.
 - advance (numeric), added_3rd_party_cut (numeric).
-- bill_no (text), bill_sent (text), invoice_date (date): when the invoice was sent to the client, paid (text): billing status.
+- bill_no (text): the invoice number. AUTO-ASSIGNED WHEN THE JOB IS CREATED, so every
+  row has one — its presence does NOT mean an invoice was raised or sent. Never infer
+  invoice status from bill_no.
+- bill_sent (text): whether the invoice has actually been sent to the client. Truthy =
+  'Yes'/'true'/'t'/'1'/'sent'; NULL, blank or anything else means NOT sent.
+- invoice_date (date): the date the invoice was sent. NULL = no invoice has gone out.
+  Set together with bill_sent, so the two agree.
+- paid (text): whether the CLIENT HAS PAID. Truthy = 'Yes'/'true'/'t'/'1'/'paid';
+  NULL, blank or anything else means UNPAID. This is PAYMENT status, NOT billing or
+  invoice status — a job can be invoiced (bill_sent = yes) and still unpaid, and it can
+  be paid without an invoice ever having been sent. Never use paid to answer a question
+  about whether an invoice was raised/sent, and never use bill_sent to answer a question
+  about payment.
 - payment_date (date): when payment was received.
 - poc_email (text), poc_name (text): contact.
 - first_reminder_sent, second_reminder_sent, third_reminder_sent (timestamptz).

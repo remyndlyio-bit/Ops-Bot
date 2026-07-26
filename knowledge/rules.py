@@ -34,8 +34,21 @@ RULES = [
      "\"biggest\" / \"top\" / \"largest\" client → group by client, SUM(fees), order desc, "
      "limit 1. \"by revenue\" = billed; if they say \"paid the most\", filter paid = yes."),
     ("invoice_sent_is_bill_sent",
-     "\"invoice sent\" / \"billed\" / \"invoice bheja\" → bill_sent = yes. "
+     "\"invoice sent\" / \"invoice raised\" / \"invoice bheja\" → bill_sent = yes. "
      "\"invoice generated\" is a different action, not a query."),
+    ("billed_is_ambiguous_read_the_shape",
+     "\"bill / billed / billing\" has TWO meanings — decide from the sentence shape, "
+     "never from the word alone. (a) MONEY when the question asks for an amount: "
+     "\"how much have I billed X\", \"total billing\", \"what did I bill in March\" → "
+     "SUM(fees), and do NOT add a bill_sent filter. (b) INVOICE DISPATCH when the "
+     "question asks whether an invoice went out: \"have I billed X yet\", \"which "
+     "clients have I billed\", \"who am I yet to bill\" → bill_sent, and do NOT sum "
+     "fees. A how-much question is always (a); a yes/no or which-ones question paired "
+     "with \"yet\" / \"already\" / \"sent\" / \"gone out\" is always (b)."),
+    ("payment_is_not_dispatch",
+     "paid and bill_sent are INDEPENDENT. \"Has X paid?\" is paid; \"have I invoiced "
+     "X?\" is bill_sent. Never answer one with the other, and never require both "
+     "unless the question states both (e.g. \"invoiced but not yet paid\")."),
     ("list_only_when_asked",
      "Only return a row list when the user says \"show\" / \"list\" / \"which\". Otherwise a "
      "value/count question gets a number."),
@@ -62,8 +75,13 @@ GLOSSARY = {
     "milna baki": "paid = no", "aana baki": "paid = no",
     "paid": "paid = yes", "cleared": "paid = yes", "received": "paid = yes",
     "aaya": "paid = yes", "aayi": "paid = yes", "mil gaya": "paid = yes",
-    "invoice sent": "bill_sent = yes", "billed": "bill_sent = yes",
+    "invoice sent": "bill_sent = yes", "invoice raised": "bill_sent = yes",
     "invoice bheja": "bill_sent = yes", "invoice bheje": "bill_sent = yes",
+    # "billed" is deliberately NOT a single mapping — it is ambiguous. Give both
+    # readings with the sentence shape that selects each (see the
+    # billed_is_ambiguous_read_the_shape rule above).
+    "how much have I billed X": "SUM(fees) for X — an amount, no bill_sent filter",
+    "have I billed X yet": "bill_sent for X — a dispatch check, do not sum fees",
     "kaam": "job", "kitne logon ko": "COUNT(DISTINCT client)",
     "biggest client": "group by client, SUM(fees), top 1",
     "average fee": "AVG(fees)",

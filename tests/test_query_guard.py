@@ -115,6 +115,40 @@ class TestPendingMeansUnpaidNotUnsent:
         )
 
 
+class TestSharedDispatchDetector:
+    """mentions_invoice_dispatch() is the ONE dispatch vocabulary, shared by
+    this guard and the KnowledgeBook retriever (which uses it to tell the money
+    sense of "billed" from the dispatch sense). Keeping it single-sourced is the
+    point — three copies of "what does dispatch language look like" is how the
+    paid/bill_sent semantics drifted apart in the first place."""
+
+    @pytest.mark.parametrize("msg", [
+        "have I billed Nike yet",
+        "did I invoice Star Studios yet",
+        "has Nike been invoiced yet",
+        "who am I yet to invoice",
+        "which invoices haven't gone out",
+        "how many invoices have I sent",
+    ])
+    def test_dispatch_questions_detected(self, msg):
+        from services.query_guard import mentions_invoice_dispatch
+        assert mentions_invoice_dispatch(msg), f"{msg!r} not recognised as dispatch"
+
+    @pytest.mark.parametrize("msg,why", [
+        ("how much have I billed Nike", "money"),
+        ("total billing this year", "money"),
+        ("has Nike paid yet", "payment"),
+        ("I haven't been paid yet for the Nike invoice", "payment"),
+        ("has the payment for the invoice come yet", "payment"),
+        ("show me pending invoices", "unpaid"),
+        ("list outstanding invoices", "unpaid"),
+        ("what's the invoice number for Wilson", "field lookup"),
+    ])
+    def test_non_dispatch_questions_not_detected(self, msg, why):
+        from services.query_guard import mentions_invoice_dispatch
+        assert not mentions_invoice_dispatch(msg), f"{msg!r} wrongly read as dispatch ({why})"
+
+
 class TestDispatchGuardNoFalsePositive:
     """The invoice/bill NOUN alone (no dispatch verb) must NOT trigger — asking
     for an invoice NUMBER or invoice DATE isn't asking about sent/pending

@@ -22,6 +22,7 @@ import math
 from typing import Dict, List, Optional
 
 from knowledge.rules import render as render_rules
+from services.query_guard import mentions_invoice_dispatch
 
 _EXAMPLES_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "knowledge", "examples.jsonl")
 _STOP = {
@@ -55,8 +56,12 @@ _SYN = {
     # instead of tying with counts on the shared word "total".
     "sum": "earnings", "earnings": "earnings", "earning": "earnings",
     "earned": "earnings", "earn": "earnings", "revenue": "earnings",
-    "billing": "earnings", "billed": "earnings", "kamai": "earnings",
+    "kamai": "earnings",
     "kamaya": "earnings", "income": "earnings", "made": "earnings", "worth": "earnings",
+    # NOTE: "billing"/"billed" are NOT listed here — they are ambiguous
+    # (money vs invoice-dispatch) and are resolved from the whole message in
+    # _tokens() via _BILL_WORDS. Adding them back here would re-break
+    # "have I billed X yet".
     "total": "total",
     # invoice / sent family
     "invoice": "invoice", "invoices": "invoice", "bill": "invoice", "bills": "invoice",
@@ -68,12 +73,31 @@ _SYN = {
 }
 
 
+# "bill / billed / billing" is the one genuinely ambiguous family: MONEY in
+# "how much have I billed X", DISPATCH in "have I billed X yet". A per-token
+# synonym map can't see that, so both used to collapse to `earnings` and the
+# dispatch question retrieved rupee-total exemplars. We resolve it from the
+# whole message first, reusing query_guard's dispatch vocabulary rather than
+# defining a third copy of it.
+# Only the two that previously collapsed to `earnings`. "bill"/"bills" stay as
+# nouns meaning invoice (their existing _SYN mapping) — not touched here.
+_BILL_WORDS = {"billed", "billing"}
+
+
 def _tokens(text: str) -> List[str]:
+    dispatch = mentions_invoice_dispatch(text)
     out = []
     for t in re.findall(r"[a-z0-9']+", (text or "").lower()):
         if t in _STOP:
             continue
+        if t in _BILL_WORDS:
+            # dispatch sense -> the same token "sent" that invoice-sent
+            # exemplars carry; money sense -> the existing "earnings" bucket.
+            out.append("sent" if dispatch else "earnings")
+            continue
         out.append(_SYN.get(t, t))
+    if dispatch and "sent" not in out:
+        out.append("sent")
     return out
 
 

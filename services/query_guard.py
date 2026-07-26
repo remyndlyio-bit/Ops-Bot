@@ -48,7 +48,30 @@ _DISPATCH_VERB = (
 _DISPATCH_RE = re.compile(
     rf"\b(?:{_INVOICE_NOUN})\b.{{0,25}}\b(?:{_DISPATCH_VERB})\b"
     rf"|\b(?:{_DISPATCH_VERB})\b.{{0,25}}\b(?:{_INVOICE_NOUN})\b"
+    # "have I billed Nike YET" / "invoiced them yet" — the trailing "yet" is what
+    # makes this a dispatch check rather than the money reading of "billed"
+    # ("how much have I billed Nike"). Tight window and an explicit past-tense
+    # verb so "haven't been paid yet for the Nike invoice" (a PAYMENT question)
+    # doesn't get dragged in.
+    rf"|\b(?:billed|invoiced)\b(?:\s+\w+){{0,3}}\s+yet\b"
+    # "did I invoice Star Studios yet" — bare verb, so it needs the explicit
+    # subject to stay distinct from "has the payment for the invoice come yet",
+    # which is a PAYMENT question that a loose `invoice.*yet` would swallow.
+    rf"|\b(?:did|have|has)\s+(?:i|we|you)\s+(?:already\s+)?(?:bill|invoice)(?:ed)?\b"
+    rf"(?:\s+\w+){{0,3}}\s+yet\b"
 )
+
+
+def mentions_invoice_dispatch(message: str) -> bool:
+    """True if the message asks about invoice DISPATCH status (sent / not sent)
+    rather than money or payment.
+
+    Public so the KnowledgeBook retriever can share this one vocabulary instead
+    of defining a third copy of "what does dispatch language look like" —
+    services/knowledge_book.py uses it to decide whether "bill/billed/billing"
+    is the money sense or the dispatch sense.
+    """
+    return bool(_DISPATCH_RE.search(" " + (message or "").lower().strip() + " "))
 _VALUE_RE = re.compile(
     r"\b(?:how\s+much|total|sum|amount|earn(?:ed|ings)?|revenue|kamai|made|worth|owe[sd]?)\b")
 _COUNT_RE = re.compile(r"\b(?:how\s+many|number\s+of|count|kitne|kitni)\b")

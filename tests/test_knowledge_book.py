@@ -307,6 +307,114 @@ class TestSynonymRetrieval:
         assert _tokens("what's due from Garnier") == ["unpaid", "garnier"]
 
 
+class TestBilledAmbiguity:
+    """"bill / billed / billing" means MONEY in "how much have I billed X" and
+    INVOICE DISPATCH in "have I billed X yet". Both used to collapse to the
+    `earnings` token — "yet" is a stopword and "how much" is too — so the two
+    questions tokenised IDENTICALLY and the dispatch question retrieved rupee
+    -total exemplars. Resolved from the whole message via
+    query_guard.mentions_invoice_dispatch."""
+
+    def setup_method(self):
+        self.r = ExampleIndex()
+
+    def _plans(self, q, k=3):
+        return [h["plan"] for h in self.r.retrieve(q, k)]
+
+    def test_the_two_readings_tokenise_differently(self):
+        from services.knowledge_book import _tokens
+        money = _tokens("how much have I billed Nike")
+        dispatch = _tokens("have I billed Nike yet")
+        assert money != dispatch, "the money and dispatch readings still collapse together"
+        assert "earnings" in money and "sent" not in money
+        assert "sent" in dispatch and "earnings" not in dispatch
+
+    @pytest.mark.parametrize("q", [
+        "have I billed Nike yet",
+        "did I invoice Star Studios yet",
+    ])
+    def test_dispatch_reading_retrieves_bill_sent(self, q):
+        assert any((p.get("filters") or {}).get("bill_sent") for p in self._plans(q)), \
+            f"{q!r} retrieved no bill_sent exemplar"
+
+    @pytest.mark.parametrize("q", [
+        "how much have I billed Nike",
+        "total billing this year",
+    ])
+    def test_money_reading_retrieves_sum_not_bill_sent(self, q):
+        plans = self._plans(q)
+        assert any(p.get("metric") == "sum" for p in plans), f"{q!r} lost the money reading"
+        assert not any((p.get("filters") or {}).get("bill_sent") for p in plans), \
+            f"{q!r} wrongly retrieved a dispatch exemplar"
+
+    def test_bill_noun_still_means_invoice(self):
+        """Only 'billed'/'billing' were ambiguous — 'bill'/'bills' as nouns keep
+        their existing invoice mapping and must not be swept into this."""
+        from services.knowledge_book import _tokens, _SYN
+        assert _SYN.get("bill") == "invoice" and _SYN.get("bills") == "invoice"
+        assert "invoice" in _tokens("show me my bills")
+
+    def test_ambiguous_words_not_hardcoded_back_into_syn(self):
+        """Guard against a future edit re-adding them to the per-token map,
+        which would silently re-break the dispatch reading."""
+        from services.knowledge_book import _SYN
+        assert "billed" not in _SYN and "billing" not in _SYN
+
+
+class TestRulesResolveBilledContradiction:
+    """rules.py used to assert BOTH '"billing" -> SUM(fees)' and
+    '"billed" -> bill_sent = yes', splitting on morphology alone with no
+    guidance on which reading applies when."""
+
+    def test_bare_billed_no_longer_maps_to_one_meaning(self):
+        assert "billed" not in kb_rules.GLOSSARY, (
+            "bare 'billed' is ambiguous — it must not have a single glossary mapping"
+        )
+
+    def test_both_readings_are_documented(self):
+        block = kb_rules.render().lower()
+        assert "how much have i billed" in block
+        assert "have i billed x yet" in block
+
+    def test_disambiguation_rule_present(self):
+        ids = [r[0] for r in kb_rules.RULES]
+        assert "billed_is_ambiguous_read_the_shape" in ids
+
+    def test_paid_and_bill_sent_declared_independent(self):
+        ids = [r[0] for r in kb_rules.RULES]
+        assert "payment_is_not_dispatch" in ids
+
+
+class TestSchemaDescriptionSemantics:
+    """The schema block fed to the planner used to lump four columns onto one
+    run-on line and describe `paid` as "billing status" — telling the model
+    that payment and billing are the same thing."""
+
+    def _schema(self):
+        from services.supabase_service import SCHEMA_DESCRIPTION
+        return SCHEMA_DESCRIPTION
+
+    def test_paid_is_not_called_billing_status(self):
+        assert "billing status" not in self._schema().lower()
+
+    def test_paid_described_as_payment_and_marked_independent(self):
+        s = self._schema().lower()
+        assert "paid (text): whether the client has paid" in s
+        assert "not billing or" in s or "not billing/" in s
+
+    def test_bill_no_warns_it_is_auto_assigned(self):
+        """Every row has a bill_no from creation, so its presence says nothing
+        about whether an invoice was raised — the exact confusion behind the
+        'Invoice No: WIL-… / Invoice Date: Not sent' card."""
+        s = self._schema().lower()
+        assert "auto-assigned" in s and "does not mean" in s
+
+    def test_each_status_column_has_its_own_gloss(self):
+        s = self._schema()
+        for col in ("bill_no (text)", "bill_sent (text)", "invoice_date (date)", "paid (text)"):
+            assert col in s, f"{col} lost its own description line"
+
+
 class TestNewCoverageAreas:
     """The four intents added from the 2026-07 WhatsApp transcripts. Each must be
     represented AND retrievable by the natural phrasing that exposed the bug."""
