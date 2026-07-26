@@ -2,6 +2,7 @@ from services.gemini_service import GeminiService
 from services.resend_email_service import ResendEmailService
 from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS, _COLUMN_SCHEMA_FROM_ENV
 from utils.date_utils import month_name_to_number, number_to_month_name
+from services.answer_ledger import answer_scope_question, build_entry, build_entry_from_sql, append_entry
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
 from services.query_planner import execute_query_plan
@@ -4711,6 +4712,22 @@ class IntentService:
                                 "invoice_data": invoice_data
                             }
 
+            # 4a.5. AnswerLedger (WP-1): a scope-clarifying question about the
+            # PREVIOUS answer ("Do these include, paid and unpaid?") answered
+            # deterministically from the exact filters/time_range that answer
+            # was computed under — no SQL, no LLM call. Checked BEFORE
+            # _try_answer_from_context below: that path's field-detection can
+            # match a stray word in a scope question (e.g. "paid" inside
+            # "unpaid") and misread it as a request to read a job's paid
+            # column, which is the wrong kind of answer entirely for a
+            # question about a PRIOR AGGREGATE's scope.
+            _ledger_answer = answer_scope_question(message, self.memory.get_user_memory(user_id))
+            if _ledger_answer:
+                logger.info("[LEDGER] Answered scope question from AnswerLedger (no SQL/LLM)")
+                response = _ledger_answer
+                self._store_conversation(user_id, message, response)
+                return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             # 4b. Follow-up: answer from last result row via AI synthesis (no raw field:value)
             followup_answer = self._try_answer_from_context(user_id, message, columns)
             if followup_answer:
@@ -5303,10 +5320,17 @@ class IntentService:
                 ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
                 ctx["last_sql"] = sanitized_sql
                 self.memory.update_user_memory(user_id, {"uscf_context": ctx})
+                # WP-1 AnswerLedger: the exact Path-3 plan that produced this
+                # SQL, so a later scope question ("do these include paid and
+                # unpaid?") can be answered from the same filters that
+                # actually ran — never a hand-reconstructed guess.
+                _ledger_plan = plan_result.get("plan") if isinstance(plan_result, dict) else None
                 if len(rows) > 4:
                     excel_path = _generate_jobs_excel(rows, data_user_id)
                     response = f"Found {len(rows)} results — here's a spreadsheet with all of them."
                     logger.info(f"[QUERY] Excel generated: {excel_path} ({len(rows)} rows)")
+                    append_entry(self.memory, user_id, build_entry(
+                        question=message, plan=_ledger_plan, rows=rows, response=response))
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
                 if _is_full_job_row(rows[0]) and not _is_history_q:
@@ -5321,6 +5345,8 @@ class IntentService:
                         response = _format_aggregate_fallback(payload, message)
                     else:
                         logger.info(f"[QUERY] Success: {len(rows)} rows, response length={len(response)}")
+                append_entry(self.memory, user_id, build_entry(
+                    question=message, plan=_ledger_plan, rows=rows, response=response))
 
         except Exception as e:
             logger.error(f"[QUERY_FAIL] Exception for user {user_id}, msg='{message[:60]}': {e}", exc_info=True)
@@ -5535,6 +5561,8 @@ class IntentService:
             resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
             if not resp or not resp.strip():
                 resp = _format_aggregate_fallback(payload, message)
+            append_entry(self.memory, user_id, build_entry_from_sql(
+                question=message, sql=routed.sql, rows=rows, response=resp, render_kind="AGGREGATE"))
             return _finish(resp)
 
         # ── ROWS: full job rows → cards / spreadsheet / synthesiser ──
@@ -5543,14 +5571,21 @@ class IntentService:
         if len(rows) > 4 and _is_full_job_row(rows[0]):
             excel_path = _generate_jobs_excel(rows, data_user_id)
             resp = f"Found {len(rows)} results — here's a spreadsheet with all of them."
+            append_entry(self.memory, user_id, build_entry_from_sql(
+                question=message, sql=routed.sql, rows=rows, response=resp, render_kind="ROWS"))
             self._store_conversation(user_id, message, resp)
             return {"operation": "query", "response": resp, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
         if _is_full_job_row(rows[0]):
-            return _finish(_format_job_cards(rows))
+            resp = _format_job_cards(rows)
+            append_entry(self.memory, user_id, build_entry_from_sql(
+                question=message, sql=routed.sql, rows=rows, response=resp, render_kind="ROWS"))
+            return _finish(resp)
         payload = build_clean_payload(rows, "select")
         resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
         if not resp or not resp.strip():
             resp = _format_aggregate_fallback(payload, message)
+        append_entry(self.memory, user_id, build_entry_from_sql(
+            question=message, sql=routed.sql, rows=rows, response=resp, render_kind="ROWS"))
         return _finish(resp)
 
     def _keyword_sql_fallback(self, message: str, user_id: str) -> Optional[str]:
