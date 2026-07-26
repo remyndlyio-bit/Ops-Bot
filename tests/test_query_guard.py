@@ -79,6 +79,42 @@ class TestGuardRejectsDispatchStatus:
         assert chk("how many invoices have I sent?", sql)[0]
 
 
+class TestPendingMeansUnpaidNotUnsent:
+    """Regression: the first cut of the dispatch guard listed bare "pending" and
+    "outstanding" as dispatch verbs. In this domain they mean UNPAID, so the
+    guard started demanding a bill_sent predicate for correct paid-filtered SQL
+    — which killed the deterministic unpaid_list route for these phrasings and
+    sent them to a clarification instead of an answer."""
+
+    @pytest.mark.parametrize("msg", [
+        "show me pending invoices",
+        "list outstanding invoices",
+    ])
+    def test_pending_outstanding_accept_unpaid_sql(self, msg):
+        assert chk(msg, SELECT_UNPAID)[0], f"{msg!r} wrongly required a bill_sent filter"
+
+    def test_which_invoices_pending_not_rejected_for_dispatch(self):
+        """'which invoices are still pending' IS separately rejected — but by the
+        loose client-name heuristic reading the question word "which" as a client
+        (it's absent from _NOT_CLIENT), NOT by the dispatch rule. That heuristic
+        is deliberately broad and only costs a deferral to the planner, never a
+        wrong answer, and Layer 2 disables it. Asserting on the REASON keeps this
+        test honest about what was actually fixed here."""
+        ok, why = chk("which invoices are still pending", SELECT_UNPAID)
+        assert "invoice-sent" not in why, f"still rejected for dispatch: {why}"
+
+    def test_outstanding_on_bills_accepts_unpaid_sum(self):
+        assert chk("how much is outstanding on my bills", SUM_UNPAID)[0]
+
+    @pytest.mark.parametrize("msg", ["show me pending invoices", "list outstanding invoices"])
+    def test_router_still_serves_these_deterministically(self, msg):
+        from services.query_router import route_common_query
+        r = route_common_query(msg, "u1")
+        assert r is not None and r.name == "unpaid_list", (
+            f"{msg!r} lost its deterministic route -> {r and r.name}"
+        )
+
+
 class TestDispatchGuardNoFalsePositive:
     """The invoice/bill NOUN alone (no dispatch verb) must NOT trigger — asking
     for an invoice NUMBER or invoice DATE isn't asking about sent/pending

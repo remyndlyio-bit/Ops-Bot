@@ -581,6 +581,22 @@ class SupabaseService:
             logger.error(f"Supabase update_poc_email_for_client error: {e}")
             return {"ok": False, "error": str(e)}
 
+    # Canonical "this row is not paid" predicate. MUST stay in step with
+    # services/query_router.PAID_FALSE and services/columns/paid.py — a row the
+    # query pipeline calls PAID must never be chased for payment here.
+    #
+    # The previous version — `paid IS NULL OR paid::text NOT IN
+    # ('true','t','yes','1')` — was wrong twice over: no LOWER(), and 'paid'
+    # missing from the truthy list. Postgres string comparison is
+    # case-sensitive, so 'Yes' (the exact literal every mark-paid path in
+    # intent_service writes) is NOT IN ('...','yes','...') and the row came
+    # back as unpaid. Net effect: jobs the user had just marked paid still
+    # surfaced as "past due" and were queued for client-facing reminders.
+    _PAID_FALSE_SQL = (
+        "(paid IS NULL OR TRIM(COALESCE(paid,'')) = '' "
+        "OR LOWER(paid::text) NOT IN ('true','t','yes','1','paid'))"
+    )
+
     def fetch_reminder_targets(
         self,
         approaching_days: int = 7,
@@ -601,7 +617,7 @@ class SupabaseService:
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
         WHERE ("isDeleted" IS NOT TRUE)
-          AND (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
+          AND {self._PAID_FALSE_SQL}
           AND poc_email IS NOT NULL AND TRIM(poc_email::text) != ''
           AND first_reminder_sent IS NULL
           AND job_date IS NOT NULL
@@ -648,7 +664,7 @@ class SupabaseService:
                (job_date + (%s::int || ' days')::interval)::date AS due_date
         FROM public.job_entries
         WHERE ("isDeleted" IS NOT TRUE)
-          AND (paid IS NULL OR paid::text NOT IN ('true','t','yes','1'))
+          AND {self._PAID_FALSE_SQL}
           AND job_date IS NOT NULL
           AND (job_date + (%s::int || ' days')::interval)::date < CURRENT_DATE
           {user_clause}

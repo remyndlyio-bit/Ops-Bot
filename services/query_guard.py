@@ -34,8 +34,15 @@ _STATUS_RE = re.compile(rf"\b(?:{_UNPAID}|paid|cleared|received|settled)\b")
 # alone) — "what's the invoice number for Wilson" must NOT trigger this, since
 # it has the noun but no dispatch verb.
 _INVOICE_NOUN = r"invoic(?:e|es|ed|ing)|bill(?:s|ed)?"
+# NB: bare "pending"/"outstanding" are deliberately NOT dispatch verbs. In this
+# domain they overwhelmingly mean UNPAID ("pending invoices", "outstanding
+# bills"), not un-sent. Listing them here made the guard demand a bill_sent
+# predicate for correct paid-filtered SQL, which killed the deterministic
+# unpaid_list route for those phrasings and pushed them to a clarification.
+# Only "pending TO SEND"-style constructions are unambiguously about dispatch.
 _DISPATCH_VERB = (
-    r"sent|raised|gone\s+out|(?:still\s+)?pending|outstanding|yet\s+to|"
+    r"sent|raised|gone\s+out|yet\s+to|"
+    r"pending\s+to\s+(?:be\s+)?(?:send|sent|go|raise|raised)|"
     r"still\s+(?:need|have)\s+to|haven'?t|not\s+(?:yet\s+)?(?:sent|raised|gone|out)"
 )
 _DISPATCH_RE = re.compile(
