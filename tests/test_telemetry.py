@@ -13,15 +13,20 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from utils import telemetry
-from utils.telemetry import Turn, start_turn, note_llm_call, current_llm_calls, is_fallback_response
+from utils.telemetry import (
+    Turn, start_turn, note_llm_call, current_llm_calls, is_fallback_response,
+    note_route, current_route, log_turn,
+)
 
 
 @pytest.fixture(autouse=True)
 def _reset_counter():
     """Contextvars persist across tests in the same process unless reset."""
     telemetry._llm_call_count.set(None)
+    telemetry._current_route.set(None)
     yield
     telemetry._llm_call_count.set(None)
+    telemetry._current_route.set(None)
 
 
 class TestLlmCallCounter:
@@ -107,6 +112,100 @@ class TestReentrantTurn:
                         note_llm_call()
         assert len(calls) == 1
         assert calls[0]["llm_calls"] == 3
+
+
+class TestRouteTagging:
+    """WP-5 item 3: measure the AnswerLedger fast-path's real share. A
+    contextvar (not a Turn attribute set by the caller after the fact,
+    and NOT an IntentService instance attribute — that's a process-wide
+    singleton shared across concurrent requests, so instance state would
+    race between two users' messages) so code deep inside process_request
+    (the ledger short-circuit) can tag the route without threading a Turn
+    reference all the way down."""
+
+    def test_no_route_outside_a_turn(self):
+        assert current_route() is None
+
+    def test_note_route_visible_within_the_turn(self):
+        with Turn("u1"):
+            note_route("ledger")
+            assert current_route() == "ledger"
+
+    def test_route_reaches_the_log_line(self):
+        calls = []
+        with patch("utils.telemetry.log_turn", side_effect=lambda **kw: calls.append(kw)):
+            with Turn("u1") as t:
+                note_route("ledger")
+                t.operation = "query"
+        assert calls[0]["route"] == "ledger"
+
+    def test_reset_between_separate_turns(self):
+        with Turn("u1"):
+            note_route("ledger")
+        with Turn("u1"):
+            assert current_route() is None, "a new turn must not inherit the previous turn's route"
+
+    def test_direct_turn_route_override_takes_precedence(self):
+        """Turn.route can still be set directly (e.g. by a future call site
+        that already has the Turn object in scope) and wins over the
+        contextvar."""
+        calls = []
+        with patch("utils.telemetry.log_turn", side_effect=lambda **kw: calls.append(kw)):
+            with Turn("u1") as t:
+                note_route("ledger")
+                t.route = "explicit_override"
+        assert calls[0]["route"] == "explicit_override"
+
+    def test_no_route_noted_logs_unclassified_in_the_rendered_line(self):
+        calls = []
+        with patch.object(telemetry, "log_turn", wraps=log_turn) as spy:
+            with patch.object(telemetry.logger, "info") as mock_info:
+                with Turn("u1") as t:
+                    t.operation = "query"
+        line = mock_info.call_args.args[0]
+        assert "route=unclassified" in line
+
+    def test_nested_turn_route_still_reported_by_outer(self):
+        """A route noted inside a nested (resumed-flow) continuation must
+        still surface on the outer turn's single log line — same reentrancy
+        contract as llm_calls."""
+        calls = []
+        with patch("utils.telemetry.log_turn", side_effect=lambda **kw: calls.append(kw)):
+            with Turn("u1"):
+                with Turn("u1"):
+                    note_route("ledger")
+        assert len(calls) == 1
+        assert calls[0]["route"] == "ledger"
+
+
+class TestLlmCallsAlertThreshold:
+    def test_alert_logged_when_over_threshold(self):
+        with patch.object(telemetry.logger, "warning") as mock_warn:
+            log_turn(user_id="u1", turn_ms=100, operation="query", fallback=False, llm_calls=3)
+        alert_calls = [c for c in mock_warn.call_args_list if "TELEMETRY_ALERT" in c.args[0]]
+        assert len(alert_calls) == 1
+
+    def test_no_alert_at_exactly_the_threshold(self):
+        with patch.object(telemetry.logger, "warning") as mock_warn:
+            log_turn(user_id="u1", turn_ms=100, operation="query", fallback=False, llm_calls=2)
+        alert_calls = [c for c in mock_warn.call_args_list if "TELEMETRY_ALERT" in c.args[0]]
+        assert alert_calls == []
+
+    def test_no_alert_when_llm_calls_unknown(self):
+        with patch.object(telemetry.logger, "warning") as mock_warn:
+            log_turn(user_id="u1", turn_ms=100, operation="query", fallback=False, llm_calls=None)
+        alert_calls = [c for c in mock_warn.call_args_list if "TELEMETRY_ALERT" in c.args[0]]
+        assert alert_calls == []
+
+    def test_alert_fires_through_the_real_turn_end_to_end(self):
+        with patch.object(telemetry.logger, "warning") as mock_warn:
+            with Turn("u1") as t:
+                note_llm_call()
+                note_llm_call()
+                note_llm_call()
+                t.operation = "query"
+        alert_calls = [c for c in mock_warn.call_args_list if "TELEMETRY_ALERT" in c.args[0]]
+        assert len(alert_calls) == 1
 
 
 class TestFallbackDetection:

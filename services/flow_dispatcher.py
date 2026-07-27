@@ -21,6 +21,7 @@ from services.flow_machine import FlowMachine
 from services.flows import get_flow
 from services.response_formatter import unsupported_feature_phrase
 from utils.logger import logger
+from utils.telemetry import note_route
 
 # Sentinel returned when the dispatcher decides NOT to handle a verdict in v2
 # and the caller should fall through to the legacy code path.
@@ -60,6 +61,7 @@ def dispatch_idle(
         except Exception as e:
             logger.warning(f"[V2_DISPATCH] _detect_small_talk error: {e}")
             canned = None
+        note_route("v2_leaf")  # WP-5 item 3: v2-owned leaf paths never touch the LLM synthesis pipeline
         if canned:
             intent_service._store_conversation(user_id, raw, canned)
             return {
@@ -84,6 +86,7 @@ def dispatch_idle(
     # genuinely off-topic / low confidence — exactly what the catalog was
     # built for.
     if intent in ("FEATURE_QUESTION", "UNKNOWN"):
+        note_route("v2_leaf")
         try:
             reply = intent_service.gemini.answer_feature_question(
                 raw, conversation_history=conversation_history

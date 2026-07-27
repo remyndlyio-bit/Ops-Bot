@@ -27,6 +27,16 @@ _llm_call_count: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
     "llm_call_count", default=None
 )
 
+# WP-5 item 3 ("measure the ledger fast-path share"): which coarse path
+# answered this turn. A contextvar, NOT an attribute on IntentService or the
+# Turn object — IntentService is a process-wide singleton shared across
+# concurrent requests, so instance state would race between two users'
+# messages; a contextvar is isolated per logical turn the same way
+# _llm_call_count already is.
+_current_route: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_route", default=None
+)
+
 # Substrings that mark a reply as a generic fallback rather than a real
 # answer. Kept here (not imported from intent_service) so telemetry has no
 # dependency on the module it's instrumenting — avoids import cycles and lets
@@ -53,6 +63,7 @@ def start_turn() -> None:
     is currently active."""
     if _llm_call_count.get() is None:
         _llm_call_count.set(0)
+        _current_route.set(None)
 
 
 def note_llm_call() -> None:
@@ -67,6 +78,18 @@ def current_llm_calls() -> Optional[int]:
     return _llm_call_count.get()
 
 
+def note_route(route: str) -> None:
+    """Call from wherever a turn's answer is finalised (e.g. the WP-1
+    AnswerLedger scope-question short-circuit) to tag the coarse path taken.
+    Last write wins within a turn — a turn that falls through a fast path and
+    then does real work should report the path that actually answered it."""
+    _current_route.set(route)
+
+
+def current_route() -> Optional[str]:
+    return _current_route.get()
+
+
 def is_fallback_response(response_text: str) -> bool:
     if not response_text:
         return False
@@ -74,24 +97,45 @@ def is_fallback_response(response_text: str) -> bool:
     return any(marker in low for marker in _FALLBACK_MARKERS)
 
 
+# WP-5 (ASSISTANT_PLAN.md) acceptance gate: "llm_calls histogram <= 2 at
+# p99" — anything above this on a single turn is worth a loud, grep-able
+# signal in production logs rather than waiting for a dashboard rollup.
+_LLM_CALLS_ALERT_THRESHOLD = 2
+
+
 def log_turn(*, user_id: str, turn_ms: float, operation: Optional[str],
              fallback: bool, llm_calls: Optional[int] = None,
+             route: Optional[str] = None,
              error: Optional[str] = None, **extra) -> None:
     """Emit the one structured line WP-0 dashboards are built from. Extra
-    fields (verdict_intent, verdict_confidence, route, ...) are added by later
-    work packages without changing this function's contract.
+    fields (verdict_intent, verdict_confidence, ...) are added by later work
+    packages without changing this function's contract.
 
     llm_calls is passed in explicitly by the caller (Turn reads it from
     current_llm_calls() before resetting the counter) rather than this
     function reaching into contextvar state itself — keeps log_turn a pure
     function of its arguments, which is what makes it straightforward to
-    assert against in tests instead of needing to fake ambient state."""
+    assert against in tests instead of needing to fake ambient state.
+
+    route (WP-5 item 3, "measure the ledger fast-path share"): the coarse
+    path this turn took — "ledger" (WP-1 zero-SQL/zero-LLM answer), "v2_leaf"
+    (FlowMachine v2 owned small-talk/feature/unknown), or None (everything
+    else — router/planner/mutation/flow paths not yet individually tagged).
+    Optional and best-effort; omitting it changes nothing else about the line.
+    """
     try:
+        if llm_calls is not None and llm_calls > _LLM_CALLS_ALERT_THRESHOLD:
+            logger.warning(
+                f"[TELEMETRY_ALERT] llm_calls={llm_calls} exceeds the WP-5 "
+                f"target (<= {_LLM_CALLS_ALERT_THRESHOLD}/turn) — "
+                f"user={user_id} operation={operation} turn_ms={turn_ms:.0f}"
+            )
         parts = [
             f"turn_ms={turn_ms:.0f}",
             f"llm_calls={llm_calls if llm_calls is not None else '?'}",
             f"operation={operation or 'none'}",
             f"fallback={fallback}",
+            f"route={route or 'unclassified'}",
         ]
         for k, v in extra.items():
             parts.append(f"{k}={v}")
@@ -132,6 +176,13 @@ class Turn:
         self.user_id = user_id
         self.operation: Optional[str] = None
         self.response_text: str = ""
+        # Optional direct override — set this if the caller already knows
+        # the route without going through note_route()'s contextvar. When
+        # left None (the normal case), __exit__ falls back to
+        # current_route(), which is how a route noted deep inside
+        # process_request (e.g. the AnswerLedger short-circuit, which has no
+        # access to this Turn object) actually reaches the log line.
+        self.route: Optional[str] = None
         self._t0 = 0.0
         self._is_nested = False
 
@@ -157,6 +208,7 @@ class Turn:
                     operation=self.operation,
                     fallback=is_fallback_response(self.response_text),
                     llm_calls=llm_calls,
+                    route=self.route if self.route is not None else current_route(),
                     error=(f"{exc_type.__name__}: {exc}" if exc else None),
                 )
             except Exception:
@@ -164,4 +216,5 @@ class Turn:
             # Reset so a later, genuinely unrelated turn on a reused
             # thread/greenlet doesn't inherit this turn's leftover count.
             _llm_call_count.set(None)
+            _current_route.set(None)
         return False  # never swallow the original exception

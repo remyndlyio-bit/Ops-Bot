@@ -41,7 +41,7 @@ from services.response_synthesis import (
 from utils.memory_service import MemoryService
 from utils.pending_reminders import get_pending, clear_pending, remove_single
 from utils.logger import logger
-from utils.telemetry import Turn
+from utils.telemetry import Turn, note_route
 from typing import Dict, List, Optional
 import json
 import os
@@ -4759,6 +4759,7 @@ class IntentService:
             _ledger_answer = answer_scope_question(message, self.memory.get_user_memory(user_id))
             if _ledger_answer:
                 logger.info("[LEDGER] Answered scope question from AnswerLedger (no SQL/LLM)")
+                note_route("ledger")  # WP-5 item 3: measure this fast path's real share
                 response = _ledger_answer
                 self._store_conversation(user_id, message, response)
                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}

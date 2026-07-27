@@ -21,7 +21,32 @@ class GeminiService:
         self.api_key = None
         self.model_name = DEFAULT_MODEL
         self._initialized = False
+        self._http_client: Optional[httpx.Client] = None
         self._ensure_initialized()
+
+    def _get_http_client(self) -> httpx.Client:
+        """WP-5 (ASSISTANT_PLAN.md) latency fix. GeminiService is a
+        process-lifetime singleton (constructed once, inside IntentService's
+        own singleton construction in main.py) — but every call used to open
+        `with httpx.Client(...) as client:`, paying a fresh TCP connection +
+        TLS handshake on EVERY OpenRouter round-trip despite the service
+        living for the whole process. A chat turn makes 1-4+ of these calls
+        (classify, plan, synthesize, retries). One persistent Client reuses
+        pooled, keep-alive connections across all of them."""
+        if self._http_client is None:
+            self._http_client = httpx.Client(timeout=30.0)
+        return self._http_client
+
+    def close(self) -> None:
+        """Release the pooled connection(s). Not wired into any shutdown
+        hook — this process's GeminiService lives for the process's whole
+        lifetime by design — provided for completeness / test teardown."""
+        if self._http_client is not None:
+            try:
+                self._http_client.close()
+            except Exception:
+                pass
+            self._http_client = None
 
     @classmethod
     def _load_features_doc(cls) -> str:
@@ -61,23 +86,24 @@ class GeminiService:
 
     def _verify(self) -> bool:
         try:
-            with httpx.Client(timeout=10.0) as client:
-                response = client.post(
-                    OPENROUTER_URL,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.model_name,
-                        "messages": [{"role": "user", "content": "hi"}],
-                        "max_tokens": 1,
-                    },
-                )
-                if response.status_code == 200:
-                    logger.info(f"Verified OpenRouter model: {self.model_name}")
-                    return True
-                logger.error(f"OpenRouter verification failed: {response.status_code} - {response.text[:200]}")
+            client = self._get_http_client()
+            response = client.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model_name,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
+                timeout=10.0,
+            )
+            if response.status_code == 200:
+                logger.info(f"Verified OpenRouter model: {self.model_name}")
+                return True
+            logger.error(f"OpenRouter verification failed: {response.status_code} - {response.text[:200]}")
         except Exception as e:
             logger.error(f"OpenRouter verification error: {e}")
         return False
@@ -106,23 +132,23 @@ class GeminiService:
         # many round-trips did this turn cost", not "how many succeeded".
         note_llm_call()
         try:
-            with httpx.Client(timeout=30.0) as client:
-                response = client.post(
-                    OPENROUTER_URL,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                result = response.json()
-                if "choices" in result and len(result["choices"]) > 0:
-                    choice = result["choices"][0]
-                    if "message" in choice and "content" in choice["message"]:
-                        return choice["message"]["content"]
-                logger.error(f"OpenRouter unexpected response: {json.dumps(result)[:500]}")
-                return None
+            client = self._get_http_client()
+            response = client.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if "choices" in result and len(result["choices"]) > 0:
+                choice = result["choices"][0]
+                if "message" in choice and "content" in choice["message"]:
+                    return choice["message"]["content"]
+            logger.error(f"OpenRouter unexpected response: {json.dumps(result)[:500]}")
+            return None
         except httpx.HTTPStatusError as e:
             logger.error(f"OpenRouter HTTP error: {e.response.status_code} - {e.response.text[:500]}")
             raise
