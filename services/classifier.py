@@ -62,6 +62,23 @@ class Verdict(TypedDict):
     # When set, it tells the dispatcher how to combine the new intent with the
     # active flow (push/pop, treat as response, cancel, etc.).
     flow_compatible: Optional[FlowCompat]
+    # ── ASSISTANT_PLAN.md WP-2 additions ────────────────────────────────
+    # references_last_answer: true when the message is asking about the
+    # SCOPE or composition of the answer the bot JUST gave ("do these
+    # include paid and unpaid?", "is that only Nike?") rather than a new
+    # data request. Distinct from `historical` (which means "a PAST value",
+    # e.g. "what was the fee BEFORE we changed it") — a references_last_answer
+    # message wants clarification about a value already on screen, not a
+    # different value from the past. The two are not mutually exclusive but
+    # usually are.
+    references_last_answer: bool
+    # resolved_query: for a READ_QUERY/READ_AGGREGATE whose entities are
+    # INHERITED from context ("what about this month?", "the first one"),
+    # the fully resolved shape the planner can consume directly —
+    # {"client_name": str|None, "time_range": dict|None, "metric_hint":
+    # "sum"|"count"|"avg"|"list"|None}. None when the message is
+    # self-contained (nothing to inherit) or not a READ intent.
+    resolved_query: Optional[Dict[str, Any]]
 
 
 def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Dict[str, Any]]) -> str:
@@ -133,6 +150,34 @@ def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Di
     )
 
 
+def _ledger_block(ledger_entries: Optional[List[Any]]) -> str:
+    """Render the last up-to-3 AnswerLedger entries as compact one-liners —
+    NEVER raw JSON (same discipline as KnowledgeBook's examples_block: a raw
+    JSON blob in the prompt gets echoed/garbled by the model instead of
+    taught from). Each entry carries the SCOPE (filters + time_range) the
+    prior answer was actually computed under, straight from the plan/SQL
+    that ran — this is what lets the classifier recognise "do these include
+    paid and unpaid?" as a question about a SPECIFIC prior number instead of
+    guessing from the raw text alone.
+
+    Returns "" when there's no ledger yet (nothing to render).
+    """
+    if not ledger_entries:
+        return ""
+    lines = ["RECENT ANSWERS (most recent last — what the bot just told the user):"]
+    for e in ledger_entries[-3:]:
+        scope = e.scope or {}
+        filters = scope.get("filters") or {}
+        f_str = ", ".join(f"{k}={v}" for k, v in filters.items()) or "none"
+        tr = scope.get("time_range")
+        tr_str = "all-time" if not tr else str((tr or {}).get("value"))[:60]
+        lines.append(
+            f'  - "{e.question[:80]}" -> {e.kind} value={e.value!r} '
+            f"filters=[{f_str}] time_range={tr_str}"
+        )
+    return "\n".join(lines) + "\n\n"
+
+
 def _build_prompt(
     message: str,
     schema_summary: str,
@@ -140,6 +185,7 @@ def _build_prompt(
     conversation_history: Optional[List[Dict[str, str]]] = None,
     current_flow: Optional[str] = None,
     current_context: Optional[Dict[str, Any]] = None,
+    ledger_entries: Optional[List[Any]] = None,
 ) -> str:
     recent = ""
     if conversation_history:
@@ -162,6 +208,8 @@ def _build_prompt(
         '  "flow_compatible": null  (no active flow)\n'
     )
 
+    ledger_block = _ledger_block(ledger_entries)
+
     return (
         "You are Remyndly's intent classifier. The user just sent a WhatsApp/Telegram message.\n"
         "Return ONLY a JSON Verdict matching the schema below. No prose, no markdown.\n\n"
@@ -177,6 +225,23 @@ def _build_prompt(
         '                 ("what was the EARLIER fee on X", "the amount BEFORE we changed it"),\n'
         '  "bulk":        true ONLY if user said "all" / "every" with a write intent\n'
         '                 ("delete all Nike jobs", "mark all paid"),\n'
+        '  "references_last_answer": true ONLY if the message asks about the SCOPE or\n'
+        '                 composition of the answer the bot JUST gave — "do these include\n'
+        '                 paid and unpaid?", "is that only Nike?", "does that include this\n'
+        '                 month?" — not a request for a different/new number. Requires a\n'
+        "                 RECENT ANSWER to be present below; false if there isn't one.\n"
+        '                 Distinct from "historical": historical asks about a PAST value\n'
+        '                 ("what was the fee BEFORE"), this asks about a value ALREADY SHOWN.\n'
+        '  "resolved_query": for a READ_QUERY/READ_AGGREGATE whose entities are INHERITED\n'
+        '                 from context ("what about this month?", "the first one", "and last\n'
+        '                 quarter?") — the FULLY RESOLVED filters, combining what the message\n'
+        "                 states with what carries over from the RECENT ANSWERS / RECENT CHAT\n"
+        "                 below. Shape:\n"
+        '                   {"client_name": string|null, "time_range": object|null,\n'
+        '                    "metric_hint": "sum"|"count"|"avg"|"list"|null}\n'
+        "                 null when the message is already self-contained (nothing to\n"
+        "                 inherit) or the intent isn't READ_QUERY/READ_AGGREGATE. NEVER\n"
+        "                 invent a client or date that isn't stated or carried over.\n"
         f"{flow_field_line}"
         "}\n\n"
         "INTENT DEFINITIONS:\n"
@@ -255,6 +320,7 @@ def _build_prompt(
         f"{feat_block}"
         f"SCHEMA SUMMARY:\n{schema_summary}\n\n"
         f"{recent}"
+        f"{ledger_block}"
         f"{flow_block}"
         f"USER MESSAGE: {message}\n\n"
         "Your JSON Verdict:"
@@ -293,6 +359,11 @@ def _parse_verdict(raw: str, message: str) -> Optional[Verdict]:
         flow_compatible = fc_up if fc_up in VALID_FLOW_COMPAT else None
     else:
         flow_compatible = None
+
+    resolved_query = data.get("resolved_query")
+    if not isinstance(resolved_query, dict):
+        resolved_query = None
+
     return Verdict(
         intent=intent,       # type: ignore[arg-type]
         parameters=params,
@@ -301,6 +372,8 @@ def _parse_verdict(raw: str, message: str) -> Optional[Verdict]:
         historical=bool(data.get("historical")),
         bulk=bool(data.get("bulk")),
         flow_compatible=flow_compatible,   # type: ignore[arg-type]
+        references_last_answer=bool(data.get("references_last_answer")),
+        resolved_query=resolved_query,
     )
 
 
@@ -311,6 +384,7 @@ def classify(
     schema_summary: str = "",
     current_flow: Optional[str] = None,
     current_context: Optional[Dict[str, Any]] = None,
+    ledger_entries: Optional[List[Any]] = None,
 ) -> Optional[Verdict]:
     """
     Single Gemini call that returns a Verdict.
@@ -320,6 +394,11 @@ def classify(
     Pass `current_flow` (e.g. "INVOICE_AWAIT_SEND_CONFIRM") + `current_context`
     when the user is in a v2-owned flow; the classifier will then set
     `flow_compatible` so the dispatcher can route correctly.
+
+    Pass `ledger_entries` (services.answer_ledger.LedgerEntry list, most
+    recent last — e.g. answer_ledger.get_entries(user_mem)) so the classifier
+    can set `references_last_answer` / `resolved_query` (WP-2). Omit and
+    those fields simply come back False/None — never required.
     """
     if not message or not message.strip():
         return None
@@ -341,11 +420,18 @@ def classify(
     prompt = _build_prompt(
         message, schema_summary or "", features_doc, conversation_history,
         current_flow=current_flow, current_context=current_context,
+        ledger_entries=ledger_entries,
     )
     try:
         raw = gemini._call_api(
             prompt,
-            generation_config={"temperature": 0.0, "maxOutputTokens": 300},
+            # WP-2 added two fields (references_last_answer, resolved_query)
+            # to the JSON Verdict — bump the output budget so a resolved_query
+            # object doesn't get truncated into invalid JSON (see the earlier,
+            # unrelated lesson from ASSISTANT_PLAN.md-adjacent work: a live
+            # e2e test failed at 700 tokens purely from budget, not model
+            # behaviour, and passed clean at production's real 800+).
+            generation_config={"temperature": 0.0, "maxOutputTokens": 400},
         )
     except Exception as e:
         logger.warning(f"[CLASSIFIER] _call_api failed: {e}")
@@ -357,6 +443,8 @@ def classify(
             f"conf={verdict['confidence']:.2f} "
             f"hist={verdict['historical']} bulk={verdict['bulk']} "
             f"fc={verdict.get('flow_compatible')} "
+            f"ref_last={verdict.get('references_last_answer')} "
+            f"resolved_query={json.dumps(verdict.get('resolved_query'), default=str)[:160]} "
             f"params={json.dumps(verdict['parameters'], default=str)[:160]}"
         )
     return verdict

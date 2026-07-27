@@ -2,7 +2,10 @@ from services.gemini_service import GeminiService
 from services.resend_email_service import ResendEmailService
 from services.supabase_service import SupabaseService, JOB_ENTRIES_COLUMNS, _COLUMN_SCHEMA_FROM_ENV
 from utils.date_utils import month_name_to_number, number_to_month_name
-from services.answer_ledger import answer_scope_question, build_entry, build_entry_from_sql, append_entry
+from services.answer_ledger import (
+    answer_scope_question, build_entry, build_entry_from_sql, append_entry,
+    get_entries as get_ledger_entries, is_scope_question as answer_ledger_is_scope_question,
+)
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
 from services.query_planner import execute_query_plan
@@ -3387,6 +3390,13 @@ class IntentService:
                     c for c in JOB_ENTRIES_COLUMNS if not c.startswith("_")
                 )[:1500]
 
+                # WP-2: hand the last few answer-ledger entries to the
+                # classifier so it can set references_last_answer /
+                # resolved_query. Cheap (get_entries reads the already-fetched
+                # user_mem, no extra DB call) and safe to pass unconditionally
+                # — classify() treats an empty list exactly like None.
+                _ledger_entries_for_classifier = get_ledger_entries(user_mem)
+
                 if _v2_in_owned_flow:
                     # In a v2-owned flow — classify with flow context, route through dispatch_in_flow.
                     try:
@@ -3396,6 +3406,7 @@ class IntentService:
                             schema_summary=_schema_summary,
                             current_flow=_v2_current_flow,
                             current_context=_v2_current_state.get("context") or {},
+                            ledger_entries=_ledger_entries_for_classifier,
                         )
                         if _verdict:
                             _result = _v2_dispatch_in_flow(
@@ -3432,9 +3443,29 @@ class IntentService:
                                 message, self.gemini,
                                 conversation_history=conversation_history,
                                 schema_summary=_schema_summary,
+                                ledger_entries=_ledger_entries_for_classifier,
                             )
                             if _verdict:
                                 _v2_verdict = _verdict  # lift for legacy override below
+                                # WP-2 shadow logging (SHADOW ONLY — nothing
+                                # below acts on these fields yet; that's the
+                                # eval-gated flip in a later step). Compares
+                                # the classifier's references_last_answer
+                                # against the deterministic WP-1 regex, so we
+                                # can measure whether Understand v2 catches
+                                # MORE scope questions (better recall) before
+                                # trusting it to decide anything.
+                                try:
+                                    _regex_says_scope = answer_ledger_is_scope_question(message)
+                                    logger.info(
+                                        "[UNDERSTAND_V2_SHADOW] "
+                                        f"classifier_ref_last={_verdict.get('references_last_answer')} "
+                                        f"regex_ref_last={_regex_says_scope} "
+                                        f"agree={_verdict.get('references_last_answer') == _regex_says_scope} "
+                                        f"resolved_query={_verdict.get('resolved_query')}"
+                                    )
+                                except Exception as _shadow_err:
+                                    logger.warning(f"[UNDERSTAND_V2_SHADOW] logging failed (non-fatal): {_shadow_err}")
                                 _result = _v2_dispatch_idle(
                                     _verdict,
                                     intent_service=self,
