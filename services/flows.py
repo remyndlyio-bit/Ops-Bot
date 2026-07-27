@@ -29,6 +29,8 @@ from services.flow_machine import (
     FLOW_BANK_DETAILS,
     FLOW_NAME_CHANGE,
     FLOW_LINK_ACCOUNT,
+    FLOW_INVOICE_ADDRESS,
+    FLOW_INVOICE_NEED_JOB_DESCRIPTION,
 )
 from utils.logger import logger
 
@@ -513,6 +515,87 @@ class LinkAccount(Flow):
         return result
 
 
+# ── INVOICE_ADDRESS (WP-3 slice 3) ──────────────────────────────────────
+
+class InvoiceAddress(Flow):
+    """Bot asked for the user's own business address for the invoice header
+    — either the mandatory readiness-gate prompt mid invoice-generation, or
+    a standalone 'update my address' ask (_handle_address_update sets the
+    SAME awaiting flag for both entry points). Delegates to the existing
+    _handle_invoice_address_response, which already: accepts 'cancel'/
+    'stop'/'abort'/'nevermind'; resumes the invoice flow if one was pending;
+    otherwise just confirms the standalone update. Always completes in one
+    turn — no retry loop."""
+
+    name = FLOW_INVOICE_ADDRESS
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(
+            f"[FLOW_V2] InvoiceAddress.handle_response user={user_id} "
+            f"ctx_client={context.get('client_name')!r}"
+        )
+        result = intent_service._handle_invoice_address_response(user_id, message)
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        client = context.get("client_name")
+        if client:
+            return f"\n\nStill need your business address for the {client} invoice header (or 'cancel' to stop)."
+        return "\n\nStill waiting on your business address (or 'cancel' to skip)."
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        result = intent_service._handle_invoice_address_response(user_id, "cancel")
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+
+# ── INVOICE_NEED_JOB_DESCRIPTION (WP-3 slice 3) ─────────────────────────
+
+class InvoiceNeedJobDescription(Flow):
+    """Bot asked what the work was for one specific EXISTING job that has no
+    description, before it can be invoiced. Distinct from
+    SMART_CAPTURE_NEED_DESCRIPTION (a NEW job being logged). Delegates to
+    the existing _handle_job_description_response, which saves the
+    description to the pinned row and resumes the invoice flow. Always
+    completes in one turn."""
+
+    name = FLOW_INVOICE_NEED_JOB_DESCRIPTION
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(
+            f"[FLOW_V2] InvoiceNeedJobDescription.handle_response user={user_id} "
+            f"row_id={context.get('row_id')!r}"
+        )
+        result = intent_service._handle_job_description_response(user_id, message)
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        return "\n\nStill need a description for that job before I can invoice it (or 'cancel' to stop)."
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        result = intent_service._handle_job_description_response(user_id, "cancel")
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+
 # Registry — dispatcher uses this to look up the right Flow by name.
 REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_AWAIT_SEND_CONFIRM:     InvoiceAwaitSendConfirm(),
@@ -525,6 +608,8 @@ REGISTRY: Dict[str, Flow] = {
     FLOW_BANK_DETAILS:                   BankDetails(),
     FLOW_NAME_CHANGE:                    NameChange(),
     FLOW_LINK_ACCOUNT:                   LinkAccount(),
+    FLOW_INVOICE_ADDRESS:                InvoiceAddress(),
+    FLOW_INVOICE_NEED_JOB_DESCRIPTION:   InvoiceNeedJobDescription(),
 }
 
 

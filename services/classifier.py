@@ -171,6 +171,24 @@ def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Di
             "  - SIDE_QUESTION: a genuinely unrelated question is SIDE_QUESTION, never\n"
             "    FLOW_RESPONSE, even if it happens to contain a number.\n"
         ),
+        "INVOICE_ADDRESS": (
+            "  - The bot asked for the user's OWN business address, for the invoice header\n"
+            "    (either mid invoice-generation, or a standalone 'update my address' ask).\n"
+            "  - FLOW_RESPONSE: any free text that reads as an address (a location, multiple\n"
+            "    lines, a pincode, etc.).\n"
+            "  - CANCEL: 'cancel', 'stop', 'abort', 'nevermind'.\n"
+            "  - SIDE_QUESTION: a genuinely unrelated question is SIDE_QUESTION, never\n"
+            "    FLOW_RESPONSE.\n"
+        ),
+        "INVOICE_NEED_JOB_DESCRIPTION": (
+            "  - The bot asked what the WORK WAS for one specific job that's missing a\n"
+            "    description, before it can generate the invoice (e.g. '2 master films,\n"
+            "    English VO').\n"
+            "  - FLOW_RESPONSE: any free text describing work done.\n"
+            "  - CANCEL: 'cancel', 'stop', 'nevermind', 'abort'.\n"
+            "  - SIDE_QUESTION: a genuinely unrelated question — including one about a PRIOR\n"
+            "    answer's scope — is SIDE_QUESTION, never FLOW_RESPONSE.\n"
+        ),
     }.get(current_flow, "")
     return (
         "\n\nACTIVE FLOW (the bot just asked a question and is waiting):\n"

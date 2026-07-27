@@ -56,6 +56,18 @@ FLOW_DISAMBIGUATION                   = "DISAMBIGUATION"
 FLOW_BANK_DETAILS                     = "BANK_DETAILS"
 FLOW_NAME_CHANGE                      = "NAME_CHANGE"
 FLOW_LINK_ACCOUNT                     = "LINK_ACCOUNT"
+# WP-3 slice 3 — the last two invoice-readiness-gate prompts
+# (_invoice_readiness_check) not yet migrated in slice 1. Same shape as the
+# already-migrated INVOICE_NEED_BILLING/POC_NAME/POC_EMAIL: single-shot,
+# always resumes the invoice flow via _resume_invoice_flow on completion.
+# FLOW_INVOICE_ADDRESS also serves _handle_address_update's standalone
+# "update my business address" command — one flag (awaiting_invoice_address),
+# one handler, two entry points, so one Flow covers both. Deliberately named
+# distinctly from FLOW_SMART_CAPTURE_NEED_DESCRIPTION, which is a different
+# gate (a NEW job's own description during smart capture, not an EXISTING
+# job's description missing at invoice time).
+FLOW_INVOICE_ADDRESS                  = "INVOICE_ADDRESS"
+FLOW_INVOICE_NEED_JOB_DESCRIPTION     = "INVOICE_NEED_JOB_DESCRIPTION"
 
 KNOWN_FLOWS = {
     FLOW_IDLE,
@@ -69,6 +81,8 @@ KNOWN_FLOWS = {
     FLOW_BANK_DETAILS,
     FLOW_NAME_CHANGE,
     FLOW_LINK_ACCOUNT,
+    FLOW_INVOICE_ADDRESS,
+    FLOW_INVOICE_NEED_JOB_DESCRIPTION,
 }
 
 # Idle TTL: 30 min of silence in a flow → auto-reset to IDLE.

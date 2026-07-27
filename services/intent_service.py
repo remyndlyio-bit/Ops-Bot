@@ -635,6 +635,7 @@ class IntentService:
             FLOW_INVOICE_NEED_POC_NAME, FLOW_INVOICE_NEED_POC_EMAIL,
             FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
             FLOW_DISAMBIGUATION, FLOW_BANK_DETAILS, FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
+            FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
         )
         # Already tracking — nothing to reconcile.
         if self.flow_machine.current_flow(user_id) != FLOW_IDLE:
@@ -722,6 +723,22 @@ class IntentService:
 
         if user_mem.get("awaiting_link_id"):
             self.flow_machine.set_state(user_id, FLOW_LINK_ACCOUNT, {})
+            return
+
+        # WP-3 slice 3: the last two invoice-readiness-gate prompts.
+        if user_mem.get("awaiting_invoice_address"):
+            pend = user_mem.get("pending_invoice") or {}
+            self.flow_machine.set_state(
+                user_id, FLOW_INVOICE_ADDRESS,
+                {"client_name": pend.get("client_name")},
+            )
+            return
+
+        if user_mem.get("awaiting_job_description"):
+            self.flow_machine.set_state(
+                user_id, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
+                {"row_id": user_mem.get("pending_jobdesc_row_id")},
+            )
             return
 
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
@@ -3408,6 +3425,12 @@ class IntentService:
                             "awaiting_bank_details":      False,
                             "awaiting_name_change":       False,
                             "awaiting_link_id":           False,
+                            # WP-3 slice 3 — same reasoning again.
+                            "awaiting_invoice_address":   False,
+                            "pending_address_user_id":    None,
+                            "awaiting_job_description":   False,
+                            "pending_jobdesc_row_id":      None,
+                            "pending_jobdesc_user_id":     None,
                         }
                         self.memory.update_user_memory(user_id, _stale_clear)
                         # Also drop any in-progress smart-capture form.

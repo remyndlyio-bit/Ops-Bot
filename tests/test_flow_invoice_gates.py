@@ -1,0 +1,197 @@
+"""
+WP-3 slice 3 of ASSISTANT_PLAN.md — migrating the last two invoice-readiness-
+gate prompts (_invoice_readiness_check) into FlowMachine v2: business
+address and per-job description. Same shape as the already-migrated
+INVOICE_NEED_BILLING/POC_NAME/POC_EMAIL — single-shot, always resumes the
+invoice flow via _resume_invoice_flow.
+"""
+import os
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import pytest
+from unittest.mock import MagicMock, patch
+
+from services.flow_machine import (
+    FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION, FLOW_IDLE, KNOWN_FLOWS,
+)
+from services.flows import InvoiceAddress, InvoiceNeedJobDescription, get_flow
+
+
+def _make_svc():
+    with patch("services.intent_service.GeminiService"), \
+         patch("services.intent_service.ResendEmailService"), \
+         patch("services.intent_service.SupabaseService"), \
+         patch("services.intent_service.MemoryService"):
+        from services.intent_service import IntentService
+        svc = IntentService()
+    svc.gemini = MagicMock()
+    svc.email = MagicMock()
+    svc.supabase = MagicMock()
+    svc.memory = MagicMock()
+    svc.memory.get_user_memory.return_value = {}
+    svc.flow_machine = MagicMock()
+    return svc
+
+
+class TestFlowMachineRegistration:
+    @pytest.mark.parametrize("flow_name,cls", [
+        (FLOW_INVOICE_ADDRESS, InvoiceAddress),
+        (FLOW_INVOICE_NEED_JOB_DESCRIPTION, InvoiceNeedJobDescription),
+    ])
+    def test_registered(self, flow_name, cls):
+        assert flow_name in KNOWN_FLOWS
+        assert isinstance(get_flow(flow_name), cls)
+
+    def test_distinct_from_smart_capture_description_flow(self):
+        """INVOICE_NEED_JOB_DESCRIPTION (an existing job missing a
+        description at invoice time) must be a different flow name from
+        SMART_CAPTURE_NEED_DESCRIPTION (a brand new job being logged) --
+        they serve genuinely different prompts."""
+        from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+        assert FLOW_INVOICE_NEED_JOB_DESCRIPTION != FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+
+
+class TestReconciliation:
+    def test_reconciles_invoice_address_with_client_context(self):
+        svc = _make_svc()
+        svc.flow_machine.current_flow.return_value = FLOW_IDLE
+        svc.memory.get_form_state.return_value = None
+        svc._reconcile_legacy_to_flow_machine("u1", {
+            "awaiting_invoice_address": True,
+            "pending_invoice": {"client_name": "Nike"},
+        })
+        args = svc.flow_machine.set_state.call_args.args
+        assert args[1] == FLOW_INVOICE_ADDRESS
+        assert args[2]["client_name"] == "Nike"
+
+    def test_reconciles_standalone_address_update_no_pending_invoice(self):
+        """_handle_address_update (a standalone 'update my address' command,
+        not mid invoice-generation) sets the SAME flag with no pending_invoice."""
+        svc = _make_svc()
+        svc.flow_machine.current_flow.return_value = FLOW_IDLE
+        svc.memory.get_form_state.return_value = None
+        svc._reconcile_legacy_to_flow_machine("u1", {"awaiting_invoice_address": True})
+        args = svc.flow_machine.set_state.call_args.args
+        assert args[1] == FLOW_INVOICE_ADDRESS
+        assert args[2]["client_name"] is None
+
+    def test_reconciles_job_description_with_row_context(self):
+        svc = _make_svc()
+        svc.flow_machine.current_flow.return_value = FLOW_IDLE
+        svc.memory.get_form_state.return_value = None
+        svc._reconcile_legacy_to_flow_machine("u1", {
+            "awaiting_job_description": True,
+            "pending_jobdesc_row_id": "row-42",
+        })
+        args = svc.flow_machine.set_state.call_args.args
+        assert args[1] == FLOW_INVOICE_NEED_JOB_DESCRIPTION
+        assert args[2]["row_id"] == "row-42"
+
+    def test_no_flags_no_op(self):
+        svc = _make_svc()
+        svc.flow_machine.current_flow.return_value = FLOW_IDLE
+        svc.memory.get_form_state.return_value = None
+        svc._reconcile_legacy_to_flow_machine("u1", {})
+        svc.flow_machine.set_state.assert_not_called()
+
+
+class TestTTLStalenessClears:
+    @pytest.mark.parametrize("flag", [
+        "awaiting_invoice_address", "pending_address_user_id",
+        "awaiting_job_description", "pending_jobdesc_row_id", "pending_jobdesc_user_id",
+    ])
+    def test_stale_clear_includes_flag(self, flag):
+        import inspect
+        from services import intent_service as mod
+        src = inspect.getsource(mod.IntentService._process_request_impl)
+        start = src.index("_stale_clear = {")
+        block = src[start:start + 2600]
+        assert f'"{flag}"' in block
+
+
+class TestInvoiceAddressFlow:
+    def test_saves_address_and_resumes_pending_invoice(self):
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "Nike", "month": "March", "year": 2026}}
+        svc._resume_invoice_flow = MagicMock(return_value={"operation": "resumed", "response": "ok"})
+        flow = InvoiceAddress()
+        result = flow.handle_response(svc, "u1", "12 MG Road, Bangalore", {"client_name": "Nike"})
+        assert result["operation"] == "resumed"
+        svc.flow_machine.reset.assert_called_once_with("u1")
+
+    def test_standalone_update_no_pending_invoice(self):
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {}
+        flow = InvoiceAddress()
+        result = flow.handle_response(svc, "u1", "12 MG Road, Bangalore", {})
+        assert result["operation"] == "address_saved"
+        svc.flow_machine.reset.assert_called_once_with("u1")
+
+    def test_cancel_aborts_pending_invoice(self):
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "Nike"}}
+        flow = InvoiceAddress()
+        result = flow.on_cancel(svc, "u1", "cancel", {"client_name": "Nike"})
+        assert result["operation"] == "invoice_cancelled"
+        svc.flow_machine.reset.assert_called_once_with("u1")
+
+    def test_resume_nudge_mentions_client_when_present(self):
+        assert "Nike" in InvoiceAddress().resume_nudge({"client_name": "Nike"})
+
+    def test_resume_nudge_safe_with_no_client(self):
+        assert InvoiceAddress().resume_nudge({})
+
+
+class TestInvoiceNeedJobDescriptionFlow:
+    def test_saves_description_and_resumes_invoice(self):
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "pending_invoice": {"client_name": "Nike"},
+            "pending_jobdesc_row_id": "row-1",
+        }
+        svc.supabase.execute_sql.return_value = {"ok": True}
+        svc._resume_invoice_flow = MagicMock(return_value={"operation": "resumed", "response": "ok"})
+        flow = InvoiceNeedJobDescription()
+        result = flow.handle_response(svc, "u1", "2 master films, English VO", {"row_id": "row-1"})
+        assert result["operation"] == "resumed"
+        update_sql = svc.supabase.execute_sql.call_args.args[0]
+        assert "master films" in update_sql and "row-1" in update_sql
+        svc.flow_machine.reset.assert_called_once_with("u1")
+
+    def test_cancel_aborts_invoice(self):
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {"pending_invoice": {"client_name": "Nike"}}
+        flow = InvoiceNeedJobDescription()
+        result = flow.on_cancel(svc, "u1", "cancel", {"row_id": "row-1"})
+        assert result["operation"] == "invoice_cancelled"
+        svc.supabase.execute_sql.assert_not_called()
+        svc.flow_machine.reset.assert_called_once_with("u1")
+
+
+class TestClassifierGuidance:
+    @pytest.mark.parametrize("flow_name", ["INVOICE_ADDRESS", "INVOICE_NEED_JOB_DESCRIPTION"])
+    def test_guidance_present(self, flow_name):
+        from services.classifier import _flow_compat_block
+        block = _flow_compat_block(flow_name, {})
+        assert "SIDE_QUESTION" in block and "FLOW_RESPONSE" in block and "CANCEL" in block
+
+
+class TestDispatchInFlowIntegration:
+    @pytest.mark.parametrize("flow_name,flow_cls", [
+        (FLOW_INVOICE_ADDRESS, InvoiceAddress),
+        (FLOW_INVOICE_NEED_JOB_DESCRIPTION, InvoiceNeedJobDescription),
+    ])
+    def test_side_question_never_reaches_handle_response(self, flow_name, flow_cls):
+        from services.flow_dispatcher import dispatch_in_flow
+        svc = _make_svc()
+        with patch.object(flow_cls, "handle_response") as mock_handle:
+            verdict = {"intent": "READ_QUERY", "flow_compatible": "SIDE_QUESTION",
+                       "raw_message": "does that include everything?",
+                       "parameters": {}, "confidence": 0.9, "historical": False, "bulk": False}
+            result = dispatch_in_flow(
+                verdict, intent_service=svc, user_id="u1",
+                current_flow=flow_name, current_context={}, conversation_history=[],
+            )
+        mock_handle.assert_not_called()
+        assert result is None
