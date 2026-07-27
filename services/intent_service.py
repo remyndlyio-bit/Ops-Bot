@@ -49,6 +49,29 @@ import re
 import time
 
 
+_QUESTION_STARTERS = (
+    "do", "does", "did", "is", "are", "was", "were", "can", "could",
+    "would", "should", "why", "what", "when", "which", "who", "how",
+)
+
+
+def _looks_like_a_question(message: str) -> bool:
+    """True if `message` reads as a genuine question rather than a direct
+    answer to whatever the bot just asked. Deliberately shared, deterministic,
+    and simple — the same class of guard as the P0 fix in
+    _handle_pending_audit_reply (a question misread as a reply to a pending
+    prompt is a recurring bug shape in this codebase: onboarding's name/
+    industry steps had it too, saving 'what can you do?' verbatim as the
+    user's name/industry before this existed)."""
+    m = (message or "").strip().lower()
+    if not m:
+        return False
+    if m.endswith("?"):
+        return True
+    first = m.split()[0] if m.split() else ""
+    return first in _QUESTION_STARTERS
+
+
 def _is_full_job_row(row: dict) -> bool:
     """True when the row is a SELECT * from job_entries (not an aggregate)."""
     return "bill_no" in row or "job_date" in row
@@ -6420,7 +6443,11 @@ class IntentService:
             if _stripped in {"good morning", "good evening", "good afternoon",
                              "whats up", "what's up"}:
                 _is_greeting_only = True
-            if _is_greeting_only or raw_name.lower() in ("no", ""):
+            if _is_greeting_only or raw_name.lower() in ("no", "") or _looks_like_a_question(raw_name):
+                # A genuine question ("what can you do?") must never be
+                # saved as the name — confirmed live: without this check the
+                # AI-extraction fallback path truncated it to two words and
+                # title-cased it into a name ("What Can").
                 response = "Before we begin, please share your full name — or type 'skip' to continue without one."
                 self._store_conversation(user_id, message, response)
                 return {"operation": "onboarding_name_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -6526,8 +6553,12 @@ class IntentService:
         # ── Step 3: Industry (optional — 'skip' accepted) ────────────────
         elif not prefs.get("industry"):
             industry = message.strip()
-            if industry.lower() in ("skip", "no", "n/a", "") or len(industry) < 2:
-                # Use user's name as default industry when skipped
+            if (industry.lower() in ("skip", "no", "n/a", "") or len(industry) < 2
+                    or _looks_like_a_question(industry)):
+                # Use user's name as default industry when skipped OR when
+                # the message is a genuine question ("what can you do?") --
+                # confirmed live: without the question check this got saved
+                # verbatim as the industry and onboarding silently completed.
                 industry = profile.get("name", "Freelancer")
             if len(industry) > 80:
                 industry = industry[:80]

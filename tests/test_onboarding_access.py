@@ -198,6 +198,35 @@ class TestOnboardingNameStep:
         assert result["operation"] == "onboarding_name_retry"
         svc.supabase.upsert_user_profile.assert_not_called()
 
+    @pytest.mark.parametrize("msg", [
+        "what can you do?",
+        "how do I add a job",
+        "can you generate invoices for me",
+        "Do you support recurring invoices?",
+    ])
+    def test_question_never_saved_as_name(self, msg):
+        """The exact WP-3 finding: with AI extraction unavailable (a real
+        production scenario, not just a test artifact), the fallback
+        pattern-match path took a genuine question, truncated it to two
+        words, and title-cased it into a saved name ('what can you do?' ->
+        'What Can'). A question must always be recognised and re-prompted,
+        never saved."""
+        svc = _make_svc()
+        svc.gemini.extract_name.return_value = None
+        result = svc._continue_onboarding("u1", msg, {"platform": "whatsapp"})
+        assert result["operation"] == "onboarding_name_retry"
+        svc.supabase.upsert_user_profile.assert_not_called()
+
+    def test_question_guard_does_not_block_a_real_ai_extracted_name(self):
+        """The guard must not become a false positive that blocks legitimate
+        onboarding once the AI extraction succeeds."""
+        svc = _make_svc()
+        svc.gemini.extract_name.return_value = "Akshaj"
+        svc.supabase.upsert_user_profile.return_value = {"ok": True}
+        result = svc._continue_onboarding("u1", "Akshaj Kasliwal", {"platform": "whatsapp"})
+        assert result["operation"] == "onboarding_name"
+        assert svc.supabase.upsert_user_profile.call_args.args[2]["name"] == "Akshaj"
+
 
 class TestOnboardingEmailStep:
     PROFILE = {"platform": "whatsapp", "name": "Akshaj"}
@@ -245,6 +274,25 @@ class TestOnboardingIndustryStep:
         assert call["preferences"]["industry"] == "Akshaj"
         assert "onboarded_at" in call
 
+    @pytest.mark.parametrize("msg", [
+        "what can you do?",
+        "how do I add a job",
+        "Do you support recurring invoices?",
+    ])
+    def test_question_never_saved_as_industry(self, msg):
+        """The other half of the WP-3 finding: a genuine question at this
+        step was saved VERBATIM as the industry ('what can you do?' saved
+        as-is) and onboarding silently completed. Must fall back to the same
+        default-to-name behaviour as an explicit 'skip', never save the
+        question text."""
+        svc = _make_svc()
+        svc.supabase.upsert_user_profile.return_value = {"ok": True}
+        result = svc._continue_onboarding("u1", msg, self._profile())
+        assert result["operation"] == "onboarding_complete"
+        call = svc.supabase.upsert_user_profile.call_args.args[2]
+        assert call["preferences"]["industry"] == "Akshaj"
+        assert call["preferences"]["industry"] != msg
+
     def test_real_industry_saved_and_completes(self):
         svc = _make_svc()
         svc.supabase.upsert_user_profile.return_value = {"ok": True}
@@ -261,3 +309,38 @@ class TestOnboardingIndustryStep:
         svc._continue_onboarding("u1", long_industry, self._profile())
         saved = svc.supabase.upsert_user_profile.call_args.args[2]["preferences"]["industry"]
         assert len(saved) == 80
+
+
+class TestLooksLikeAQuestion:
+    """The shared guard both onboarding fixes above use. Deliberately
+    reusable (module-level in intent_service.py, not private to onboarding)
+    for the same reason WP-3's other slices reuse one dispatch pattern
+    instead of writing a third ad-hoc regex."""
+
+    @pytest.mark.parametrize("msg", [
+        "what can you do?",
+        "how do I add a job",
+        "Do you support recurring invoices?",
+        "Can you generate invoices for me",
+        "why is this unpaid",
+        "Who is my biggest client",
+    ])
+    def test_recognised_as_a_question(self, msg):
+        from services.intent_service import _looks_like_a_question
+        assert _looks_like_a_question(msg)
+
+    @pytest.mark.parametrize("msg", [
+        "Akshaj Kasliwal",
+        "Video Production",
+        "skip",
+        "",
+        "Nike",
+        "2 master films, English VO",
+    ])
+    def test_not_recognised_as_a_question(self, msg):
+        from services.intent_service import _looks_like_a_question
+        assert not _looks_like_a_question(msg)
+
+    def test_none_input_is_safe(self):
+        from services.intent_service import _looks_like_a_question
+        assert _looks_like_a_question(None) is False
