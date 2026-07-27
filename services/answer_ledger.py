@@ -226,6 +226,14 @@ def _describe_scope(scope: Dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+# Public aliases — ASSISTANT_PLAN.md WP-4's AnswerPayload (services/
+# response_synthesis.py) reuses these instead of re-implementing Indian
+# currency formatting and English scope description a second time. Kept as
+# aliases (not renames) so nothing here or in existing tests has to change.
+format_inr = _format_inr
+describe_scope = _describe_scope
+
+
 def answer_scope_question(message: str, user_mem: Dict[str, Any]) -> Optional[str]:
     """Deterministic reader: if `message` is a scope-clarifying question about
     the immediately previous answer, render a reply from ledger[-1] — no SQL,

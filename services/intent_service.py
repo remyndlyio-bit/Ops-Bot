@@ -5,6 +5,7 @@ from utils.date_utils import month_name_to_number, number_to_month_name
 from services.answer_ledger import (
     answer_scope_question, build_entry, build_entry_from_sql, append_entry,
     get_entries as get_ledger_entries, is_scope_question as answer_ledger_is_scope_question,
+    scope_from_sql,
 )
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
@@ -33,7 +34,10 @@ from services.response_formatter import (
     query_invalid_phrase,
     unsupported_feature_phrase,
 )
-from services.response_synthesis import build_clean_payload, build_field_answer_payload
+from services.response_synthesis import (
+    build_clean_payload, build_field_answer_payload,
+    build_answer_payload, render_answer_payload,
+)
 from utils.memory_service import MemoryService
 from utils.pending_reminders import get_pending, clear_pending, remove_single
 from utils.logger import logger
@@ -5364,16 +5368,33 @@ class IntentService:
                         question=message, plan=_ledger_plan, rows=rows, response=response))
                     self._store_conversation(user_id, message, response)
                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
+                _ledger_scope = {"filters": (_ledger_plan or {}).get("filters") or {},
+                                  "time_range": (_ledger_plan or {}).get("time_range")}
                 if _is_full_job_row(rows[0]) and not _is_history_q:
-                    response = _format_job_cards(rows)
+                    # WP-4: an UNFILTERED list ("show all my jobs") is a
+                    # genuine bulk export -- cards are the right UX. Anything
+                    # with a filter (client/paid/bill_sent/date) is a
+                    # scoped/status question, and a raw Invoice-No/Invoice-
+                    # Date card dump for THAT is the IMG-3 confusion: no
+                    # framing of what was asked, fields irrelevant to it.
+                    if _ledger_scope["filters"]:
+                        response = render_answer_payload(build_answer_payload(
+                            scope=_ledger_scope, metric=None, rows=rows,
+                            group_by=(_ledger_plan or {}).get("group_by")))
+                    else:
+                        response = _format_job_cards(rows)
                     logger.info(f"[QUERY] Success: {len(rows)} rows (structured card format)")
                 else:
                     payload = build_clean_payload(rows, "select")
                     response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q, conversation_history=conversation_history)
                     if not response or not response.strip():
                         logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
-                        # Deterministic fallback for simple aggregate results — never show "couldn't format"
-                        response = _format_aggregate_fallback(payload, message)
+                        # WP-4: deterministic fallback with headline + scope +
+                        # follow-up, built from the SAME plan that produced
+                        # the SQL — replaces the old message-keyword guess.
+                        response = render_answer_payload(build_answer_payload(
+                            scope=_ledger_scope, metric=(_ledger_plan or {}).get("metric"),
+                            rows=rows, group_by=(_ledger_plan or {}).get("group_by")))
                     else:
                         logger.info(f"[QUERY] Success: {len(rows)} rows, response length={len(response)}")
                 append_entry(self.memory, user_id, build_entry(
@@ -5591,7 +5612,13 @@ class IntentService:
             payload = build_clean_payload(rows, "select")
             resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
             if not resp or not resp.strip():
-                resp = _format_aggregate_fallback(payload, message)
+                # WP-4: the deterministic fallback now carries headline + scope
+                # + a follow-up, built from the SAME scope the SQL actually
+                # used (scope_from_sql(routed.sql)) — not a message-keyword
+                # guess like the old _format_aggregate_fallback made.
+                resp = render_answer_payload(build_answer_payload(
+                    scope=scope_from_sql(routed.sql), metric="sum" if "SUM(" in routed.sql.upper()
+                    else "avg" if "AVG(" in routed.sql.upper() else "count", rows=rows))
             append_entry(self.memory, user_id, build_entry_from_sql(
                 question=message, sql=routed.sql, rows=rows, response=resp, render_kind="AGGREGATE"))
             return _finish(resp)
@@ -5607,14 +5634,28 @@ class IntentService:
             self._store_conversation(user_id, message, resp)
             return {"operation": "query", "response": resp, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
         if _is_full_job_row(rows[0]):
-            resp = _format_job_cards(rows)
+            # WP-4: "list_jobs" is the only route an explicit bulk "show/list
+            # all my jobs" ask matches (query_router._has_scope_qualifier
+            # defers anything filtered to the planner) — every OTHER route
+            # name (unpaid_list, date_lookup, last_job, top_bottom_job, ...)
+            # is a SCOPED/status question by construction, so a raw
+            # Invoice-No/Invoice-Date card dump for it is exactly the IMG-3
+            # confusion: no framing of what was asked, fields irrelevant to
+            # the question. Use the scoped summary there instead; keep cards
+            # only for the genuine bulk export.
+            if routed.name == "list_jobs":
+                resp = _format_job_cards(rows)
+            else:
+                resp = render_answer_payload(build_answer_payload(
+                    scope=scope_from_sql(routed.sql), metric=None, rows=rows))
             append_entry(self.memory, user_id, build_entry_from_sql(
                 question=message, sql=routed.sql, rows=rows, response=resp, render_kind="ROWS"))
             return _finish(resp)
         payload = build_clean_payload(rows, "select")
         resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
         if not resp or not resp.strip():
-            resp = _format_aggregate_fallback(payload, message)
+            resp = render_answer_payload(build_answer_payload(
+                scope=scope_from_sql(routed.sql), metric=None, rows=rows))
         append_entry(self.memory, user_id, build_entry_from_sql(
             question=message, sql=routed.sql, rows=rows, response=resp, render_kind="ROWS"))
         return _finish(resp)
