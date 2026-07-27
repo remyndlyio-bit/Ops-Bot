@@ -123,6 +123,30 @@ class TestBetaGate:
         result = svc.process_request("u1", "hi")
         assert result["operation"] == "beta_gate_blocked"
 
+    def test_gate_on_reuses_profile_lookup_no_duplicate_query(self, monkeypatch):
+        """Regression: with the gate on, the gate check and the onboarding
+        check each used to call get_user_profile() separately -- two DB
+        round trips per turn for identical data. Every turn should do it
+        once and reuse the result (see Railway latency investigation:
+        get_user_profile is a real network call, not a local lookup)."""
+        monkeypatch.setenv("BETA_GATE_ENABLED", "true")
+        svc = _make_svc()
+        svc.supabase.get_user_profile.return_value = {
+            "ok": True, "data": {"onboarded_at": "2024-01-01T00:00:00", "name": "Akshaj"},
+        }
+        svc.memory.get_form_state.return_value = {"form_type": "x"}
+        svc._handle_form_step = MagicMock(return_value={"operation": "stub", "response": "ok"})
+        svc.process_request("u1", "hi")
+        assert svc.supabase.get_user_profile.call_count == 1
+
+    def test_gate_off_still_calls_profile_lookup_exactly_once(self, monkeypatch):
+        monkeypatch.delenv("BETA_GATE_ENABLED", raising=False)
+        svc = _make_svc()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": None}
+        svc.supabase.upsert_user_profile.return_value = {"ok": True}
+        svc.process_request("u1", "hi")
+        assert svc.supabase.get_user_profile.call_count == 1
+
 
 class TestNewUserRouting:
     """Post-gate: how process_request decides new-user vs continue-onboarding

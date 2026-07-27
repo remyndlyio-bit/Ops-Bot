@@ -3264,11 +3264,16 @@ class IntentService:
         # created until you add them via SQL/admin path.
         _beta_gate_on = (os.getenv("BETA_GATE_ENABLED", "").strip().lower()
                         in ("1", "true", "yes", "on"))
+        # Reused below for the onboarding check too — avoids a second
+        # get_user_profile() round trip (each one used to be a fresh
+        # psycopg2 connection; even now it's a needless duplicate query).
+        profile = None
         if _beta_gate_on:
             try:
-                _exists = self.supabase.get_user_profile(user_id) or {}
-                _has_onboarded = bool((_exists.get("data") or {}).get("onboarded_at"))
+                profile = self.supabase.get_user_profile(user_id) or {}
+                _has_onboarded = bool((profile.get("data") or {}).get("onboarded_at"))
             except Exception:
+                profile = None
                 _has_onboarded = False
             # Brand-new (no profile) OR mid-onboarding profile → check allowlist.
             if not _has_onboarded and not self.supabase.is_user_allowed(user_id):
@@ -3288,7 +3293,8 @@ class IntentService:
                 }
 
         # Check if user is new and needs onboarding
-        profile = self.supabase.get_user_profile(user_id)
+        if profile is None:
+            profile = self.supabase.get_user_profile(user_id)
         if not profile.get("ok"):
             logger.error(f"Failed to check user profile for {user_id}: {profile.get('error')}")
             # Treat DB errors as new user → start onboarding (creates profile on success)
