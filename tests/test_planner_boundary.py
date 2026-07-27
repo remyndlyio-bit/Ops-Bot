@@ -32,7 +32,7 @@ import pytest
 # conftest.py already prepends path/stubs at test-collection time.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from services.query_planner import _build_filter_clause, _DATE_COLUMNS
+from services.query_planner import _build_filter_clause, _DATE_COLUMNS, _clamp_time_range
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -581,3 +581,62 @@ class TestStripSpuriousPocEmailFilter:
         sql = "SELECT COUNT(*) FROM job_entries WHERE bill_sent = 'Yes'"
         out = self._strip("how many invoices have I sent", sql)
         assert out == sql
+
+
+# ════════════════════════════════════════════════════════════════════════
+# time_range clamping — LLM date math can hallucinate an invalid
+# day-of-month for absolute ranges it computes itself (named months not
+# covered by _precompute_time_ranges, e.g. "February"). Postgres rejects
+# these outright ("date/time field value out of range"), failing the
+# whole query. See production incident: "What is my earning for February"
+# in a non-leap year produced end="2026-02-29".
+# ════════════════════════════════════════════════════════════════════════
+
+class TestClampTimeRange:
+    def test_clamps_feb_29_in_non_leap_year(self):
+        plan = {"time_range": {"type": "absolute",
+                                "value": {"start": "2026-02-01", "end": "2026-02-29"}}}
+        out = _clamp_time_range(plan)
+        assert out["time_range"]["value"]["end"] == "2026-02-28"
+
+    def test_does_not_clamp_feb_29_in_leap_year(self):
+        plan = {"time_range": {"type": "absolute",
+                                "value": {"start": "2024-02-01", "end": "2024-02-29"}}}
+        out = _clamp_time_range(plan)
+        assert out["time_range"]["value"]["end"] == "2024-02-29"
+
+    def test_clamps_april_31(self):
+        plan = {"time_range": {"type": "absolute",
+                                "value": {"start": "2026-04-01", "end": "2026-04-31"}}}
+        out = _clamp_time_range(plan)
+        assert out["time_range"]["value"]["end"] == "2026-04-30"
+
+    def test_clamps_start_too(self):
+        plan = {"time_range": {"type": "absolute",
+                                "value": {"start": "2026-06-31", "end": "2026-06-31"}}}
+        out = _clamp_time_range(plan)
+        assert out["time_range"]["value"]["start"] == "2026-06-30"
+        assert out["time_range"]["value"]["end"] == "2026-06-30"
+
+    def test_valid_dates_untouched(self):
+        plan = {"time_range": {"type": "absolute",
+                                "value": {"start": "2026-03-01", "end": "2026-03-31"}}}
+        out = _clamp_time_range(plan)
+        assert out["time_range"]["value"]["start"] == "2026-03-01"
+        assert out["time_range"]["value"]["end"] == "2026-03-31"
+
+    def test_no_time_range_no_op(self):
+        plan = {"metric": "sum"}
+        out = _clamp_time_range(plan)
+        assert out == {"metric": "sum"}
+
+    def test_null_time_range_no_op(self):
+        plan = {"time_range": None}
+        out = _clamp_time_range(plan)
+        assert out == {"time_range": None}
+
+    def test_non_date_string_ignored(self):
+        plan = {"time_range": {"type": "relative",
+                                "value": {"start": "this_month", "end": None}}}
+        out = _clamp_time_range(plan)
+        assert out["time_range"]["value"]["start"] == "this_month"

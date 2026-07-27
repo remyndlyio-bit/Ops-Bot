@@ -10,6 +10,7 @@ Pipeline:
   User Message → Classify → Plan → Resolve Rows → Validate Columns → SQL → Execute
 """
 
+import calendar
 import json
 import os
 import re
@@ -706,6 +707,42 @@ def plan_to_sql(
         return {"sql": None, "_error": str(e)}
 
 
+def _clamp_time_range(plan: Dict) -> Dict:
+    """The planner LLM computes absolute date ranges itself for named
+    months not covered by `_precompute_time_ranges()` (e.g. "February"),
+    and can hallucinate an invalid day-of-month — "2026-02-29" in a
+    non-leap year, "2026-04-31" for a 30-day month. Postgres rejects
+    these outright ("date/time field value out of range"), failing the
+    whole query. Clamp any start/end date to the real last day of its
+    month so SQL never sees an impossible literal.
+    """
+    tr = plan.get("time_range")
+    if not tr or not isinstance(tr, dict):
+        return plan
+    val = tr.get("value")
+    if not isinstance(val, dict):
+        return plan
+    for key in ("start", "end"):
+        raw = val.get(key)
+        if not isinstance(raw, str):
+            continue
+        m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", raw)
+        if not m:
+            continue
+        year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if not (1 <= month <= 12):
+            continue
+        last_day = calendar.monthrange(year, month)[1]
+        if day > last_day:
+            corrected = f"{year:04d}-{month:02d}-{last_day:02d}"
+            logger.warning(
+                f"[PLAN_POSTPROCESS] Clamped invalid time_range.{key} "
+                f"{raw!r} -> {corrected!r} (month has {last_day} days)"
+            )
+            val[key] = corrected
+    return plan
+
+
 def _time_range_conditions(plan: Dict, dc: str) -> List[str]:
     """Extract time_range into WHERE conditions."""
     parts: List[str] = []
@@ -958,6 +995,10 @@ def execute_query_plan(
     plan = resolve_rows(plan, user_id, supabase_service, conversation_context)
     logger.info(f"[PIPELINE] Stage 3 resolved: {json.dumps(plan)[:200]}")
 
+    # Post-plan correction: clamp any LLM-hallucinated invalid day-of-month
+    # in an absolute time_range (e.g. "2026-02-29") to the real last day.
+    plan = _clamp_time_range(plan)
+
     # Post-plan correction: "how many" queries with metric=null produce SELECT *
     # instead of COUNT(*). Force metric=count when the message is clearly asking
     # for a count and the planner didn't emit one. Hinglish "kitne" included.
@@ -1001,6 +1042,7 @@ def execute_query_plan(
                     retry_plan = resolve_rows(
                         retry_plan, user_id, supabase_service, conversation_context,
                     )
+                    retry_plan = _clamp_time_range(retry_plan)
                     retry_result = _TypedPlan.from_raw(retry_plan, allowed_columns)
                     if retry_result.valid:
                         logger.info("[PLAN_VALIDATOR] retry succeeded")
