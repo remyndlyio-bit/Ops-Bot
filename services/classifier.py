@@ -129,6 +129,24 @@ def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Di
             "    that supplies missing fields (e.g. 'fee 4500', 'date 12 Mar').\n"
             "  - 'cancel', 'drop it', 'nevermind' = CANCEL.\n"
         ),
+        "DISAMBIGUATION": (
+            "  - The bot showed a NUMBERED LIST of matching records and asked which one the\n"
+            "    user meant (or 'all' to act on every match, or 'cancel' to abort).\n"
+            "  - FLOW_RESPONSE: a bare number (e.g. '2', '3'), 'all', 'all of them', or an\n"
+            "    explicit bulk confirmation like 'delete all' / 'yes' ONLY when the bot's\n"
+            "    prompt was itself a bulk-action confirmation (not a numbered pick).\n"
+            "  - CANCEL: 'cancel', 'stop', 'nevermind', 'abort', 'no', or any natural phrasing\n"
+            "    of backing out.\n"
+            "  - SIDE_QUESTION: ANY genuinely different question — including a question about\n"
+            "    the SCOPE of an earlier answer (e.g. 'does that include paid and unpaid?',\n"
+            "    'is that only Nike?') — must NOT be read as picking a numbered option, even\n"
+            "    if it happens to contain a digit or the word 'all'. A message that is a\n"
+            "    QUESTION (ends in '?', or starts with a question word like who/what/why/\n"
+            "    is/does/did/how) is SIDE_QUESTION, never FLOW_RESPONSE, regardless of what\n"
+            "    words it contains. This is the exact bug class this flow was migrated to\n"
+            "    fix — a fragile keyword/regex guard previously misread ordinary questions\n"
+            "    as replies to a pending prompt.\n"
+        ),
     }.get(current_flow, "")
     return (
         "\n\nACTIVE FLOW (the bot just asked a question and is waiting):\n"

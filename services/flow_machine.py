@@ -40,6 +40,15 @@ FLOW_INVOICE_NEED_POC_NAME            = "INVOICE_NEED_POC_NAME"
 FLOW_INVOICE_NEED_POC_EMAIL           = "INVOICE_NEED_POC_EMAIL"
 FLOW_SMART_CAPTURE_NEED_DESCRIPTION   = "SMART_CAPTURE_NEED_DESCRIPTION"
 FLOW_SMART_CAPTURE_CONFIRM_PENDING    = "SMART_CAPTURE_CONFIRM_PENDING"
+# WP-3 (ASSISTANT_PLAN.md) — the numbered "which one did you mean?" /
+# bulk-delete-confirm prompt (services.intent_service._handle_disambiguation_reply).
+# Armed synchronously within process_request (delete AND modify-type
+# disambiguation both call memory.update_user_memory(...pending_disambiguation...)
+# mid-turn) — unlike the cron-armed overdue-audit reminder flow, which sets its
+# pending state from a SEPARATE Railway service outside any process_request
+# call and so can't be reconciled the same way. That mismatch is why audit-reply
+# stays on its own (already-hardened, see the P0 fix) path for now.
+FLOW_DISAMBIGUATION                   = "DISAMBIGUATION"
 
 KNOWN_FLOWS = {
     FLOW_IDLE,
@@ -49,6 +58,7 @@ KNOWN_FLOWS = {
     FLOW_INVOICE_NEED_POC_EMAIL,
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
     FLOW_SMART_CAPTURE_CONFIRM_PENDING,
+    FLOW_DISAMBIGUATION,
 }
 
 # Idle TTL: 30 min of silence in a flow → auto-reset to IDLE.

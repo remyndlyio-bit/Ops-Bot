@@ -25,6 +25,7 @@ from services.flow_machine import (
     FLOW_INVOICE_NEED_POC_EMAIL,
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
     FLOW_SMART_CAPTURE_CONFIRM_PENDING,
+    FLOW_DISAMBIGUATION,
 )
 from utils.logger import logger
 
@@ -315,6 +316,95 @@ class SmartCaptureConfirmPending(Flow):
                 "trigger_invoice": False, "invoice_data": {}}
 
 
+# ── DISAMBIGUATION (WP-3, ASSISTANT_PLAN.md) ───────────────────────────
+
+class Disambiguation(Flow):
+    """The bot showed a numbered 'which one did you mean?' list (or a bulk
+    delete-confirmation) and is waiting for a pick. Delegates to the existing
+    _handle_disambiguation_reply, which already implements the numbered-pick,
+    'all'/bulk-confirm, and cancel logic for BOTH delete-type and modify-type
+    pending state (services.answer_ledger-style row targeting reused via
+    _apply_modify_update).
+
+    The real value of migrating this flow specifically: flow_compatible
+    classification (an LLM reading the whole message, not a regex) decides
+    BEFORE handle_response is ever called whether a message is a genuine pick
+    vs. a side question vs. a cancel -- see classifier.py's DISAMBIGUATION
+    guidance. That is a real upgrade over the legacy method's own internal
+    heuristics (a bare 'yes' being ambiguous, a '?'-or-question-word regex for
+    detecting a new query), not just a relocation of the same logic. Those
+    legacy heuristics still exist and still run (defence in depth / the
+    non-v2 fallback path), but the classifier is what actually decides first
+    now when FLOW_MACHINE_V2 is on.
+    """
+
+    name = FLOW_DISAMBIGUATION
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(
+            f"[FLOW_V2] Disambiguation.handle_response user={user_id} "
+            f"type={context.get('type')} count={context.get('count')}"
+        )
+        pending = (intent_service.memory.get_user_memory(user_id) or {}).get("pending_disambiguation")
+        if not pending:
+            # Raced with something that already cleared it (e.g. a
+            # different code path resolved it first). Nothing left to do.
+            intent_service.flow_machine.reset(user_id)
+            response = "That list isn't active anymore — go ahead and ask again."
+            intent_service._store_conversation(user_id, message, response)
+            return {"operation": "disambiguation_stale", "response": response,
+                    "trigger_invoice": False, "invoice_data": {}}
+
+        result = intent_service._handle_disambiguation_reply(user_id, message, pending)
+        if result is None:
+            # The legacy handler decided this wasn't actually a pick after
+            # all (an ambiguous bare 'yes', or a question-shaped message the
+            # classifier still let through) and has ALREADY cleared
+            # pending_disambiguation itself. Never propagate None out of a
+            # Flow.handle_response (that's not a contract any other flow
+            # uses, and would risk the caller re-running the legacy
+            # disambiguation check a second time against now-stale state) --
+            # resolve it here instead: reset v2 to match and ask plainly.
+            intent_service.flow_machine.reset(user_id)
+            response = "Got it — go ahead and send that as a new message."
+            intent_service._store_conversation(user_id, message, response)
+            return {"operation": "disambiguation_cleared", "response": response,
+                    "trigger_invoice": False, "invoice_data": {}}
+
+        # Both the numbered-pick and cancel paths already clear
+        # pending_disambiguation inside _handle_disambiguation_reply.
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        count = context.get("count")
+        if count:
+            return f"\n\n(Still waiting on which of the {count} matches you meant — reply with a number, or 'cancel'.)"
+        return "\n\n(Still waiting on your pick from the list above — a number, or 'cancel'.)"
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        pending = (intent_service.memory.get_user_memory(user_id) or {}).get("pending_disambiguation")
+        if pending:
+            result = intent_service._handle_disambiguation_reply(user_id, "cancel", pending)
+        else:
+            result = None
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        if result is not None:
+            return result
+        response = "OK, cancelled. Let me know if you need anything else."
+        intent_service._store_conversation(user_id, message, response)
+        return {"operation": "disambiguation_cancelled", "response": response,
+                "trigger_invoice": False, "invoice_data": {}}
+
+
 # Registry — dispatcher uses this to look up the right Flow by name.
 REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_AWAIT_SEND_CONFIRM:     InvoiceAwaitSendConfirm(),
@@ -323,6 +413,7 @@ REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_NEED_POC_EMAIL:         InvoiceNeedPocEmail(),
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION: SmartCaptureNeedDescription(),
     FLOW_SMART_CAPTURE_CONFIRM_PENDING:  SmartCaptureConfirmPending(),
+    FLOW_DISAMBIGUATION:                 Disambiguation(),
 }
 
 

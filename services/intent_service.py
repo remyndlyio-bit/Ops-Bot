@@ -634,6 +634,7 @@ class IntentService:
             FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_INVOICE_NEED_BILLING,
             FLOW_INVOICE_NEED_POC_NAME, FLOW_INVOICE_NEED_POC_EMAIL,
             FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
+            FLOW_DISAMBIGUATION,
         )
         # Already tracking — nothing to reconcile.
         if self.flow_machine.current_flow(user_id) != FLOW_IDLE:
@@ -689,6 +690,21 @@ class IntentService:
         if user_mem.get("awaiting_job_input"):
             self.flow_machine.set_state(
                 user_id, FLOW_SMART_CAPTURE_NEED_DESCRIPTION, {},
+            )
+            return
+
+        # WP-3: numbered "which one did you mean?" / bulk-delete-confirm
+        # prompt. Checked LAST (mirrors the legacy precedence at the
+        # pending_disambiguation call site: an active invoice-email flow
+        # wins over a stale disambiguation, and both those branches above
+        # already `return` before reaching here, so the ordering is
+        # preserved for free — no separate precedence check needed).
+        pending = user_mem.get("pending_disambiguation")
+        if pending:
+            rows = pending.get("rows") or []
+            self.flow_machine.set_state(
+                user_id, FLOW_DISAMBIGUATION,
+                {"count": len(rows), "type": pending.get("type", "delete")},
             )
             return
 
@@ -3361,6 +3377,14 @@ class IntentService:
                             "awaiting_poc_email":         False,
                             "poc_email_client":           None,
                             "awaiting_job_input":         False,
+                            # WP-3: without this, a TTL-based FlowMachine
+                            # reset left the legacy pending_disambiguation
+                            # flag standing — the NEXT message's
+                            # reconciliation would then re-arm FlowMachine
+                            # to DISAMBIGUATION against data the TTL logic
+                            # had just decided was stale, silently
+                            # resurrecting an old numbered list.
+                            "pending_disambiguation":     None,
                         }
                         self.memory.update_user_memory(user_id, _stale_clear)
                         # Also drop any in-progress smart-capture form.
