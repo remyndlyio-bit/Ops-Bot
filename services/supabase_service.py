@@ -5,13 +5,21 @@ Uses SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY for REST; SUPABASE_DB_URL for raw 
 IMPORTANT: On Railway/serverless use the CONNECTION POOLER URL (port 6543), not direct (5432).
 Direct (db.xxx.supabase.co:5432) often fails with "Network is unreachable".
 Dashboard → Project Settings → Database → Connection string → "Transaction" / pooler (port 6543).
+
+Connections are opened per-call and closed again (NOT reused/persistent) — deliberately.
+Transaction-mode PgBouncer is designed for short connect→query→disconnect usage, not a
+long-lived idle client connection. A prior attempt to hold one connection open across
+calls (for latency) caused *worse* multi-user latency in production: the pooler/network
+silently dropped the idle connection, the next query hung on a dead socket with no
+timeout, and — because that shared connection was lock-guarded — every other concurrent
+user's request queued up behind that one hung call. connect_timeout + statement_timeout
+below bound each call so a bad connection/query fails fast instead of hanging; they do
+NOT bring back a persistent connection.
 """
 
 import os
 import json
 import re
-import threading
-from contextlib import contextmanager
 from datetime import date, datetime
 from typing import List, Dict, Any, Optional
 from utils.logger import logger
@@ -211,8 +219,6 @@ class SupabaseService:
         self.key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
         self.db_url = (os.getenv("SUPABASE_DB_URL") or "").strip()
         self._client = None
-        self._conn = None
-        self._db_lock = threading.Lock()
 
     @property
     def client(self):
@@ -220,40 +226,6 @@ class SupabaseService:
             from supabase import create_client
             self._client = create_client(self.url, self.key)
         return self._client
-
-    @contextmanager
-    def _cursor(self, cursor_factory=None):
-        """Yield a cursor on a lazily-created, reused Postgres connection.
-
-        Every call site used to open a fresh psycopg2.connect() (full
-        TCP+TLS handshake to the pooler) and close it again — the dominant
-        cost behind multi-second query turns. Mirrors the single-reused-
-        connection pattern MemoryService already uses, guarded by a lock
-        since psycopg2 connections aren't safe to share across threads
-        without one (FastAPI runs sync handlers in a thread pool).
-
-        If the connection has gone stale server-side (pooler idle timeout,
-        restart) rather than being locally .closed, the first query on it
-        raises OperationalError; discard it so the *next* call reconnects
-        instead of every call failing until the process restarts.
-        """
-        import psycopg2
-        with self._db_lock:
-            if self._conn is None or self._conn.closed != 0:
-                self._conn = psycopg2.connect(self.db_url)
-                self._conn.autocommit = True
-            conn = self._conn
-            try:
-                with conn.cursor(cursor_factory=cursor_factory) as cur:
-                    yield cur
-            except psycopg2.OperationalError:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                if self._conn is conn:
-                    self._conn = None
-                raise
 
     def get_schema(self) -> Dict[str, Any]:
         """Return table name, column list, and description for SQL generation."""
@@ -287,7 +259,9 @@ class SupabaseService:
             return {"ok": False, "error": "Only SELECT, INSERT, and UPDATE are allowed."}
 
         try:
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql)
                 if upper.startswith("SELECT"):
                     rows = cur.fetchall()
@@ -298,6 +272,7 @@ class SupabaseService:
                             if hasattr(v, "isoformat") and v is not None:
                                 d[k] = v.isoformat()
                         out.append(d)
+                    conn.close()
                     return {"ok": True, "rows": out, "operation": "select"}
                 else:
                     rowcount = cur.rowcount
@@ -312,6 +287,7 @@ class SupabaseService:
                                     d[k] = v.isoformat()
                             out.append(d)
                         rows = out
+                    conn.close()
                     op = "update" if upper.startswith("UPDATE") else "insert"
                     return {"ok": True, "rows": rows, "rowcount": rowcount, "operation": op}
         except Exception as e:
@@ -371,7 +347,9 @@ class SupabaseService:
             return {"ok": False, "error": "psycopg2 not installed (required for DB inserts)."}
 
         try:
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # Auto-assign bill_no if missing (UNIQUE constraint on (user_id, bill_no)
                 # protects against race conditions if two inserts hit the same second).
                 if not cleaned.get("bill_no"):
@@ -391,6 +369,7 @@ class SupabaseService:
 
                 cur.execute(sql, values)
                 row = cur.fetchone()
+            conn.close()
             out = dict(row) if row else {}
             for k, v in list(out.items()):
                 if hasattr(v, "isoformat") and v is not None:
@@ -460,7 +439,9 @@ class SupabaseService:
             return {"ok": False, "error": "psycopg2 not installed (required for DB queries)."}
 
         try:
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 try:
                     cur.execute(sql, params)
                 except Exception as col_err:
@@ -489,6 +470,7 @@ class SupabaseService:
                     else:
                         raise
                 rows = cur.fetchall()
+            conn.close()
             out = []
             for row in rows:
                 d = dict(row)
@@ -536,7 +518,9 @@ class SupabaseService:
 
         try:
             import calendar
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 try:
                     cur.execute(sql, params)
                 except Exception as col_err:
@@ -559,6 +543,7 @@ class SupabaseService:
                     else:
                         raise
                 rows = cur.fetchall()
+            conn.close()
             months = []
             for row in rows:
                 yr, mo = int(row["yr"]), int(row["mo"])
@@ -582,8 +567,11 @@ class SupabaseService:
             value = value.isoformat()
         try:
             import psycopg2
-            with self._cursor() as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor() as cur:
                 cur.execute(f'UPDATE public.job_entries SET "{field}" = %s WHERE id = %s', (value, row_id))
+                conn.close()
             return {"ok": True}
         except Exception as e:
             logger.error(f"Supabase update_job_entry_field error: {e}")
@@ -598,7 +586,9 @@ class SupabaseService:
             return {"ok": False, "error": "Database URL not configured."}
         try:
             import psycopg2
-            with self._cursor() as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor() as cur:
                 cur.execute(
                     'UPDATE public.job_entries SET poc_email = %s '
                     'WHERE user_id = %s AND (client_name ILIKE %s OR brand_name ILIKE %s) '
@@ -606,6 +596,7 @@ class SupabaseService:
                     (poc_email, str(user_id), f'%{client_name}%', f'%{client_name}%', '')
                 )
                 updated = cur.rowcount
+            conn.close()
             logger.info(f"[POC] Updated poc_email for {updated} rows (client={client_name}, user={user_id})")
             return {"ok": True, "updated": updated}
         except Exception as e:
@@ -664,9 +655,12 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
+            conn.close()
             out = []
             for r in rows:
                 d = dict(r)
@@ -706,9 +700,12 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
+            conn.close()
             out = []
             for r in rows:
                 d = dict(r)
@@ -740,7 +737,9 @@ class SupabaseService:
         except ImportError:
             return {"ok": False, "error": "psycopg2 not installed."}
         try:
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
                     SELECT id, pdf_filename, pdf_bytes, poc_email, poc_name,
@@ -754,6 +753,7 @@ class SupabaseService:
                     (str(user_id), client_name, int(year), month),
                 )
                 row = cur.fetchone()
+            conn.close()
             return {"ok": True, "data": dict(row) if row else None}
         except Exception as e:
             logger.error(f"[INVOICE_CACHE] get_cached_invoice failed: {e}")
@@ -786,7 +786,9 @@ class SupabaseService:
         except ImportError:
             return {"ok": False, "error": "psycopg2 not installed."}
         try:
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
                     INSERT INTO public.generated_invoices
@@ -816,6 +818,7 @@ class SupabaseService:
                     ),
                 )
                 rec = cur.fetchone()
+            conn.close()
             return {"ok": True, "id": rec["id"] if rec else None}
         except Exception as e:
             logger.error(f"[INVOICE_CACHE] upsert_cached_invoice failed: {e}")
@@ -835,9 +838,12 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, (str(user_id),))
                 row = cur.fetchone()
+            conn.close()
             if not row:
                 logger.info(f"[BANK] No bank details found for user_id={user_id}")
                 return {"ok": True, "data": None}
@@ -885,9 +891,12 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, params)
                 row = cur.fetchone()
+            conn.close()
             out = dict(row) if row else {}
             for k, v in list(out.items()):
                 if hasattr(v, "isoformat") and v is not None:
@@ -919,12 +928,15 @@ class SupabaseService:
         except ImportError:
             return True
         try:
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     "SELECT 1 FROM public.allowed_users WHERE user_id = %s LIMIT 1",
                     (str(user_id),),
                 )
                 row = cur.fetchone()
+            conn.close()
             return bool(row)
         except Exception as e:
             logger.warning(f"[BETA_GATE] allowlist check failed (fail-open): {e}")
@@ -944,9 +956,12 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, (str(user_id),))
                 row = cur.fetchone()
+            conn.close()
             if not row:
                 logger.info(f"[PROFILE] No profile found for user_id={user_id}")
                 return {"ok": True, "data": None}
@@ -1027,11 +1042,14 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            with self._cursor(cursor_factory=RealDictCursor) as cur:
+            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn.autocommit = True
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 logger.info(f"[PROFILE] SQL: {sql}")
                 logger.info(f"[PROFILE] Params: {params}")
                 cur.execute(sql, params)
                 row = cur.fetchone()
+            conn.close()
             out = dict(row) if row else {}
             for k, v in list(out.items()):
                 if hasattr(v, "isoformat") and v is not None:
