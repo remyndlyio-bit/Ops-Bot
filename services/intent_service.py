@@ -634,7 +634,7 @@ class IntentService:
             FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_INVOICE_NEED_BILLING,
             FLOW_INVOICE_NEED_POC_NAME, FLOW_INVOICE_NEED_POC_EMAIL,
             FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
-            FLOW_DISAMBIGUATION,
+            FLOW_DISAMBIGUATION, FLOW_BANK_DETAILS, FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
         )
         # Already tracking — nothing to reconcile.
         if self.flow_machine.current_flow(user_id) != FLOW_IDLE:
@@ -706,6 +706,22 @@ class IntentService:
                 user_id, FLOW_DISAMBIGUATION,
                 {"count": len(rows), "type": pending.get("type", "delete")},
             )
+            return
+
+        # WP-3 slice 2: three simple, self-contained, single-reply-completes
+        # flows. Order among these three doesn't matter (mutually exclusive
+        # in practice — a user is never simultaneously mid bank-details AND
+        # mid name-change), each returns immediately on match.
+        if user_mem.get("awaiting_bank_details"):
+            self.flow_machine.set_state(user_id, FLOW_BANK_DETAILS, {})
+            return
+
+        if user_mem.get("awaiting_name_change"):
+            self.flow_machine.set_state(user_id, FLOW_NAME_CHANGE, {})
+            return
+
+        if user_mem.get("awaiting_link_id"):
+            self.flow_machine.set_state(user_id, FLOW_LINK_ACCOUNT, {})
             return
 
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
@@ -3385,6 +3401,13 @@ class IntentService:
                             # had just decided was stale, silently
                             # resurrecting an old numbered list.
                             "pending_disambiguation":     None,
+                            # WP-3 slice 2: same reasoning — these three must
+                            # be cleared alongside the FlowMachine TTL reset,
+                            # or the next reconciliation re-arms a flow the
+                            # TTL logic just decided was stale.
+                            "awaiting_bank_details":      False,
+                            "awaiting_name_change":       False,
+                            "awaiting_link_id":           False,
                         }
                         self.memory.update_user_memory(user_id, _stale_clear)
                         # Also drop any in-progress smart-capture form.

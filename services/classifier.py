@@ -147,6 +147,30 @@ def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Di
             "    fix — a fragile keyword/regex guard previously misread ordinary questions\n"
             "    as replies to a pending prompt.\n"
         ),
+        "BANK_DETAILS": (
+            "  - The bot asked the user to send their OWN bank details (account name,\n"
+            "    bank name, account number, IFSC, optional UPI) in one structured message.\n"
+            "  - FLOW_RESPONSE: any message that looks like it's supplying those fields\n"
+            "    (contains words like account/bank/IFSC/UPI, or a mix of digits and labels).\n"
+            "  - CANCEL: 'cancel', 'stop', 'nevermind', 'skip', or similar.\n"
+            "  - SIDE_QUESTION: a genuinely unrelated question (including one about a PRIOR\n"
+            "    answer's scope) is SIDE_QUESTION, never FLOW_RESPONSE.\n"
+        ),
+        "NAME_CHANGE": (
+            "  - The bot asked what the user's new display name should be.\n"
+            "  - FLOW_RESPONSE: any short text that reads as a name (1-4 words, no '?').\n"
+            "  - CANCEL: 'cancel', 'nevermind', 'no', or similar.\n"
+            "  - SIDE_QUESTION: a genuinely unrelated question is SIDE_QUESTION, never\n"
+            "    FLOW_RESPONSE — even a short one.\n"
+        ),
+        "LINK_ACCOUNT": (
+            "  - The bot asked for the user's ID from the OTHER platform (Telegram/WhatsApp)\n"
+            "    to link accounts.\n"
+            "  - FLOW_RESPONSE: a numeric ID (5+ digits) or a 'whatsapp:+...' string.\n"
+            "  - CANCEL: 'cancel', 'nevermind', 'no', or similar.\n"
+            "  - SIDE_QUESTION: a genuinely unrelated question is SIDE_QUESTION, never\n"
+            "    FLOW_RESPONSE, even if it happens to contain a number.\n"
+        ),
     }.get(current_flow, "")
     return (
         "\n\nACTIVE FLOW (the bot just asked a question and is waiting):\n"

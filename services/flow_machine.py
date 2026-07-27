@@ -49,6 +49,13 @@ FLOW_SMART_CAPTURE_CONFIRM_PENDING    = "SMART_CAPTURE_CONFIRM_PENDING"
 # call and so can't be reconciled the same way. That mismatch is why audit-reply
 # stays on its own (already-hardened, see the P0 fix) path for now.
 FLOW_DISAMBIGUATION                   = "DISAMBIGUATION"
+# WP-3 slice 2 — simple, self-contained "prompted once, single reply
+# completes it" flows. All three are armed synchronously within
+# process_request (same shape as the invoice/smart-capture flows above), so
+# they fit the existing reconciliation pattern directly.
+FLOW_BANK_DETAILS                     = "BANK_DETAILS"
+FLOW_NAME_CHANGE                      = "NAME_CHANGE"
+FLOW_LINK_ACCOUNT                     = "LINK_ACCOUNT"
 
 KNOWN_FLOWS = {
     FLOW_IDLE,
@@ -59,6 +66,9 @@ KNOWN_FLOWS = {
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
     FLOW_SMART_CAPTURE_CONFIRM_PENDING,
     FLOW_DISAMBIGUATION,
+    FLOW_BANK_DETAILS,
+    FLOW_NAME_CHANGE,
+    FLOW_LINK_ACCOUNT,
 }
 
 # Idle TTL: 30 min of silence in a flow → auto-reset to IDLE.

@@ -26,6 +26,9 @@ from services.flow_machine import (
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
     FLOW_SMART_CAPTURE_CONFIRM_PENDING,
     FLOW_DISAMBIGUATION,
+    FLOW_BANK_DETAILS,
+    FLOW_NAME_CHANGE,
+    FLOW_LINK_ACCOUNT,
 )
 from utils.logger import logger
 
@@ -405,6 +408,111 @@ class Disambiguation(Flow):
                 "trigger_invoice": False, "invoice_data": {}}
 
 
+# ── BANK_DETAILS (WP-3 slice 2) ─────────────────────────────────────────
+
+class BankDetails(Flow):
+    """Bot asked the user to send their own bank details in one structured
+    message. Delegates to the existing _handle_bank_details_response, which
+    already: accepts 'cancel'/'stop'/'nevermind'/'skip'; re-prompts (and
+    re-arms the legacy flag) on an unparseable message; and — if a
+    pending_invoice was waiting on this — resumes the invoice flow after a
+    successful save."""
+
+    name = FLOW_BANK_DETAILS
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(f"[FLOW_V2] BankDetails.handle_response user={user_id}")
+        result = intent_service._handle_bank_details_response(user_id, message)
+        # An unparseable message re-arms awaiting_bank_details so the user
+        # can retry — mirrors InvoiceNeedPocEmail's same check-after pattern.
+        try:
+            user_mem_after = intent_service.memory.get_user_memory(user_id) or {}
+            if not user_mem_after.get("awaiting_bank_details"):
+                intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        return "\n\n(Still waiting on your bank details — account name, bank, account number, IFSC — or 'cancel' to skip.)"
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        result = intent_service._handle_bank_details_response(user_id, "cancel")
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+
+# ── NAME_CHANGE (WP-3 slice 2) ──────────────────────────────────────────
+
+class NameChange(Flow):
+    """Bot asked what the user's new display name should be. Delegates to
+    the existing _process_name_change, which accepts 'cancel'/'nevermind'/
+    'no' and otherwise applies the reply as the new (title-cased) name —
+    always completes in one turn, no retry loop."""
+
+    name = FLOW_NAME_CHANGE
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(f"[FLOW_V2] NameChange.handle_response user={user_id}")
+        result = intent_service._process_name_change(user_id, message)
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        return "\n\n(Still waiting on what to change your name to — or 'cancel' to keep it as-is.)"
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        result = intent_service._process_name_change(user_id, "cancel")
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+
+# ── LINK_ACCOUNT (WP-3 slice 2) ─────────────────────────────────────────
+
+class LinkAccount(Flow):
+    """Bot asked for the user's ID from the other platform (Telegram/
+    WhatsApp) to link cross-platform data access. Delegates to the existing
+    _process_link_id, which accepts 'cancel'/'nevermind'/'no' and otherwise
+    treats the reply as the ID to link — always completes in one turn."""
+
+    name = FLOW_LINK_ACCOUNT
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(f"[FLOW_V2] LinkAccount.handle_response user={user_id}")
+        result = intent_service._process_link_id(user_id, message)
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        return "\n\n(Still waiting on the other platform's user ID to link — or 'cancel' to skip.)"
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        result = intent_service._process_link_id(user_id, "cancel")
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+
 # Registry — dispatcher uses this to look up the right Flow by name.
 REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_AWAIT_SEND_CONFIRM:     InvoiceAwaitSendConfirm(),
@@ -414,6 +522,9 @@ REGISTRY: Dict[str, Flow] = {
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION: SmartCaptureNeedDescription(),
     FLOW_SMART_CAPTURE_CONFIRM_PENDING:  SmartCaptureConfirmPending(),
     FLOW_DISAMBIGUATION:                 Disambiguation(),
+    FLOW_BANK_DETAILS:                   BankDetails(),
+    FLOW_NAME_CHANGE:                    NameChange(),
+    FLOW_LINK_ACCOUNT:                   LinkAccount(),
 }
 
 
