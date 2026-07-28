@@ -190,6 +190,39 @@ class TestReconstructMessage:
         result = svc._reconstruct_message("u1", "this month", [])
         assert "nike" not in result.lower() and "garnier" not in result.lower()
 
+    def test_new_question_containing_this_month_not_hijacked_by_stale_invoice_intent(self):
+        """Live production bug: after generating an invoice for a client,
+        asking an unrelated question that happens to contain 'this month'
+        ("what are my number of jobs this month") got silently rewritten
+        into "Generate invoice for <that client> for what are my number
+        of jobs this month" -- Case 5 matched on the bare substring "this
+        month" with no check that the message was actually a short/
+        ambiguous fragment rather than a complete new question. The user
+        asked for a job count and got sent someone else's invoice again."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {
+                "operation": "generate_invoice", "client_name": "Awesome Labs",
+                "month": "February", "year": 2026, "entity": "invoice",
+            }
+        }
+        msg = "what are my number of jobs this month"
+        result = svc._reconstruct_message("u1", msg, [])
+        assert result == msg
+        assert "invoice" not in result.lower()
+        assert "awesome labs" not in result.lower()
+
+    def test_question_after_query_result_not_hijacked_either(self):
+        """Same guard, different last_intent shape (entity=jobs, not invoice)
+        -- a genuine question must never be merged with stale context."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {"operation": "show jobs", "client_name": "Nike", "entity": "jobs"}
+        }
+        msg = "how many jobs this month"
+        result = svc._reconstruct_message("u1", msg, [])
+        assert result == msg
+
 
 class TestDisambiguationInterruptedByUnrelatedMessage:
     """A pending disambiguation must not swallow an unrelated new question —

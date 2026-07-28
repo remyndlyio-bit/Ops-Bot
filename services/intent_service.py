@@ -811,6 +811,20 @@ class IntentService:
         msg_lower = message.strip().lower()
         word_count = len(message.strip().split())
 
+        # A genuine question is never a follow-up fragment to merge with
+        # stale last_intent context -- it's asking something new, not
+        # answering/refining what the bot last said. Without this guard,
+        # Case 5 below can misfire on ANY message containing "this month"/
+        # "last month" regardless of shape: "what are my number of jobs
+        # this month" got silently rewritten into "Generate invoice for
+        # <stale client> for what are my number of jobs this month" because
+        # the user's last_intent was an unrelated invoice generated minutes
+        # earlier -- a completely different request replaced without the
+        # user ever seeing it happen. Same guard class as the P0 fix for
+        # onboarding's name/industry steps (see _looks_like_a_question).
+        if _looks_like_a_question(message):
+            return message
+
         # Skip reconstruction for messages that are already self-contained
         # (long enough AND contain an action verb + entity)
         _ACTION_VERBS = {"generate", "create", "send", "show", "get", "list", "give",
