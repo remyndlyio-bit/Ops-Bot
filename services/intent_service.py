@@ -46,6 +46,7 @@ from typing import Dict, List, Optional
 import json
 import os
 import re
+import threading
 import time
 
 
@@ -646,6 +647,18 @@ class IntentService:
         # flag-flipped on/off mid-flow.
         from services.flow_machine import FlowMachine as _FlowMachine
         self.flow_machine = _FlowMachine(self.memory)
+        # Per-turn profile cache. intent_service is a module-level singleton
+        # (main.py) shared across every request, and FastAPI runs sync
+        # handlers in a thread pool, so this must be thread-local rather
+        # than a plain instance attribute. Populated once near the top of
+        # _process_request_impl and read by _get_user_name, which used to
+        # re-fetch the same row from Supabase on every call — e.g. a single
+        # SMALL_TALK turn hit get_user_profile twice (once for the
+        # onboarding check, once again inside _detect_small_talk's
+        # personalization). Never invalidated mid-turn; that's fine because
+        # nothing in the small-talk/personalization paths that reads it also
+        # writes the profile in the same turn.
+        self._turn_cache = threading.local()
 
     def _reconcile_legacy_to_flow_machine(self, user_id: str, user_mem: Dict) -> None:
         """Once per message: if FlowMachine is IDLE but a legacy awaiting_* flag
@@ -3305,6 +3318,12 @@ class IntentService:
         elif not profile.get("data", {}).get("onboarded_at"):
             # User exists but not onboarded - continue onboarding
             return self._continue_onboarding(user_id, message, profile["data"])
+
+        # From here on the profile is valid, fully onboarded, and won't be
+        # written again this turn by anything that also reads it — cache it
+        # so repeated lookups (_get_user_name) reuse this fetch.
+        self._turn_cache.user_id = user_id
+        self._turn_cache.profile = profile
 
         from services.business_logic_service import BusinessLogicService
         logic = BusinessLogicService()
@@ -6371,7 +6390,10 @@ class IntentService:
 
     def _get_user_name(self, user_id: str) -> str:
         """Get user's name from profile, return None if not found."""
-        profile = self.supabase.get_user_profile(user_id)
+        if getattr(self._turn_cache, "user_id", None) == user_id:
+            profile = self._turn_cache.profile
+        else:
+            profile = self.supabase.get_user_profile(user_id)
         if profile.get("ok") and profile.get("data"):
             return profile["data"].get("name")
         return None

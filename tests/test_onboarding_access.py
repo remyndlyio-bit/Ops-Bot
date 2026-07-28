@@ -148,6 +148,55 @@ class TestBetaGate:
         assert svc.supabase.get_user_profile.call_count == 1
 
 
+class TestTurnProfileCache:
+    """_get_user_name() used to call get_user_profile() every time it was
+    invoked, even when _process_request_impl had already fetched the same
+    row moments earlier in the same turn -- e.g. a SMALL_TALK "Hi" hit
+    get_user_profile twice (once for the onboarding check, again inside
+    _detect_small_talk's name personalization). Railway logs showed this
+    as a real contributor to per-turn latency (each call is a live network
+    round trip to Supabase, see services/supabase_service.py)."""
+
+    def test_get_user_name_uses_cached_profile(self):
+        svc = _make_svc()
+        svc._turn_cache.user_id = "u1"
+        svc._turn_cache.profile = {"ok": True, "data": {"name": "Akshaj"}}
+        name = svc._get_user_name("u1")
+        assert name == "Akshaj"
+        svc.supabase.get_user_profile.assert_not_called()
+
+    def test_get_user_name_falls_back_when_no_cache(self):
+        svc = _make_svc()
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "Akshaj"}}
+        name = svc._get_user_name("u1")
+        assert name == "Akshaj"
+        svc.supabase.get_user_profile.assert_called_once_with("u1")
+
+    def test_get_user_name_ignores_cache_for_a_different_user(self):
+        """The cache is a single slot for whichever turn is running on this
+        thread -- must never leak one user's cached name onto another."""
+        svc = _make_svc()
+        svc._turn_cache.user_id = "u1"
+        svc._turn_cache.profile = {"ok": True, "data": {"name": "Akshaj"}}
+        svc.supabase.get_user_profile.return_value = {"ok": True, "data": {"name": "Nikkunj"}}
+        name = svc._get_user_name("u2")
+        assert name == "Nikkunj"
+        svc.supabase.get_user_profile.assert_called_once_with("u2")
+
+    def test_process_request_populates_cache_for_onboarded_user(self, monkeypatch):
+        monkeypatch.delenv("BETA_GATE_ENABLED", raising=False)
+        svc = _make_svc()
+        svc.supabase.get_user_profile.return_value = {
+            "ok": True, "data": {"onboarded_at": "2024-01-01T00:00:00", "name": "Nikkunj"},
+        }
+        svc.memory.get_form_state.return_value = {"form_type": "x"}
+        svc._handle_form_step = MagicMock(return_value={"operation": "stub", "response": "ok"})
+        svc.process_request("u1", "hi")
+        assert svc._turn_cache.user_id == "u1"
+        assert svc._turn_cache.profile["data"]["name"] == "Nikkunj"
+        assert svc.supabase.get_user_profile.call_count == 1
+
+
 class TestNewUserRouting:
     """Post-gate: how process_request decides new-user vs continue-onboarding
     vs pass-through, including defensive handling of a broken profile lookup."""
