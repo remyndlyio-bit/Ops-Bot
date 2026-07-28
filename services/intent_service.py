@@ -1489,16 +1489,22 @@ class IntentService:
             logger.info("[FOLLOWUP] No last_row_data in context - allowing new query")
             return None
 
+        # Check the cheap, deterministic field match FIRST. Whenever it finds
+        # nothing, this function returns None regardless of what the AI
+        # history-question check below would have said — so that check's
+        # result never affects the outcome in that branch, and calling it
+        # first (as this used to) burned a full LLM round trip on EVERY turn
+        # with any cached row, including plainly standalone queries like
+        # "how many jobs this month" that were always going to fall through.
+        requested_field = self._is_followup_field_request(message, columns)
+        if not requested_field:
+            logger.info("[FOLLOWUP] Not a follow-up field request - allowing new query")
+            return None
+
         # If the user is asking about a past/historical value, skip the short-circuit
         # so the full-row query path runs and Gemini can read the notes change history.
         if self.gemini.is_history_question(message):
             logger.info("[FOLLOWUP] History question detected by AI — skipping short-circuit, using full row")
-            return None
-
-        # Check if this is a follow-up field request
-        requested_field = self._is_followup_field_request(message, columns)
-        if not requested_field:
-            logger.info("[FOLLOWUP] Not a follow-up field request - allowing new query")
             return None
         
         logger.info(f"[FOLLOWUP] Looking for field '{requested_field}' in stored row with keys: {list(last_row_data.keys())}")
@@ -4003,7 +4009,18 @@ class IntentService:
                     except (ValueError, TypeError):
                         pass
 
-            if cached_invoice:
+            if cached_invoice and _looks_like_a_question(message):
+                # A genuine question ("what are my number of jobs this
+                # month") is never "yes, send it" -- skip the AI call
+                # entirely rather than paying a full LLM round trip on
+                # every turn that merely happens to have a cached invoice
+                # sitting in memory, regardless of what the user actually
+                # asked. Deliberately narrow: doesn't replace the AI check
+                # for genuinely ambiguous non-question replies, which still
+                # need it (that's why this isn't a keyword list).
+                is_send_to_client = False
+                logger.info(f"[SEND_CHECK] Skipped AI call — message looks like a question, not a send confirmation: '{message[:60]}'")
+            elif cached_invoice:
                 cached_client = cached_invoice.get("client_name", "")
                 # Get last bot message for context
                 last_bot_msg = ""

@@ -124,6 +124,22 @@ class TestFollowupAnswersFromContext:
         svc.memory.get_user_memory.return_value = {}
         assert svc._try_answer_from_context("u1", "what's the fee?", COLUMNS) is None
 
+    def test_standalone_query_skips_ai_history_check(self):
+        """Live production latency finding: is_history_question() (an AI
+        call) used to fire unconditionally whenever ANY row was cached,
+        even for messages _is_followup_field_request already deterministically
+        recognises as standalone (e.g. containing "this month") -- wasting a
+        full LLM round trip whose result couldn't possibly change the
+        outcome, since the function returns None either way once no field
+        matches. Check the cheap deterministic path first."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "uscf_context": {"last_row_data": {"result": 3}}
+        }
+        resp = svc._try_answer_from_context("u1", "what are my number of jobs this month", COLUMNS)
+        assert resp is None
+        svc.gemini.is_history_question.assert_not_called()
+
     def test_field_absent_from_cached_row_falls_through(self):
         """Cached row from an aggregate/partial select doesn't have the asked
         field — must defer to a fresh query, never invent a value."""

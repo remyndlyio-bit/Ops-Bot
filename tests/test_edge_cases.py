@@ -577,6 +577,23 @@ class TestStaleCachedInvoice:
         ]
         assert len(null_cache_calls) == 0, "Fresh cache (5 min) should not be cleared"
 
+    def test_question_with_cached_invoice_skips_ai_send_check(self):
+        """Live production latency finding: a cached invoice sitting in
+        memory made [SEND_CHECK] fire a full LLM call on EVERY subsequent
+        turn regardless of content — "what are my number of jobs this
+        month" (a plain question, nothing to do with sending anything)
+        still paid for an is_send_to_client_intent round trip. A genuine
+        question is never a send confirmation; skip the AI call for it."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_generated_invoice": self._cached_invoice(5)
+        }
+        svc.supabase.execute_sql.return_value = {"ok": True, "rows": [{"result": 3}]}
+        svc.gemini.parse_user_intent.return_value = {"operation": "GEMINI_ERROR", "parameters": {}}
+
+        svc.process_request("user1", "what are my number of jobs this month")
+        svc.gemini.is_send_to_client_intent.assert_not_called()
+
     def test_stale_cache_cleared_on_send_attempt(self):
         svc = _make_svc()
         svc.memory.get_user_memory.return_value = {
