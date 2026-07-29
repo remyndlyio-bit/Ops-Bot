@@ -29,6 +29,7 @@ Intent = Literal[
     "WRITE_UPDATE",
     "WRITE_DELETE",
     "WRITE_INVOICE",
+    "AUDIT_REPLY",
     "FEATURE_QUESTION",
     "SMALL_TALK",
     "UNKNOWN",
@@ -36,7 +37,7 @@ Intent = Literal[
 
 VALID_INTENTS = {
     "READ_QUERY", "READ_AGGREGATE", "WRITE_CREATE", "WRITE_UPDATE",
-    "WRITE_DELETE", "WRITE_INVOICE", "FEATURE_QUESTION", "SMALL_TALK", "UNKNOWN",
+    "WRITE_DELETE", "WRITE_INVOICE", "AUDIT_REPLY", "FEATURE_QUESTION", "SMALL_TALK", "UNKNOWN",
 }
 
 # How a fresh intent combines with whatever flow the user is currently in.
@@ -79,6 +80,26 @@ class Verdict(TypedDict):
     # "sum"|"count"|"avg"|"list"|None}. None when the message is
     # self-contained (nothing to inherit) or not a READ intent.
     resolved_query: Optional[Dict[str, Any]]
+
+
+def _idle_context_block(current_context: Optional[Dict[str, Any]]) -> str:
+    """Return prompt guidance for IDLE-state context signals (audit_pending, etc.)."""
+    if not current_context:
+        return ""
+    audit_pending = current_context.get("audit_pending", False)
+    if not audit_pending:
+        return ""
+    return (
+        "ACTIVE CONTEXT: The bot recently sent a payment audit reminder with a list\n"
+        "of unpaid invoices. The user may be replying to that prompt.\n"
+        "- If the user's message is a SHORT, IMPERATIVE reply to the audit\n"
+        "  (e.g. 'paid', 'paid 2', 'all paid', 'later', 'remind me later'),\n"
+        "  classify as AUDIT_REPLY.\n"
+        "- REJECT anything question-shaped (contains '?' or words like 'how', 'do',\n"
+        "  'what', 'can') — questions are not audit replies, they're new queries.\n"
+        "  Examples of REJECTS: 'how many have paid?' (READ_AGGREGATE),\n"
+        "  'do these include paid ones?' (READ_QUERY).\n\n"
+    )
 
 
 def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Dict[str, Any]]) -> str:
@@ -260,6 +281,7 @@ def _build_prompt(
 
     feat_block = f"FEATURE CATALOG (truth source for FEATURE_QUESTION and UNKNOWN):\n{features_doc}\n\n" if features_doc else ""
 
+    idle_block = _idle_context_block(current_context) if not current_flow or current_flow == "IDLE" else ""
     flow_block = _flow_compat_block(current_flow, current_context)
     flow_field_line = (
         '  "flow_compatible": one of [FLOW_RESPONSE, CANCEL, SIDE_QUESTION, NEW_FLOW]\n'
@@ -276,7 +298,7 @@ def _build_prompt(
         "VERDICT SCHEMA:\n"
         "{\n"
         '  "intent":      one of [READ_QUERY, READ_AGGREGATE, WRITE_CREATE, WRITE_UPDATE,\n'
-        '                         WRITE_DELETE, WRITE_INVOICE, FEATURE_QUESTION,\n'
+        '                         WRITE_DELETE, WRITE_INVOICE, AUDIT_REPLY, FEATURE_QUESTION,\n'
         '                         SMALL_TALK, UNKNOWN],\n'
         '  "parameters":  object — intent-specific (client_name, month, year, fees, etc.).\n'
         '                 Use null for unknown values. Never invent.\n'
@@ -343,6 +365,15 @@ def _build_prompt(
         "               cache — no regeneration unless force_regenerate=true).\n"
         '              "regenerate invoice for X" / "fresh copy" → force_regenerate=true\n'
         "    parameters: {client_name?, month?, year?, force_regenerate?}\n\n"
+        "- AUDIT_REPLY: user is replying to a payment audit reminder (only when\n"
+        "  there is a pending audit list). Replies must be imperative and short —\n"
+        "  rejects anything question-shaped or elaborated.\n"
+        '    examples: "paid", "paid 2", "all paid", "later", "remind me later",\n'
+        '              "mark paid", "mark 1 paid"\n'
+        '    counter-examples: "how many have paid?" → READ_AGGREGATE\n'
+        '                      "do these jobs include paid ones?" → READ_QUERY (question\n'
+        "                       about an unrelated earlier answer, not a reply to audit)\n"
+        "    parameters: {}\n\n"
         "- FEATURE_QUESTION: user asks what Remyndly can do, how to do X,\n"
         "  or whether a feature is supported.\n"
         '    examples: "can you do OCR", "how do I update my bank details",\n'
@@ -381,6 +412,7 @@ def _build_prompt(
         f"SCHEMA SUMMARY:\n{schema_summary}\n\n"
         f"{recent}"
         f"{ledger_block}"
+        f"{idle_block}"
         f"{flow_block}"
         f"USER MESSAGE: {message}\n\n"
         "Your JSON Verdict:"

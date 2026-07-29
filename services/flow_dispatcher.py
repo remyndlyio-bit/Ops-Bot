@@ -80,6 +80,21 @@ def dispatch_idle(
             "invoice_data": {},
         }
 
+    # ── AUDIT_REPLY ────────────────────────────────────────────────────
+    if intent == "AUDIT_REPLY":
+        note_route("audit_reply_v2")
+        try:
+            from utils.pending_reminders import get_pending
+            pending = get_pending(user_id) or []
+            if pending:
+                result = intent_service._handle_pending_audit_reply(user_id, raw, raw.lower(), pending)
+                if result:
+                    return result
+        except Exception as e:
+            logger.warning(f"[V2_DISPATCH] _handle_pending_audit_reply error: {e}")
+        # Fallback if audit reply fails or no pending audit exists
+        return SHADOW_ONLY
+
     # ── FEATURE_QUESTION & UNKNOWN ────────────────────────────────────
     # Both route through the feature-aware AI responder so the user gets
     # an on-brand reply grounded in REMYNDLY_FEATURES.md. UNKNOWN here is

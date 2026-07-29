@@ -3214,13 +3214,21 @@ class IntentService:
         msg = message.strip().lower()
 
         # ── Overdue-audit branch — pending entries tagged _audit_row=True ─
+        # When FLOW_MACHINE_V2 is on, the classifier runs later and can detect
+        # AUDIT_REPLY. We skip audit handling here so v2 gets a chance first.
+        # When v2 is off, audit handling falls back to the legacy path.
         is_audit = any(p.get("_audit_row") for p in pending)
-        if is_audit:
+        _v2_enabled = _flow_machine_v2_enabled_for(user_id)
+        if is_audit and not _v2_enabled:
             resp = self._handle_pending_audit_reply(user_id, message, msg, pending)
             if resp is not None:
                 return resp
             # Fall through if the user typed something not recognized — let
             # the universal pipeline handle it (don't trap forever).
+            return None
+        elif is_audit and _v2_enabled:
+            # v2 is on — skip audit handling here, let the classifier route it.
+            # Return None to let the flow continue to v2 classification.
             return None
 
         # "skip" / "skip all" → clear pending
@@ -3876,10 +3884,13 @@ class IntentService:
                     )
                     if _is_idle:
                         try:
+                            _audit_pending = bool(get_pending(user_id))
+                            _idle_context = {"audit_pending": _audit_pending}
                             _verdict = _v2_classify(
                                 message, self.gemini,
                                 conversation_history=conversation_history,
                                 schema_summary=_schema_summary,
+                                current_context=_idle_context,
                                 ledger_entries=_ledger_entries_for_classifier,
                             )
                             if _verdict:
