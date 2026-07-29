@@ -1796,9 +1796,31 @@ class IntentService:
         # The keyword list above is English-only, so a Hindi/Hinglish new job
         # entry (e.g. "Nike ka kaam kiya 20 July ko, shooting, 25 hazaar")
         # never matches it and gets swallowed by the stale confirm/missing-field
-        # form as if it were a reply to "Yes/Edit". Fall back to the same
-        # AI new-query check used for the analogous awaiting_job_input escape
-        # hatch, so language isn't a special case.
+        # form as if it were a reply to "Yes/Edit".
+        #
+        # Deterministic fallback FIRST: a message with BOTH a date (day + month
+        # name -- month names stay in English even inside Hindi/Hinglish text in
+        # practice) AND a fee/amount token is unmistakably describing a new job,
+        # never a "Yes"/"Edit"/field-value reply. This is checked before the AI
+        # fallback below because that generic classifier (built to spot new
+        # QUERY/command-shaped messages) unreliably says "not a new query" for a
+        # Hindi STATEMENT like this one -- it isn't phrased as a command or
+        # question even though it clearly is a new, distinct job entry.
+        if not _looks_like_new_intent:
+            _has_date = bool(re.search(
+                r'\b\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',
+                _msg_lower,
+            ))
+            _has_amount = bool(re.search(
+                r'\d[\d,]*\s*(k|l|lakh|lac|crore|cr|hazaar|thousand|rs\.?|₹|rupees?)\b',
+                _msg_lower,
+            ))
+            if _has_date and _has_amount:
+                _looks_like_new_intent = True
+                logger.info(f"[FORM] Job-entry shape detected (date+amount) for {user_id}: '{message[:50]}'")
+        # AI fallback — same check used for the analogous awaiting_job_input
+        # escape hatch, so language isn't a special case for messages the
+        # date+amount heuristic above doesn't catch.
         if not _looks_like_new_intent and len(message.strip()) > 2:
             _looks_like_new_intent = self.gemini.is_new_query_not_response(
                 message,

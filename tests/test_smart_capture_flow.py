@@ -120,22 +120,60 @@ class TestFormStepEscapeHatches:
         assert result["operation"] == "form_cancelled"
         svc.memory.cancel_form.assert_called_once_with("u1")
 
-    def test_hindi_new_job_entry_cancels_old_form_via_ai_fallback(self):
-        """Live bug (#19): a Hindi/Hinglish new job entry ("ZZTEST Nike ka
-        kaam kiya 20 July ko, shooting, 25 hazaar") never matches the
-        English-only _new_intent_starts keyword list, so with a stale
-        confirm form still active it got swallowed into "Please reply Yes
-        to save or Edit to make changes" instead of being recognised as a
-        brand new entry. The AI fallback (same is_new_query_not_response
-        check already used for the analogous awaiting_job_input escape
-        hatch) must catch what the keyword list misses."""
+    def test_hindi_new_job_entry_cancels_old_form_even_when_ai_classifier_disagrees(self):
+        """Live bug (#19), found TWICE in successive live suite runs:
+
+        Run 1: a Hindi/Hinglish new job entry ("ZZTEST Nike ka kaam kiya 20
+        July ko, shooting, 25 hazaar") never matched the English-only
+        _new_intent_starts keyword list, so with a stale confirm form still
+        active it got swallowed into "Please reply Yes to save or Edit to
+        make changes" instead of being recognised as a brand new entry.
+
+        Run 2 (after adding an AI fallback using is_new_query_not_response):
+        the SAME message still failed live, because that classifier is
+        built to detect new QUERY/command-shaped messages, and a Hindi
+        STATEMENT describing a job ("I did work for Nike on 20 July...")
+        isn't phrased as a command or question -- the model said "not a new
+        query" even though it obviously is a new, distinct job entry.
+
+        The real fix is a deterministic heuristic that doesn't depend on
+        the classifier's judgment at all: a message with BOTH a date (day +
+        month name) AND a fee/amount token is unmistakably a new job entry.
+        This test pins that down by explicitly making the AI mock return
+        the WRONG answer (False) to prove the heuristic alone is sufficient."""
         svc = _make_svc()
-        svc.gemini.is_new_query_not_response.return_value = True
+        svc.gemini.is_new_query_not_response.return_value = False
         svc.memory.get_form_state.return_value = _form("smart_capture_confirm")
         msg = "ZZTEST Nike ka kaam kiya 20 July ko, shooting, 25 hazaar"
         result = svc._handle_form_step("u1", msg)
         assert result is None, f"Hindi new job entry was treated as a reply: {result}"
         svc.memory.cancel_form.assert_called_once_with("u1")
+        svc.gemini.is_new_query_not_response.assert_not_called()
+
+    @pytest.mark.parametrize("msg", [
+        "ZZTEST Nike ka kaam kiya 20 July ko, shooting, 25 hazaar",
+        "kiya Nike ke liye 5 Mar ko, dubbing, 1.5L",
+        "Bridgestone 12 Sep ko, shoot, 30k ka kaam",
+    ])
+    def test_date_plus_amount_heuristic_catches_job_entry_shape(self, msg):
+        """Broader coverage for the date+amount heuristic across a few
+        Hindi/Hinglish/mixed phrasings, independent of the AI classifier."""
+        svc = _make_svc()
+        svc.gemini.is_new_query_not_response.return_value = False
+        svc.memory.get_form_state.return_value = _form("smart_capture_confirm")
+        result = svc._handle_form_step("u1", msg)
+        assert result is None, f"{msg!r} was treated as a reply: {result}"
+
+    def test_date_without_amount_still_falls_back_to_ai(self):
+        """Over-narrowness guard: a message with a date but no amount isn't
+        caught by the deterministic heuristic, so it should still reach the
+        AI fallback (which decides normally)."""
+        svc = _make_svc()
+        svc.gemini.is_new_query_not_response.return_value = False
+        svc.memory.get_form_state.return_value = _form("smart_capture_confirm")
+        result = svc._handle_form_step("u1", "20 July")
+        svc.gemini.is_new_query_not_response.assert_called_once()
+        assert result is not None  # AI said "not a new query" -> falls through to confirm handler
 
     def test_ai_fallback_not_consulted_when_keyword_already_matched(self):
         """Efficiency/safety: don't call the AI classifier when the fast
