@@ -175,3 +175,78 @@ class TestScopeCheckDoesNotMisfireOnNormalQueries:
             svc.gemini.synthesize_response.return_value = "You have 3 unpaid jobs."
             svc.process_request("u1", "How many unpaid jobs do I have?")
         assert svc.supabase.execute_sql.called, "a genuinely new question must still query the DB"
+
+
+class TestTruncatedSynthesisFallsBackToDeterministicAnswer:
+    """Live production bug (found right after switching FLOW_MACHINE_V2 on):
+    a flaky upstream AI call returned "You've had" — 10 characters, cut off
+    mid-sentence, no number — as the synthesized reply to "How many have
+    paid" (an aggregate count query). It wasn't EMPTY, so the existing
+    empty-response fallback didn't catch it, and the incoherent fragment
+    went straight out to the user over WhatsApp. A short, digit-free
+    response to a data query is essentially always cut off — this must be
+    caught and replaced with the deterministic renderer, same as an empty
+    response already is."""
+
+    def test_short_digit_free_response_falls_back(self):
+        svc = _svc()
+        svc.supabase.get_schema.return_value = {
+            "table": "job_entries", "schema_name": "public",
+            "columns": ["id", "client_name", "fees", "paid"], "description": "x",
+        }
+        with patch("services.intent_service.execute_query_plan") as mock_exec:
+            mock_exec.return_value = {
+                "sql": "SELECT COUNT(DISTINCT client_name) AS result FROM public.job_entries WHERE user_id='u1' AND paid = 'Yes'",
+                "plan": {"metric": "count", "column": "client_name", "filters": {"paid": "yes"},
+                         "time_range": None, "group_by": None, "order": None, "limit": None},
+                "classification": {"operation": "query", "confidence": "high"},
+                "clarification": None, "_error": None,
+            }
+            svc.supabase.execute_sql.return_value = {"ok": True, "rows": [{"result": 12}], "operation": "select"}
+            svc.gemini.synthesize_response.return_value = "You've had"
+            result = svc.process_request("u1", "How many have paid")
+        assert result["response"] != "You've had"
+        assert "12" in result["response"]
+
+    def test_normal_short_response_with_a_digit_is_not_treated_as_truncated(self):
+        """Over-correction guard: a legitimately short, valid answer that
+        happens to contain a number must pass through untouched."""
+        svc = _svc()
+        svc.supabase.get_schema.return_value = {
+            "table": "job_entries", "schema_name": "public",
+            "columns": ["id", "client_name", "fees"], "description": "x",
+        }
+        with patch("services.intent_service.execute_query_plan") as mock_exec:
+            mock_exec.return_value = {
+                "sql": "SELECT COUNT(*) AS result FROM public.job_entries WHERE user_id='u1'",
+                "plan": {"metric": "count", "column": None, "filters": None,
+                         "time_range": None, "group_by": None, "order": None, "limit": None},
+                "classification": {"operation": "query", "confidence": "high"},
+                "clarification": None, "_error": None,
+            }
+            svc.supabase.execute_sql.return_value = {"ok": True, "rows": [{"result": 0}], "operation": "select"}
+            svc.gemini.synthesize_response.return_value = "₹0 so far."
+            result = svc.process_request("u1", "how much total work have I logged this whole relationship")
+        assert result["response"] == "₹0 so far."
+
+    def test_reasonably_long_digit_free_response_is_not_treated_as_truncated(self):
+        """Over-correction guard: a genuinely complete prose answer with no
+        digits (e.g. a client-name list) must not be flagged as truncated
+        just because it lacks numbers."""
+        svc = _svc()
+        svc.supabase.get_schema.return_value = {
+            "table": "job_entries", "schema_name": "public",
+            "columns": ["id", "client_name"], "description": "x",
+        }
+        with patch("services.intent_service.execute_query_plan") as mock_exec:
+            mock_exec.return_value = {
+                "sql": "SELECT DISTINCT client_name AS result FROM public.job_entries WHERE user_id='u1'",
+                "plan": {"metric": None, "column": "client_name", "filters": None,
+                         "time_range": None, "group_by": None, "order": None, "limit": None},
+                "classification": {"operation": "query", "confidence": "high"},
+                "clarification": None, "_error": None,
+            }
+            svc.supabase.execute_sql.return_value = {"ok": True, "rows": [{"result": "Nike"}], "operation": "select"}
+            svc.gemini.synthesize_response.return_value = "Nice — you're working with Nike right now."
+            result = svc.process_request("u1", "which single account have I been doing the most work for lately")
+        assert result["response"] == "Nice — you're working with Nike right now."

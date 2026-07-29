@@ -5808,8 +5808,21 @@ class IntentService:
                 else:
                     payload = build_clean_payload(rows, "select")
                     response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q, conversation_history=conversation_history)
-                    if not response or not response.strip():
-                        logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
+                    # Live bug: a flaky upstream call returned "You've had" (10
+                    # chars, cut off mid-sentence, no number) as a genuine
+                    # non-empty response for a "how many have paid" aggregate
+                    # query -- the empty-response check below didn't catch it
+                    # because the string wasn't empty, just incoherently
+                    # truncated, and it went straight out to WhatsApp as-is.
+                    # A real answer to a data query is either reasonably long
+                    # prose or contains the actual number/₹ amount; something
+                    # both short AND digit-free is almost certainly cut off.
+                    _looks_truncated = bool(response) and len(response.strip()) < 15 and not any(ch.isdigit() for ch in response)
+                    if not response or not response.strip() or _looks_truncated:
+                        if _looks_truncated:
+                            logger.warning(f"[QUERY_FAIL] synthesize_response looks truncated ({response!r}) for {len(rows)} rows, msg='{message[:60]}'")
+                        else:
+                            logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
                         # WP-4: deterministic fallback with headline + scope +
                         # follow-up, built from the SAME plan that produced
                         # the SQL — replaces the old message-keyword guess.
