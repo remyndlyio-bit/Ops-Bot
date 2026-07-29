@@ -93,6 +93,17 @@ def _is_aggregate_sql(sql: str) -> bool:
     )
 
 
+def _synthesis_looks_broken(response: Optional[str]) -> bool:
+    """A reply to a data question that is very short AND contains no digit is
+    almost certainly an upstream truncation. Live example: bot replied
+    'You've had' (10 chars, cut off mid-sentence). A real answer either
+    states the number/amount or is long enough to be complete prose."""
+    if not response or not response.strip():
+        return True
+    r = response.strip()
+    return len(r) < 15 and not any(ch.isdigit() for ch in r)
+
+
 def _format_job_card(row: dict) -> str:
     client = (row.get("client_name") or row.get("brand_name") or
               row.get("production_house") or "—").strip()
@@ -5133,7 +5144,7 @@ class IntentService:
                                     self.memory.update_user_memory(user_id, {"uscf_context": ctx})
                                     payload = build_clean_payload(rows, "select")
                                     response = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
-                                    if not response or not response.strip():
+                                    if _synthesis_looks_broken(response):
                                         response = "Here are the full details for your records."
                                     self._store_conversation(user_id, message, response)
                                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -5305,7 +5316,7 @@ class IntentService:
                                 self._update_sql_context(user_id, _direct_rows)
                             _payload = build_clean_payload(_direct_rows or _pre_rows, "select")
                             response = self.gemini.synthesize_response(_payload, message, conversation_history=conversation_history)
-                            if not response or not response.strip():
+                            if _synthesis_looks_broken(response):
                                 response = f"Done! Updated {_direct_exec.get('rowcount', 1)} record."
                             self._store_conversation(user_id, message, response)
                             return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -5808,18 +5819,8 @@ class IntentService:
                 else:
                     payload = build_clean_payload(rows, "select")
                     response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q, conversation_history=conversation_history)
-                    # Live bug: a flaky upstream call returned "You've had" (10
-                    # chars, cut off mid-sentence, no number) as a genuine
-                    # non-empty response for a "how many have paid" aggregate
-                    # query -- the empty-response check below didn't catch it
-                    # because the string wasn't empty, just incoherently
-                    # truncated, and it went straight out to WhatsApp as-is.
-                    # A real answer to a data query is either reasonably long
-                    # prose or contains the actual number/₹ amount; something
-                    # both short AND digit-free is almost certainly cut off.
-                    _looks_truncated = bool(response) and len(response.strip()) < 15 and not any(ch.isdigit() for ch in response)
-                    if not response or not response.strip() or _looks_truncated:
-                        if _looks_truncated:
+                    if _synthesis_looks_broken(response):
+                        if response and response.strip() and len(response.strip()) < 15:
                             logger.warning(f"[QUERY_FAIL] synthesize_response looks truncated ({response!r}) for {len(rows)} rows, msg='{message[:60]}'")
                         else:
                             logger.warning(f"[QUERY_FAIL] synthesize_response returned empty for {len(rows)} rows, msg='{message[:60]}'")
