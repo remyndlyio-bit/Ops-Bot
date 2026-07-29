@@ -142,3 +142,74 @@ class TestPendingDisambiguationMutualExclusivity:
                                  "services", "intent_service.py")).read()
         direct_arms = re.findall(r'update_user_memory\([^)]*\{\s*\n?\s*"pending_disambiguation":\s*\{', src)
         assert not direct_arms, "found a pending_disambiguation arm-site bypassing _arm_disambiguation"
+
+
+def _make_onboarded_svc():
+    svc = _make_svc()
+    svc.supabase.get_user_profile.return_value = {
+        "ok": True, "data": {"onboarded_at": "2024-01-01T00:00:00", "name": "Test User"},
+    }
+    svc.supabase.db_url = "postgresql://fake"
+    svc.gemini.is_history_question.return_value = False
+    svc.memory.get_form_state.return_value = None
+    # A truthy MagicMock() here would make every "is this a new query"
+    # check succeed by default, masking exactly the bug these tests pin
+    # down -- default it to False like the real "not a new query" case.
+    svc.gemini.is_new_query_not_response.return_value = False
+    return svc
+
+
+class TestIntentShiftGuardCommandShapeGate:
+    """Live bugs (#86, #87, #95): the "is this a new query?" AI classifier,
+    consulted whenever an awaiting_* single-question state is active, would
+    occasionally misclassify a perfectly valid ANSWER as a new command --
+    a raw email address, a malformed email, "Account: 12345" for bank
+    details -- none of which look like conversational replies to a
+    classifier with no shape prior. Once misclassified, the pending state
+    was cleared and the reply fell all the way through to the generic SQL
+    pipeline: POC-email replies landed in "I couldn't find a matching
+    record to update", and bank-details replies triggered a 41-row
+    disambiguation list.
+
+    The fix gates the AI call behind a cheap surface-shape check (a "?" or
+    a command verb at the start of the message) -- mirroring the existing
+    _RESPONSE_TOKENS short-circuit right above it. A message that doesn't
+    even look command-shaped never reaches the classifier, so it can't be
+    misclassified."""
+
+    def test_poc_email_reply_never_asks_the_ai_classifier(self):
+        svc = _make_onboarded_svc()
+        svc.memory.get_user_memory.return_value = {
+            "awaiting_invoice_poc_email": True,
+            "pending_poc_email_client": "Star Studios",
+            "pending_poc_email_row_ids": [1],
+        }
+        svc.supabase.execute_sql.return_value = {"ok": True, "rowcount": 1}
+        svc.process_request("u1", "rahul@starstudios.com")
+        svc.gemini.is_new_query_not_response.assert_not_called()
+
+    def test_malformed_email_reply_never_asks_the_ai_classifier(self):
+        svc = _make_onboarded_svc()
+        svc.memory.get_user_memory.return_value = {
+            "awaiting_invoice_poc_email": True,
+            "pending_poc_email_client": "DriveOne",
+        }
+        result = svc.process_request("u1", "rahul at starstudios dot com")
+        svc.gemini.is_new_query_not_response.assert_not_called()
+        assert result["operation"] == "invoice_poc_email_retry"
+
+    def test_bank_details_reply_never_asks_the_ai_classifier(self):
+        svc = _make_onboarded_svc()
+        svc.memory.get_user_memory.return_value = {"awaiting_bank_details": True}
+        svc.process_request("u1", "Account: 12345")
+        svc.gemini.is_new_query_not_response.assert_not_called()
+
+    def test_genuine_new_query_while_awaiting_still_reaches_the_ai_classifier(self):
+        """Over-correction guard: a message that DOES look command-shaped
+        ("show my jobs") must still go through the AI check so the intent
+        shift can legitimately clear a stale awaiting state."""
+        svc = _make_onboarded_svc()
+        svc.gemini.is_new_query_not_response.return_value = True
+        svc.memory.get_user_memory.return_value = {"awaiting_bank_details": True}
+        svc.process_request("u1", "show my jobs")
+        svc.gemini.is_new_query_not_response.assert_called_once()

@@ -33,6 +33,10 @@ def _make_svc():
     svc.memory = MagicMock()
     svc.memory.get_user_memory.return_value = {}
     svc.supabase.db_url = "postgresql://fake"
+    # Default to "not a new query" so the AI fallback in _handle_form_step's
+    # escape hatch doesn't spuriously cancel forms in tests that aren't
+    # exercising that fallback (a bare MagicMock() is truthy).
+    svc.gemini.is_new_query_not_response.return_value = False
     return svc
 
 
@@ -115,6 +119,33 @@ class TestFormStepEscapeHatches:
         result = svc._handle_form_step("u1", msg)
         assert result["operation"] == "form_cancelled"
         svc.memory.cancel_form.assert_called_once_with("u1")
+
+    def test_hindi_new_job_entry_cancels_old_form_via_ai_fallback(self):
+        """Live bug (#19): a Hindi/Hinglish new job entry ("ZZTEST Nike ka
+        kaam kiya 20 July ko, shooting, 25 hazaar") never matches the
+        English-only _new_intent_starts keyword list, so with a stale
+        confirm form still active it got swallowed into "Please reply Yes
+        to save or Edit to make changes" instead of being recognised as a
+        brand new entry. The AI fallback (same is_new_query_not_response
+        check already used for the analogous awaiting_job_input escape
+        hatch) must catch what the keyword list misses."""
+        svc = _make_svc()
+        svc.gemini.is_new_query_not_response.return_value = True
+        svc.memory.get_form_state.return_value = _form("smart_capture_confirm")
+        msg = "ZZTEST Nike ka kaam kiya 20 July ko, shooting, 25 hazaar"
+        result = svc._handle_form_step("u1", msg)
+        assert result is None, f"Hindi new job entry was treated as a reply: {result}"
+        svc.memory.cancel_form.assert_called_once_with("u1")
+
+    def test_ai_fallback_not_consulted_when_keyword_already_matched(self):
+        """Efficiency/safety: don't call the AI classifier when the fast
+        keyword path already decided — avoids an extra AI round-trip on the
+        common case and avoids a spurious call the assertion below would
+        otherwise miss."""
+        svc = _make_svc()
+        svc.memory.get_form_state.return_value = _form("smart_capture_confirm")
+        svc._handle_form_step("u1", "show my jobs")
+        svc.gemini.is_new_query_not_response.assert_not_called()
 
     def test_unknown_form_type_cancelled_silently(self):
         svc = _make_svc()

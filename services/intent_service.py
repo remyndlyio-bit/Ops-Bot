@@ -993,7 +993,14 @@ class IntentService:
                           "proceed", "fine", "alright", "yup", "haan", "thik", "theek",
                           "generate", "create", "send"}
         _msg_words = set(re.findall(r"[a-z]+", msg_lower))
-        if pending == "confirm_alt_month" and client_name and month_val and (_msg_words & _AFFIRM_TOKENS) and word_count <= 4:
+        # Guard: only treat a bare "Yes" as confirming the alt-month suggestion if
+        # the bot's OWN LAST MESSAGE was actually that suggestion. pending_clarification
+        # is stored on last_intent, which can go stale if the conversation moves on to
+        # an unrelated question ("want more details?") before the user replies -- a bare
+        # "Yes" meant for that unrelated question silently triggered a real invoice
+        # generation for whatever client/month was left over from the earlier prompt.
+        _alt_month_prompt_active = "i do have records for" in last_assistant_msg
+        if pending == "confirm_alt_month" and client_name and month_val and (_msg_words & _AFFIRM_TOKENS) and word_count <= 4 and _alt_month_prompt_active:
             year_part = f" {last_intent.get('year')}" if last_intent.get("year") else ""
             verb = "Send" if "send" in operation.lower() else "Generate"
             reconstructed = f"{verb} invoice for {client_name} for {month_val}{year_part}"
@@ -1783,7 +1790,22 @@ class IntentService:
             "mark ", "set ", "update ", "delete ", "send ", "generate ", "add ",
             "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
         )
-        if any(_msg_lower == w.rstrip() or _msg_lower.startswith(w) for w in _new_intent_starts):
+        _looks_like_new_intent = any(
+            _msg_lower == w.rstrip() or _msg_lower.startswith(w) for w in _new_intent_starts
+        )
+        # The keyword list above is English-only, so a Hindi/Hinglish new job
+        # entry (e.g. "Nike ka kaam kiya 20 July ko, shooting, 25 hazaar")
+        # never matches it and gets swallowed by the stale confirm/missing-field
+        # form as if it were a reply to "Yes/Edit". Fall back to the same
+        # AI new-query check used for the analogous awaiting_job_input escape
+        # hatch, so language isn't a special case.
+        if not _looks_like_new_intent and len(message.strip()) > 2:
+            _looks_like_new_intent = self.gemini.is_new_query_not_response(
+                message,
+                "a Yes/Edit confirmation reply, or an answer to a missing-field "
+                "prompt, for a pending job-entry form"
+            )
+        if _looks_like_new_intent:
             self.memory.cancel_form(user_id)
             logger.info(f"[FORM] Cancelled stale form — new intent detected for {user_id}: '{message[:50]}'")
             return None
@@ -3973,8 +3995,30 @@ class IntentService:
                 }
                 _msg_stripped = message.strip().lower().rstrip(".!?")
                 _is_response_token = _msg_stripped in _RESPONSE_TOKENS
+                # Surface-shape gate: only bother asking the AI classifier when the
+                # message actually LOOKS like a command (a "?" or a query/command
+                # verb up front). Without this, a raw answer that happens to read
+                # oddly to the classifier -- an email address, "Account: 12345",
+                # a malformed email -- gets misclassified as a new query, the
+                # pending state is cleared, and the reply falls all the way through
+                # to the generic SQL pipeline (seen live as POC-email replies
+                # landing in "I couldn't find a matching record to update" and
+                # bank-details replies landing in a 41-row disambiguation list).
+                _COMMAND_LIKE_STARTS = (
+                    "who ", "what ", "when ", "where ", "how ", "why ", "which ",
+                    "show ", "list ", "find ", "tell ", "give ", "fetch ", "get me ",
+                    "do you ", "can you ", "are you ", "is there ",
+                    "delete ", "remove ", "update ", "modify ", "change ", "mark ",
+                    "generate invoice", "send invoice", "add ", "create ",
+                )
+                _looks_command_shaped = (
+                    "?" in message
+                    or any(_msg_stripped.startswith(s) for s in _COMMAND_LIKE_STARTS)
+                )
                 if _is_response_token:
                     logger.info(f"[INTENT_SHIFT] '{_msg_stripped}' is a response token — keeping pending state {_active_pending}")
+                elif not _looks_command_shaped:
+                    logger.info(f"[INTENT_SHIFT] '{_msg_stripped[:50]}' doesn't look command-shaped — keeping pending state {_active_pending} without asking the AI classifier")
                 else:
                     ctx_desc = "; ".join(_PENDING_STATES[k] for k in _active_pending)
                     if self.gemini.is_new_query_not_response(message, ctx_desc):

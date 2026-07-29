@@ -334,6 +334,50 @@ class TestReconstructMessage:
         result = svc._reconstruct_message("u1", "Yes", [])
         assert result == "Yes"
 
+    def test_stale_confirm_alt_month_not_hijacked_by_unrelated_yes(self):
+        """Live bug (#48): the bot asked 'did you mean February?' (persisting
+        last_intent.pending_clarification='confirm_alt_month' for Nike/Feb),
+        the conversation then moved on to something else entirely, and a bare
+        'Yes' meant for that unrelated later question got rewritten into
+        'Generate invoice for Nike for February' and silently triggered a
+        real invoice generation — because Case 0 trusted the stale
+        last_intent without checking whether the bot's last message was
+        actually the alt-month prompt."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {
+                "operation": "generate_invoice", "client_name": "Nike",
+                "month": "February", "year": 2026, "entity": "invoice",
+                "pending_clarification": "confirm_alt_month",
+            }
+        }
+        conversation_history = [
+            {"role": "assistant", "content": "Would you like more details on that job?"},
+        ]
+        result = svc._reconstruct_message("u1", "Yes", conversation_history)
+        assert result == "Yes"
+
+    def test_genuine_confirm_alt_month_still_works(self):
+        """Over-correction guard: when the bot's own last message really was
+        the alt-month suggestion, a bare 'Yes' must still reconstruct into
+        the invoice-generation request."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {
+                "operation": "generate_invoice", "client_name": "Nike",
+                "month": "February", "year": 2026, "entity": "invoice",
+                "pending_clarification": "confirm_alt_month",
+            }
+        }
+        conversation_history = [
+            {"role": "assistant", "content": (
+                "I found no jobs for Nike in March 2026.\n\n"
+                "I do have records for Nike in: February 2026."
+            )},
+        ]
+        result = svc._reconstruct_message("u1", "Yes", conversation_history)
+        assert "nike" in result.lower() and "february" in result.lower()
+
 
 class TestDisambiguationInterruptedByUnrelatedMessage:
     """A pending disambiguation must not swallow an unrelated new question —
