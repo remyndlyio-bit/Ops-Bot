@@ -239,6 +239,89 @@ class TestReconstructMessage:
         result = svc._reconstruct_message("u1", msg, [])
         assert result == msg
 
+    def test_standalone_aggregate_statement_not_hijacked_by_case5(self):
+        """Live production bug found in a second scenario-suite run: unlike
+        the question-shaped case above, "Last month earnings" and "My total
+        billing this year" are DECLARATIVE (no '?', no question-starter word)
+        so _looks_like_a_question doesn't catch them -- yet Case 5 still
+        matched the bare substring "last month"/"this year" and rewrote them
+        into an invoice-generation request for the stale client, discarding
+        the user's actual aggregate question."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {
+                "operation": "ACTION_TRIGGER", "client_name": "Nike",
+                "entity": "invoice", "pending_clarification": "month",
+            }
+        }
+        for msg in ("Last month earnings", "My total billing this year"):
+            result = svc._reconstruct_message("u1", msg, [])
+            assert result == msg, f"{msg!r} was hijacked into: {result!r}"
+
+    def test_bare_cancel_never_reconstructed_as_a_month_reply(self):
+        """Live bug: with pending_clarification == 'month' armed (from an
+        unrelated, much earlier invoice flow), a bare "cancel" -- meant to
+        cancel something else entirely (e.g. account linking) -- got
+        rewritten by Case 4 into "Generate invoice for Nike for cancel" and
+        silently triggered a real invoice generation instead of reaching
+        whatever cancel handler the user's message was actually meant for."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {
+                "operation": "ACTION_TRIGGER", "client_name": "Nike",
+                "entity": "invoice", "pending_clarification": "month",
+            }
+        }
+        for msg in ("cancel", "stop", "nevermind"):
+            result = svc._reconstruct_message("u1", msg, [])
+            assert result == msg, f"{msg!r} was hijacked into: {result!r}"
+
+    def test_non_month_word_not_treated_as_month_reply_case1(self):
+        """Case 1 (bare month reply) had no length guard: any message
+        merely CONTAINING a month name, while pending == 'month', was
+        treated as the reply -- so "ZZTEST Nike jobs in July" (a fresh,
+        self-contained jobs-listing query) got rewritten into "Generate
+        invoice for Nike for ZZTEST Nike jobs in July"."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {
+                "operation": "ACTION_TRIGGER", "client_name": "Nike",
+                "entity": "invoice", "pending_clarification": "month",
+            }
+        }
+        msg = "ZZTEST Nike jobs in July"
+        result = svc._reconstruct_message("u1", msg, [])
+        assert result == msg
+
+    def test_genuine_short_month_reply_still_works(self):
+        """Over-correction guard: a real bare month reply must still
+        reconstruct correctly."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {
+                "operation": "generate_invoice", "client_name": "Nike",
+                "entity": "invoice", "pending_clarification": "month",
+            }
+        }
+        result = svc._reconstruct_message("u1", "March 2025", [])
+        assert "nike" in result.lower() and "march 2025" in result.lower()
+
+    def test_yes_not_treated_as_a_month_value(self):
+        """Live bug: a bare "Yes" (meant to confirm an unrelated "want more
+        details?" offer) got swept into Case 4's pending == 'month' branch
+        and rewritten into "Generate invoice for Nike for Yes" purely
+        because it was <=2 words -- Case 4 never checked the word actually
+        looked like a month."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "last_intent": {
+                "operation": "ACTION_TRIGGER", "client_name": "Nike",
+                "entity": "invoice", "pending_clarification": "month",
+            }
+        }
+        result = svc._reconstruct_message("u1", "Yes", [])
+        assert result == "Yes"
+
 
 class TestDisambiguationInterruptedByUnrelatedMessage:
     """A pending disambiguation must not swallow an unrelated new question —

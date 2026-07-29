@@ -858,6 +858,17 @@ class IntentService:
         if _looks_like_a_question(message):
             return message
 
+        # A cancel/control word is never a value being supplied to whatever
+        # was pending -- Case 4 below (short reply + pending == "month")
+        # blindly appended ANY 1-2 word reply as if it were a month name,
+        # so a bare "cancel" (meant to cancel account-linking, or anything
+        # else entirely unrelated) got rewritten into "Generate invoice for
+        # <stale client> for cancel" and silently triggered a real invoice
+        # generation. Whatever handler "cancel" was actually meant for must
+        # see it unmodified.
+        if msg_lower in ("cancel", "stop", "nevermind", "never mind", "quit", "exit"):
+            return message
+
         # Skip reconstruction for messages that are already self-contained
         # (long enough AND contain an action verb + entity)
         _ACTION_VERBS = {"generate", "create", "send", "show", "get", "list", "give",
@@ -866,6 +877,24 @@ class IntentService:
         has_action = any(v in msg_lower for v in _ACTION_VERBS)
         if word_count >= 4 and has_action:
             return message  # Already self-contained
+
+        # A standalone aggregate/status question ("Last month earnings", "My
+        # total billing this year") has its own subject and is never a bare
+        # follow-up fragment referring back to whatever client happens to be
+        # sitting in last_intent -- even though it contains a bare time
+        # phrase ("last month") that Case 5 below would otherwise treat as a
+        # follow-up. Without this, "Last month earnings" with a stale
+        # last_intent={entity: invoice, client_name: Nike} got silently
+        # rewritten into an invoice-generation attempt for Nike instead of
+        # answering the actual question -- the user's message was replaced
+        # without them ever seeing it happen.
+        _STANDALONE_QUERY_SIGNALS = {
+            "total", "earning", "earnings", "income", "revenue", "fees", "billing",
+            "last week", "all", "how many", "how much", "list", "what", "when",
+            "unpaid", "paid", "pending", "outstanding", "average", "sum", "count",
+        }
+        if any(sig in msg_lower for sig in _STANDALONE_QUERY_SIGNALS):
+            return message
 
         # Short or ambiguous message — try to reconstruct from context
         user_mem = self.memory.get_user_memory(user_id)
@@ -906,7 +935,13 @@ class IntentService:
                         "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"}
         first_word = msg_lower.split()[0] if msg_lower.split() else ""
         is_month_reply = first_word in _MONTH_NAMES or any(m in msg_lower for m in _MONTH_NAMES)
-        if is_month_reply and pending == "month" and client_name:
+        # Guard: a bare month reply is short ("March", "just April", "in july
+        # please"). A longer message merely mentioning a month in passing
+        # ("ZZTEST Nike jobs in July") is a fresh, self-contained query, not
+        # an answer to "which month?" -- without this, it got rewritten into
+        # "Generate invoice for Nike for ZZTEST Nike jobs in July" and
+        # silently replaced the user's actual jobs-listing request.
+        if is_month_reply and pending == "month" and client_name and word_count <= 4:
             verb = "Send" if "send" in operation.lower() else "Generate"
             reconstructed = f"{verb} invoice for {client_name} for {message.strip()}"
 
@@ -939,7 +974,12 @@ class IntentService:
 
         # Case 4: Very short replies (1-2 words) with a pending clarification
         elif word_count <= 2 and pending and client_name:
-            if pending == "month":
+            # Guard: only treat it as a month value if it's actually
+            # month-shaped. Without this, a bare "Yes" (meant to confirm an
+            # unrelated "want more details?" offer elsewhere) got rewritten
+            # into "Generate invoice for Nike for Yes" and silently
+            # triggered invoice generation instead of answering the user.
+            if pending == "month" and (first_word in _MONTH_NAMES or any(m in msg_lower for m in _MONTH_NAMES)):
                 verb = "Send" if "send" in operation.lower() else "Generate"
                 reconstructed = f"{verb} invoice for {client_name} for {message.strip()}"
             elif pending == "confirm":
