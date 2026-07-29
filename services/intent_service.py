@@ -1713,7 +1713,7 @@ class IntentService:
         _msg_lower = message.strip().lower()
         _new_intent_starts = (
             "show ", "list ", "what ", "how ", "when ", "which ", "who ",
-            "mark ", "set ", "update ", "delete ", "send ", "generate ",
+            "mark ", "set ", "update ", "delete ", "send ", "generate ", "add ",
             "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
         )
         if any(_msg_lower == w.rstrip() or _msg_lower.startswith(w) for w in _new_intent_starts):

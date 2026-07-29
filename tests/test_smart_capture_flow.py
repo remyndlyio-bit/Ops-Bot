@@ -85,6 +85,29 @@ class TestFormStepEscapeHatches:
         assert result is None
         svc.memory.cancel_form.assert_called_once_with("u1")
 
+    @pytest.mark.parametrize("msg", [
+        "Add job for Nike, 20 July, shooting, 25000",
+        "add job Nike ke liye 20 July dubbing 15k",
+        "Add job for Star Studios, 20 July, dubbing, 15k",
+    ])
+    def test_add_job_message_cancels_old_form_instead_of_being_treated_as_a_reply(self, msg):
+        """Live bug found in a 134-scenario test run: with a smart-capture
+        confirmation card still active from a PRIOR job entry, sending a
+        fresh "Add job for ..." message didn't match the yes/no/edit
+        keywords _handle_smart_capture_confirm checks for, so it fell into
+        the "unrecognised reply" branch and got a bare "Please reply Yes to
+        save or Edit to make changes" with no field breakdown at all --
+        the user had nothing to review before confirming, and their actual
+        new job never got parsed. "add " was missing from the new-intent
+        escape-hatch word list (generate/send/mark/set/update/delete/show/
+        list were all there) even though it's the single most common way to
+        start a job-entry message."""
+        svc = _make_svc()
+        svc.memory.get_form_state.return_value = _form("smart_capture_confirm")
+        result = svc._handle_form_step("u1", msg)
+        assert result is None, f"{msg!r} was treated as a reply instead of a new job entry: {result}"
+        svc.memory.cancel_form.assert_called_once_with("u1")
+
     @pytest.mark.parametrize("msg", ["cancel", "stop", "nevermind", "abort", "exit"])
     def test_explicit_cancel_words_end_the_form(self, msg):
         svc = _make_svc()
