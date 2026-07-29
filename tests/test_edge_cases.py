@@ -906,6 +906,62 @@ class TestRegressionBatch3745:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 146 – The alt-month suggestion must preserve a SEND intent.
+# Live bug (#84): "Send invoice for X to client" with no data for the
+# requested month persisted last_intent for the single-alternate-month
+# suggestion with operation HARDCODED to "generate_invoice", discarding
+# whether the original request wanted the invoice emailed. A later "Yes"
+# then reconstructed into "Generate invoice for X" (never "Send ..."), so
+# the invoice flow never armed the send-confirmation state, and a
+# subsequent "No" (meant to decline sending) had nothing to decline and
+# fell through to the generic query pipeline instead of acknowledging the
+# decline. Confirmed live: after this fix, the reconstructed message reads
+# "Send invoice for Nike for February 2026" and a follow-up "No" correctly
+# returns operation=send_declined.
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestAltMonthSuggestionPreservesSendIntent:
+    def _run_no_data_month(self, svc, message):
+        svc.gemini.is_invoice_action_request.return_value = True
+        svc.gemini.parse_user_intent.return_value = {
+            "operation": "ACTION_TRIGGER",
+            "parameters": {"client_name": "Nike", "month": "March", "year": 2026},
+        }
+        svc.supabase.fetch_job_entries_for_invoice.return_value = {"ok": True, "rows": []}
+
+        def _execute_sql(sql, *a, **kw):
+            if "DISTINCT client_name, brand_name" in sql:
+                return {"ok": True, "rows": [{"client_name": "Nike", "brand_name": None,
+                                               "production_house": None}]}
+            if "TO_CHAR(job_date" in sql:
+                return {"ok": True, "rows": [{"period": "February  2026"}]}
+            return {"ok": True, "rows": []}
+
+        svc.supabase.execute_sql.side_effect = _execute_sql
+        return svc.process_request("user1", message)
+
+    def test_send_request_persists_send_email_operation(self):
+        svc = _make_svc()
+        svc._save_last_intent = MagicMock(wraps=svc._save_last_intent)
+        self._run_no_data_month(svc, "Send invoice for Nike for March to client")
+        calls = [c for c in svc._save_last_intent.call_args_list
+                 if c.kwargs.get("pending_clarification") == "confirm_alt_month"]
+        assert calls, "confirm_alt_month was never persisted"
+        assert calls[-1].kwargs.get("operation") == "SEND_EMAIL"
+
+    def test_plain_generate_request_still_persists_generate_operation(self):
+        """Over-correction guard: a plain (non-send) generate request must not
+        be rewritten into a send operation."""
+        svc = _make_svc()
+        svc._save_last_intent = MagicMock(wraps=svc._save_last_intent)
+        self._run_no_data_month(svc, "Generate invoice for Nike for March")
+        calls = [c for c in svc._save_last_intent.call_args_list
+                 if c.kwargs.get("pending_clarification") == "confirm_alt_month"]
+        assert calls, "confirm_alt_month was never persisted"
+        assert calls[-1].kwargs.get("operation") == "generate_invoice"
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 145 – A stale pending reminder must NOT hijack numeric / mid-flow messages.
 # Regression for: "Add a new job" → job description with "5 may 2025, 20k" got
 # answered with "Please reply with a number between 1 and 1, or 'skip'".

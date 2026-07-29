@@ -4817,9 +4817,18 @@ class IntentService:
                                 _alt_month = _parts[0] if _parts else None
                                 _alt_year = int(_parts[-1]) if _parts and _parts[-1].isdigit() else year_val
                                 if _alt_month:
+                                    # Preserve a SEND intent from the original message ("Send
+                                    # ... invoice to client") -- without this, Case 0 of
+                                    # _reconstruct_message always rewrote the later "Yes" into
+                                    # "Generate invoice for X" regardless of whether the user
+                                    # originally asked to send it, so the generate-only flow
+                                    # never armed awaiting_send_confirmation and a subsequent
+                                    # "No" (meant to decline the send) had nothing to decline
+                                    # and fell through to the generic query pipeline.
+                                    _alt_op = "SEND_EMAIL" if ("send" in msg_lower or "email" in msg_lower or "e-mail" in msg_lower) else "generate_invoice"
                                     self._save_last_intent(
                                         user_id,
-                                        operation="generate_invoice",
+                                        operation=_alt_op,
                                         client_name=client_name,
                                         month=_alt_month,
                                         year=_alt_year,
