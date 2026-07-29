@@ -3677,67 +3677,71 @@ class IntentService:
                 logger.info(f"[ROUTE] bank_details_response claimed message: {message[:60]!r}")
                 note_route("bank_details_response")
                 return self._handle_bank_details_response(user_id, message)
-            # Each explicit command is typo-tolerant (a misspelled target noun +
-            # an intent verb still routes here), so a typo can't silently fall
-            # through to the v2 classifier and get refused.
-            _BANK_TYPOS = ("bnk", "banck", "bnak", "detials", "detals", "deatils")
-            if self._cmd_with_typos(msg_lower, self._UPDATE_BANK_TRIGGERS, _BANK_TYPOS,
-                                    ("update", "change", "set", "edit", "add", "save", "new")):
-                logger.info(f"[ROUTE] prompt_bank_details claimed message: {message[:60]!r}")
-                note_route("prompt_bank_details")
-                return self._prompt_bank_details_format(user_id, message)
-            if self._cmd_with_typos(msg_lower, self._VIEW_BANK_TRIGGERS, _BANK_TYPOS,
-                                    ("show", "view", "see", "get", "check", "my", "what")):
-                logger.info(f"[ROUTE] show_bank_details claimed message: {message[:60]!r}")
-                note_route("show_bank_details")
-                return self._show_bank_details(user_id, message)
+            # Explicit settings commands (bank, name, address, user_id, link).
+            # When FLOW_MACHINE_V2 is on, the classifier handles these as SETTINGS_COMMAND
+            # or specific intent types. Only run legacy keyword checks when v2 is off.
+            if not _flow_machine_v2_enabled_for(user_id):
+                # Each explicit command is typo-tolerant (a misspelled target noun +
+                # an intent verb still routes here), so a typo can't silently fall
+                # through to the v2 classifier and get refused.
+                _BANK_TYPOS = ("bnk", "banck", "bnak", "detials", "detals", "deatils")
+                if self._cmd_with_typos(msg_lower, self._UPDATE_BANK_TRIGGERS, _BANK_TYPOS,
+                                        ("update", "change", "set", "edit", "add", "save", "new")):
+                    logger.info(f"[ROUTE] prompt_bank_details claimed message: {message[:60]!r}")
+                    note_route("prompt_bank_details")
+                    return self._prompt_bank_details_format(user_id, message)
+                if self._cmd_with_typos(msg_lower, self._VIEW_BANK_TRIGGERS, _BANK_TYPOS,
+                                        ("show", "view", "see", "get", "check", "my", "what")):
+                    logger.info(f"[ROUTE] show_bank_details claimed message: {message[:60]!r}")
+                    note_route("show_bank_details")
+                    return self._show_bank_details(user_id, message)
 
-            _NAME_CHANGE_TRIGGERS = [
-                "change my name", "update my name", "set my name",
-                "rename me", "my name is wrong", "fix my name",
-            ]
-            if self._cmd_with_typos(msg_lower, _NAME_CHANGE_TRIGGERS,
-                                    ("nme", "naem", "namee", "naame"),
-                                    ("change", "update", "set", "rename", "fix", "correct", "wrong")):
-                logger.info(f"[ROUTE] name_change claimed message: {message[:60]!r}")
-                note_route("name_change")
-                return self._handle_name_change(user_id, message)
+                _NAME_CHANGE_TRIGGERS = [
+                    "change my name", "update my name", "set my name",
+                    "rename me", "my name is wrong", "fix my name",
+                ]
+                if self._cmd_with_typos(msg_lower, _NAME_CHANGE_TRIGGERS,
+                                        ("nme", "naem", "namee", "naame"),
+                                        ("change", "update", "set", "rename", "fix", "correct", "wrong")):
+                    logger.info(f"[ROUTE] name_change claimed message: {message[:60]!r}")
+                    note_route("name_change")
+                    return self._handle_name_change(user_id, message)
 
-            _ADDRESS_UPDATE_TRIGGERS = [
-                "update my address", "change my address", "update my business address",
-                "change my business address", "update business address", "change business address",
-                "set my address", "edit my address", "update invoice address", "change invoice address",
-                "my address is", "my business address is", "wrong address", "address is wrong",
-                "fix my address", "correct my address",
-            ]
-            if self._cmd_with_typos(msg_lower, _ADDRESS_UPDATE_TRIGGERS,
-                                    ("adress", "adres", "addres", "addresss", "addrress", "adddress"),
-                                    ("change", "update", "edit", "set", "fix", "correct", "wrong")):
-                logger.info(f"[ROUTE] address_update claimed message: {message[:60]!r}")
-                note_route("address_update")
-                return self._handle_address_update(user_id, message, data_user_id)
+                _ADDRESS_UPDATE_TRIGGERS = [
+                    "update my address", "change my address", "update my business address",
+                    "change my business address", "update business address", "change business address",
+                    "set my address", "edit my address", "update invoice address", "change invoice address",
+                    "my address is", "my business address is", "wrong address", "address is wrong",
+                    "fix my address", "correct my address",
+                ]
+                if self._cmd_with_typos(msg_lower, _ADDRESS_UPDATE_TRIGGERS,
+                                        ("adress", "adres", "addres", "addresss", "addrress", "adddress"),
+                                        ("change", "update", "edit", "set", "fix", "correct", "wrong")):
+                    logger.info(f"[ROUTE] address_update claimed message: {message[:60]!r}")
+                    note_route("address_update")
+                    return self._handle_address_update(user_id, message, data_user_id)
 
-            _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
-            if any(t in msg_lower for t in _USER_ID_TRIGGERS):
-                logger.info(f"[ROUTE] show_user_id claimed message: {message[:60]!r}")
-                note_route("show_user_id")
-                platform = "Telegram" if user_id.isdigit() else "WhatsApp"
-                response = f"Your {platform} user ID is:\n`{user_id}`\n\nShare this with your other platform to link accounts."
-                self._store_conversation(user_id, message, response)
-                return {"operation": "show_user_id", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
+                if any(t in msg_lower for t in _USER_ID_TRIGGERS):
+                    logger.info(f"[ROUTE] show_user_id claimed message: {message[:60]!r}")
+                    note_route("show_user_id")
+                    platform = "Telegram" if user_id.isdigit() else "WhatsApp"
+                    response = f"Your {platform} user ID is:\n`{user_id}`\n\nShare this with your other platform to link accounts."
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "show_user_id", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-            _LINK_TRIGGERS = [
-                "link account", "link my account", "link telegram",
-                "link my telegram", "link whatsapp", "link my whatsapp",
-                "connect account", "connect telegram", "connect whatsapp",
-            ]
-            if self._cmd_with_typos(msg_lower, _LINK_TRIGGERS,
-                                    ("lnk account", "conect account", "link telegrm",
-                                     "link whatsap", "conect telegram", "conect whatsapp"),
-                                    intents=("",)):  # typos are full phrases
-                logger.info(f"[ROUTE] link_account claimed message: {message[:60]!r}")
-                note_route("link_account")
-                return self._handle_link_account(user_id, message)
+                _LINK_TRIGGERS = [
+                    "link account", "link my account", "link telegram",
+                    "link my telegram", "link whatsapp", "link my whatsapp",
+                    "connect account", "connect telegram", "connect whatsapp",
+                ]
+                if self._cmd_with_typos(msg_lower, _LINK_TRIGGERS,
+                                        ("lnk account", "conect account", "link telegrm",
+                                         "link whatsap", "conect telegram", "conect whatsapp"),
+                                        intents=("",)):  # typos are full phrases
+                    logger.info(f"[ROUTE] link_account claimed message: {message[:60]!r}")
+                    note_route("link_account")
+                    return self._handle_link_account(user_id, message)
 
             # ── FlowMachine v2 — session 1 (classifier + IDLE leaf routing) ──
             # Behind a feature flag so production stays on the legacy path until
@@ -3995,15 +3999,23 @@ class IntentService:
             # 0a2. Modify / update / change a job — AI-extracted update intent
             #      Triggers: explicit modify verb in the message, OR the user is
             #      currently in a "what field do you want to change?" follow-up.
-            _MODIFY_TRIGGERS = (
-                "modify ", "modify\n", "update ", "update\n", "change ", "change\n",
-                "edit ", "edit\n", "set ", "mark ",
-            )
-            _MODIFY_EQUALS = ("modify", "update", "change", "edit")
             _msg_l = message.strip().lower()
-            _has_modify_verb = any(_msg_l.startswith(t) for t in _MODIFY_TRIGGERS) or _msg_l in _MODIFY_EQUALS
             _awaiting_modify = bool(user_mem.get("awaiting_modify_field"))
+
+            # When v2 is on, only allow modify if the user is in an active awaiting_modify
+            # flow (continuation). The explicit verb trigger only applies when v2 is off.
+            if not _flow_machine_v2_enabled_for(user_id):
+                _MODIFY_TRIGGERS = (
+                    "modify ", "modify\n", "update ", "update\n", "change ", "change\n",
+                    "edit ", "edit\n", "set ", "mark ",
+                )
+                _MODIFY_EQUALS = ("modify", "update", "change", "edit")
+                _has_modify_verb = any(_msg_l.startswith(t) for t in _MODIFY_TRIGGERS) or _msg_l in _MODIFY_EQUALS
+            else:
+                _has_modify_verb = False
+
             # Allow user to escape the modify state with standard cancel words.
+            # This applies regardless of v2 state (it's a flow continuation).
             if _awaiting_modify and _msg_l in ("cancel", "stop", "quit", "exit", "nevermind", "nvm", "no", "abort", "skip"):
                 logger.info(f"[ROUTE] awaiting_modify_field cancelled: {message[:60]!r}")
                 note_route("awaiting_modify_field_cancelled")
@@ -4021,29 +4033,32 @@ class IntentService:
                 # normal pipeline handle it; better than dead-ending here).
 
             # 0b. Check for "add job" / "+" trigger → AI Smart Capture
+            # When FLOW_MACHINE_V2 is on, the classifier handles CREATE_ENTRY.
+            # Only run legacy trigger matching when v2 is off.
             msg_stripped = message.strip()
-            add_job_triggers = ["add job", "add a job", "add new job", "add a new job",
-                               "new job", "log a job", "log job", "record job", "record a job",
-                               "create job", "create a job", "create a new job",
-                               "add client", "add a client", "add new client", "add a new client",
-                               "new client", "log a client", "log client", "record client", "record a client",
-                               "create client", "create a client", "create a new client",
-                               "add entry", "add an entry", "add a new entry", "new entry"]
-            is_add_job = any(t in msg_stripped.lower() for t in add_job_triggers)
-            is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
-            if is_add_job or is_plus:
-                # Check for compound intent using AI (e.g. "add a job and send invoice")
-                first_part_msg = message
-                if len(message.split()) >= 6:  # only check if message is long enough
-                    intents = self.gemini.decompose_compound_intent(message)
-                    if intents and len(intents) > 1:
-                        first_part_msg = intents[0]
-                        suggested_next = intents[1]
-                        logger.info(f"[COMPOUND] AI split: first='{first_part_msg}', next='{suggested_next}'")
-                        self.memory.update_user_memory(user_id, {
-                            "suggested_next_action": suggested_next,
-                        })
-                return self._start_smart_capture(user_id, first_part_msg)
+            if not _flow_machine_v2_enabled_for(user_id):
+                add_job_triggers = ["add job", "add a job", "add new job", "add a new job",
+                                   "new job", "log a job", "log job", "record job", "record a job",
+                                   "create job", "create a job", "create a new job",
+                                   "add client", "add a client", "add new client", "add a new client",
+                                   "new client", "log a client", "log client", "record client", "record a client",
+                                   "create client", "create a client", "create a new client",
+                                   "add entry", "add an entry", "add a new entry", "new entry"]
+                is_add_job = any(t in msg_stripped.lower() for t in add_job_triggers)
+                is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
+                if is_add_job or is_plus:
+                    # Check for compound intent using AI (e.g. "add a job and send invoice")
+                    first_part_msg = message
+                    if len(message.split()) >= 6:  # only check if message is long enough
+                        intents = self.gemini.decompose_compound_intent(message)
+                        if intents and len(intents) > 1:
+                            first_part_msg = intents[0]
+                            suggested_next = intents[1]
+                            logger.info(f"[COMPOUND] AI split: first='{first_part_msg}', next='{suggested_next}'")
+                            self.memory.update_user_memory(user_id, {
+                                "suggested_next_action": suggested_next,
+                            })
+                    return self._start_smart_capture(user_id, first_part_msg)
 
             if user_mem.get("awaiting_job_input"):
                 # Escape hatch: if the user's message clearly looks like a new query
