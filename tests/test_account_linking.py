@@ -54,8 +54,8 @@ class TestResolveDataUserId:
 
     def test_preferences_as_json_string_parsed(self):
         svc = _make_svc()
-        profile = {"preferences": json.dumps({"linked_user_id": "999"})}
-        assert svc._resolve_data_user_id("u1", profile) == "999"
+        profile = {"preferences": json.dumps({"linked_user_id": "99999"})}
+        assert svc._resolve_data_user_id("u1", profile) == "99999"
 
     def test_malformed_json_string_falls_back_to_own_id(self):
         """Preferences corruption must never crash a query — fall back safely."""
@@ -66,6 +66,17 @@ class TestResolveDataUserId:
     def test_none_preferences_returns_own_id(self):
         svc = _make_svc()
         assert svc._resolve_data_user_id("u1", {"preferences": None}) == "u1"
+
+    def test_garbage_stored_linked_id_falls_back_to_own_id(self):
+        """Regression: a scripted test sent 'send all' (a reminders command)
+        while awaiting_link_id was armed; before validation existed at write
+        time, it got saved verbatim, and every later query resolved against
+        the nonexistent user 'send all' -- the whole account looked empty.
+        This is the read-side guard for any row that already has garbage
+        saved from before the write-side fix (_process_link_id) existed."""
+        svc = _make_svc()
+        profile = {"preferences": {"linked_user_id": "send all"}}
+        assert svc._resolve_data_user_id("u1", profile) == "u1"
 
 
 class TestHandleLinkAccount:
@@ -128,6 +139,27 @@ class TestProcessLinkId:
         awaiting = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
                     if "awaiting_link_id" in c.args[1]]
         assert awaiting and awaiting[0]["awaiting_link_id"] is False
+
+    def test_garbage_reply_rejected_not_linked(self):
+        """Regression: 'send all' (a reminders command, sent while
+        awaiting_link_id happened to still be armed from an unrelated
+        earlier flow) used to be accepted with zero validation and saved as
+        the linked_user_id, silently making the account's own data
+        invisible to every later query."""
+        svc = _make_svc()
+        result = svc._process_link_id("u1", "send all")
+        assert result["operation"] == "link_invalid_id"
+        assert svc.supabase.upsert_user_profile.call_count == 0
+        awaiting = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
+                    if "awaiting_link_id" in c.args[1]]
+        assert awaiting[-1]["awaiting_link_id"] is True, "must re-arm so the user can try again"
+
+    @pytest.mark.parametrize("junk", ["skip", "hello", "1234", "not an id", ""])
+    def test_various_non_id_replies_rejected(self, junk):
+        svc = _make_svc()
+        result = svc._process_link_id("u1", junk)
+        assert result["operation"] == "link_invalid_id"
+        assert svc.supabase.upsert_user_profile.call_count == 0
 
 
 class TestApplyLink:

@@ -801,6 +801,39 @@ class IntentService:
         self.memory.update_user_memory(user_id, {"last_intent": intent})
         logger.info(f"[CONTEXT] Saved last_intent for {user_id}: {intent}")
 
+    # Every single-question "waiting for a specific kind of reply" state the
+    # legacy pipeline tracks. Kept as one list so arming any one of them can
+    # reliably clear all the others — see _arm_awaiting below.
+    _AWAITING_FLAGS = (
+        "awaiting_job_input", "awaiting_compound_response", "awaiting_invoice_month",
+        "awaiting_poc_email", "awaiting_invoice_address", "awaiting_client_billing",
+        "awaiting_poc_name", "awaiting_invoice_poc_email", "awaiting_job_description",
+        "awaiting_bank_details", "awaiting_send_confirmation", "awaiting_modify_field",
+        "awaiting_link_id", "awaiting_name_change",
+    )
+
+    def _arm_awaiting(self, user_id: str, flag: str, extra: dict = None) -> None:
+        """Set exactly one awaiting_* conversational state, clearing every
+        other one first.
+
+        These flags used to be set independently at ~24 call sites across
+        this file, each only ever setting ITS OWN flag. Arming a new one
+        (e.g. "update bank details") never cleared an older one still active
+        from a different, unfinished flow (e.g. awaiting_invoice_poc_email
+        left over from a stuck invoice-generation attempt) -- both ended up
+        True at once. _process_request_impl checks these flags in a fixed
+        order and returns on the first match, so whichever flag happened to
+        be EARLIER in that order silently won, no matter which one the user
+        had actually just been prompted for. In production this looked like
+        an invoice flow "swallowing" bank-details input, account-linking
+        replies, and more, for many turns in a row.
+        """
+        patch = {k: False for k in self._AWAITING_FLAGS if k != flag}
+        patch[flag] = True
+        if extra:
+            patch.update(extra)
+        self.memory.update_user_memory(user_id, patch)
+
     def _reconstruct_message(self, user_id: str, message: str, conversation_history: List[Dict]) -> str:
         """
         Context reconstruction: if the message is short/ambiguous, merge it
@@ -1217,10 +1250,7 @@ class IntentService:
                     f"What would you like to change about {_client}? "
                     "Reply like: `fee: 25000`, `paid: yes`, `contact email: x@y.com`."
                 )
-                self.memory.update_user_memory(user_id, {
-                    "awaiting_modify_field": True,
-                    "modify_row_id": pinned_row_id,
-                })
+                self._arm_awaiting(user_id, "awaiting_modify_field", {"modify_row_id": pinned_row_id})
                 self._store_conversation(user_id, message, resp)
                 return {"operation": "modify_prompt", "response": resp, "trigger_invoice": False, "invoice_data": {}}
             # No context — let the normal pipeline have a go
@@ -1737,7 +1767,7 @@ class IntentService:
                 "Fees: 25k"
             )
             self.memory.cancel_form(user_id)
-            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
+            self._arm_awaiting(user_id, "awaiting_job_input")
             self._store_conversation(user_id, message, response)
             return {"operation": "smart_capture_edit", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -1845,7 +1875,7 @@ class IntentService:
             suggested_next = user_mem.get("suggested_next_action")
             if suggested_next:
                 # Keep suggested_next_action in memory so the handler can use it
-                self.memory.update_user_memory(user_id, {"awaiting_compound_response": True})
+                self._arm_awaiting(user_id, "awaiting_compound_response")
                 response += f"\n\nYou also mentioned: \"{suggested_next}\"\nWant me to do that now? (Yes / No)"
                 logger.info(f"[COMPOUND] Suggesting next action after job save: '{suggested_next}'")
 
@@ -1934,7 +1964,7 @@ class IntentService:
         logger.info(f"[SMART_CAPTURE] Original='{message}' -> Cleaned='{content_clean}'")
         # If no meaningful content remains, prompt for details
         if not content_clean or len(content_clean) < 3:
-            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
+            self._arm_awaiting(user_id, "awaiting_job_input")
             response = (
                 "Describe the job in one message.\n\n"
                 "Example:\n"
@@ -1971,7 +2001,7 @@ class IntentService:
         if not extracted:
             # No fields extracted — user likely just expressed intent ("add a job")
             # without providing actual data. Show a friendly prompt, not an error.
-            self.memory.update_user_memory(user_id, {"awaiting_job_input": True})
+            self._arm_awaiting(user_id, "awaiting_job_input")
             response = (
                 "Describe the job in one message.\n\n"
                 "Example:\n"
@@ -2071,8 +2101,7 @@ class IntentService:
             response = f"I couldn't detect a month from your reply. Please say something like: 'March' or 'March 2025'."
             self._store_conversation(user_id, message, response)
             # Re-set awaiting state
-            self.memory.update_user_memory(user_id, {
-                "awaiting_invoice_month": True,
+            self._arm_awaiting(user_id, "awaiting_invoice_month", {
                 "pending_invoice_client": client_name,
                 "pending_invoice_send_email": send_email,
             })
@@ -2214,7 +2243,7 @@ class IntentService:
         email = message.strip()
         if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
             # Not a valid email - re-prompt
-            self.memory.update_user_memory(user_id, {"awaiting_poc_email": True})
+            self._arm_awaiting(user_id, "awaiting_poc_email")
             response = "That doesn't look like a valid email. Please send the client's email address (e.g. client@agency.com) or type 'skip'."
             self._store_conversation(user_id, message, response)
             return {"operation": "poc_email_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -2385,8 +2414,7 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "address_updated", "response": response, "trigger_invoice": False, "invoice_data": {}}
         # No inline address → prompt for it (standalone update, no pending invoice).
-        self.memory.update_user_memory(user_id, {
-            "awaiting_invoice_address": True,
+        self._arm_awaiting(user_id, "awaiting_invoice_address", {
             "pending_address_user_id": data_user_id,
             "pending_invoice": None,
         })
@@ -2449,9 +2477,10 @@ class IntentService:
             return None  # nothing to invoice — the main flow handles the empty case
 
         def _prompt(state: dict, text: str) -> Dict:
-            patch = {"pending_invoice": invoice_data}
-            patch.update(state)
-            self.memory.update_user_memory(user_id, patch)
+            flag = next(k for k in state if k in self._AWAITING_FLAGS)
+            extra = {k: v for k, v in state.items() if k != flag}
+            extra["pending_invoice"] = invoice_data
+            self._arm_awaiting(user_id, flag, extra)
             self._store_conversation(user_id, "", text)
             return {"operation": "ACTION_TRIGGER", "response": text, "trigger_invoice": False, "invoice_data": {}}
 
@@ -2694,8 +2723,7 @@ class IntentService:
         email = (_m.group(0) if _m else message).strip()
         if not self._is_valid_email(email):
             # Re-arm and re-ask. Any domain is fine — only the format matters.
-            self.memory.update_user_memory(user_id, {
-                "awaiting_invoice_poc_email": True,
+            self._arm_awaiting(user_id, "awaiting_invoice_poc_email", {
                 "pending_poc_email_client": client_name,
                 "pending_poc_email_user_id": data_user_id,
                 "pending_poc_email_row_ids": row_ids,
@@ -2745,7 +2773,7 @@ class IntentService:
 
     def _prompt_bank_details_format(self, user_id: str, message: str) -> Dict:
         """Ask the user to send all bank details in a single structured message."""
-        self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
+        self._arm_awaiting(user_id, "awaiting_bank_details")
         response = (
             "Sure! Please send your bank details in this format:\n\n"
             "Account Name: Darshit Mody\n"
@@ -2782,7 +2810,7 @@ class IntentService:
                 "Or type 'cancel' to skip."
             )
             # Re-enable the awaiting flag so user can try again
-            self.memory.update_user_memory(user_id, {"awaiting_bank_details": True})
+            self._arm_awaiting(user_id, "awaiting_bank_details")
             self._store_conversation(user_id, message, response)
             return {"operation": "bank_details_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -3180,8 +3208,20 @@ class IntentService:
                 response = f"Please choose a number between 1 and {len(pending)}."
                 self._store_conversation(user_id, message, response)
                 return {"operation": "audit_paid", "response": response, "trigger_invoice": False, "invoice_data": {}}
-            # 'paid' alone with only one pending row → mark it
-            if len(pending) == 1:
+            # 'paid' alone with only one pending row → mark it. Guard: only
+            # for a genuinely BARE reply ("paid", "mark paid", "it's paid").
+            # Once anything else survives after stripping generic filler
+            # words, the message is naming something specific (a client,
+            # amount, date...) and this dangling background nudge must not
+            # silently apply to whichever row happens to be pending instead
+            # of whatever was actually asked for. Regression: "Mark ZZTEST
+            # Nike as paid" marked an unrelated client's real invoice paid,
+            # purely because exactly one audit row happened to be pending
+            # at the time — the named client was never checked.
+            _AUDIT_FILLER = {"mark", "marked", "paid", "as", "is", "it's", "its",
+                              "the", "all", "yes", "please", "pls", "this", "that"}
+            _audit_extra = [w for w in re.findall(r"[a-z']+", msg_lower) if w not in _AUDIT_FILLER]
+            if len(pending) == 1 and not _audit_extra:
                 target = pending[0]
                 job_id = target.get("id")
                 if job_id:
@@ -4047,8 +4087,7 @@ class IntentService:
                         f"Please provide the client's email so I can send it:\n"
                         f"Example: client@agency.com"
                     )
-                    self.memory.update_user_memory(user_id, {
-                        "awaiting_poc_email": True,
+                    self._arm_awaiting(user_id, "awaiting_poc_email", {
                         "pending_send_invoice": {
                             "client_name": cached_client,
                             "month": cached_month,
@@ -4060,8 +4099,7 @@ class IntentService:
                     return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
                 # We have the PDF and the email — ask for confirmation
-                self.memory.update_user_memory(user_id, {
-                    "awaiting_send_confirmation": True,
+                self._arm_awaiting(user_id, "awaiting_send_confirmation", {
                     "pending_send_invoice": {
                         "client_name": cached_client,
                         "month": cached_month,
@@ -4537,8 +4575,7 @@ class IntentService:
                                                    entity="invoice",
                                                    pending_clarification="month")
                             # Set awaiting state so the next reply routes to invoice month handler
-                            self.memory.update_user_memory(user_id, {
-                                "awaiting_invoice_month": True,
+                            self._arm_awaiting(user_id, "awaiting_invoice_month", {
                                 "pending_invoice_client": client_name,
                                 "pending_invoice_send_email": send_email,
                             })
@@ -4710,8 +4747,7 @@ class IntentService:
                                 f"Please provide the client's email so I can send it:\n"
                                 f"Example: client@agency.com"
                             )
-                            self.memory.update_user_memory(user_id, {
-                                "awaiting_poc_email": True,
+                            self._arm_awaiting(user_id, "awaiting_poc_email", {
                                 "pending_send_invoice": {
                                     "client_name": display_client,
                                     "month": month_display,
@@ -4757,8 +4793,7 @@ class IntentService:
                         # Just acknowledge so the user has feedback while it's prepared.
                         response = _ack
                     else:
-                        self.memory.update_user_memory(user_id, {
-                            "awaiting_poc_email": True,
+                        self._arm_awaiting(user_id, "awaiting_poc_email", {
                             "pending_send_invoice": {
                                 "client_name": display_client,
                                 "month": month_display,
@@ -4980,8 +5015,7 @@ class IntentService:
                     else:
                         response = f"I see you want an invoice for {_clar_client}. Which month? For example: 'Invoice for {_clar_client} for March'."
                     self._save_last_intent(user_id, operation="invoice", client_name=_clar_client, entity="invoice", pending_clarification="month")
-                    self.memory.update_user_memory(user_id, {
-                        "awaiting_invoice_month": True,
+                    self._arm_awaiting(user_id, "awaiting_invoice_month", {
                         "pending_invoice_client": _clar_client,
                         "pending_invoice_send_email": False,
                     })
@@ -5437,7 +5471,7 @@ class IntentService:
                 insert_mem = self.memory.get_user_memory(user_id)
                 suggested_next = insert_mem.get("suggested_next_action")
                 if suggested_next:
-                    self.memory.update_user_memory(user_id, {"awaiting_compound_response": True})
+                    self._arm_awaiting(user_id, "awaiting_compound_response")
                     response += f"\n\nYou also mentioned: \"{suggested_next}\"\nWant me to do that now? (Yes / No)"
                     logger.info(f"[COMPOUND] Suggesting next action after insert: '{suggested_next}'")
             else:
@@ -6287,8 +6321,14 @@ class IntentService:
             except (json.JSONDecodeError, TypeError):
                 prefs = {}
         linked_id = prefs.get("linked_user_id")
-        if linked_id:
+        if linked_id and self._is_valid_link_id(str(linked_id)):
             return linked_id
+        if linked_id:
+            # Guards accounts that got a garbage linked_user_id saved before
+            # _is_valid_link_id existed (see _process_link_id) -- fall back
+            # to the account's own data rather than silently returning
+            # nothing for a user_id that was never real.
+            logger.warning(f"[LINK] Ignoring invalid stored linked_user_id={linked_id!r} for {user_id}, using own data")
         return user_id
 
     def _handle_link_account(self, user_id: str, message: str) -> Dict:
@@ -6311,7 +6351,7 @@ class IntentService:
             return self._apply_link(user_id, message, candidate)
 
         # No inline ID — prompt for it
-        self.memory.update_user_memory(user_id, {"awaiting_link_id": True})
+        self._arm_awaiting(user_id, "awaiting_link_id")
         platform = "telegram" if user_id.isdigit() else "whatsapp"
         other = "WhatsApp" if platform == "telegram" else "Telegram"
         response = (
@@ -6322,6 +6362,25 @@ class IntentService:
         self._store_conversation(user_id, message, response)
         return {"operation": "link_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+    @staticmethod
+    def _is_valid_link_id(candidate: str) -> bool:
+        """A Telegram chat_id (bare digits, 5+ long) or a WhatsApp user_id
+        ("whatsapp:+<number>"). Anything else is rejected before it can ever
+        reach preferences.linked_user_id.
+
+        Regression: a scripted test sent "send all" (meant as a reminders
+        command, not a link ID) while awaiting_link_id was armed; it got
+        saved verbatim with zero validation, and every subsequent query
+        resolved data against the nonexistent user "send all" instead of
+        the real account -- silently making the whole account look empty.
+        """
+        c = (candidate or "").strip()
+        if c.isdigit() and len(c) >= 5:
+            return True
+        if c.startswith("whatsapp:+") and c[len("whatsapp:+"):].isdigit():
+            return True
+        return False
+
     def _process_link_id(self, user_id: str, message: str) -> Dict:
         """Process the linked account ID after the user was prompted."""
         self.memory.update_user_memory(user_id, {"awaiting_link_id": False})
@@ -6330,6 +6389,16 @@ class IntentService:
             response = "No worries, account not linked."
             self._store_conversation(user_id, message, response)
             return {"operation": "link_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        if not self._is_valid_link_id(candidate):
+            self._arm_awaiting(user_id, "awaiting_link_id")
+            response = (
+                f"'{candidate}' doesn't look like a valid user ID. It should be either "
+                "a Telegram chat ID (just digits, e.g. 751256859) or a WhatsApp ID "
+                "(e.g. whatsapp:+917038675067).\n\n"
+                "Please paste the ID again, or type 'cancel' to stop."
+            )
+            self._store_conversation(user_id, message, response)
+            return {"operation": "link_invalid_id", "response": response, "trigger_invoice": False, "invoice_data": {}}
         return self._apply_link(user_id, message, candidate)
 
     def _apply_link(self, user_id: str, message: str, linked_id: str) -> Dict:
@@ -6368,7 +6437,7 @@ class IntentService:
             return self._apply_name_change(user_id, message, new_name)
 
         # No inline name — prompt for it
-        self.memory.update_user_memory(user_id, {"awaiting_name_change": True})
+        self._arm_awaiting(user_id, "awaiting_name_change")
         current_name = self._get_user_name(user_id) or "unknown"
         response = f"Your current name is '{current_name}'. What would you like to change it to?"
         self._store_conversation(user_id, message, response)

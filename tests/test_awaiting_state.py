@@ -1,0 +1,98 @@
+"""
+tests/test_awaiting_state.py
+=============================
+
+Regression coverage for the "stuck flow swallows everything" bug found in a
+134-scenario live test run: arming one awaiting_* conversational state (e.g.
+"update bank details") used to be a single-key memory write that never
+cleared any OTHER awaiting_* flag still active from an earlier, unfinished
+flow (e.g. awaiting_invoice_poc_email left over from a stalled invoice
+generation). Both flags ended up True at once. _process_request_impl checks
+these flags in a fixed order and returns on the first match, so whichever
+flag happened to be earlier in that order silently won -- for 15+
+consecutive turns in the observed run, bank-details input, an account-link
+reply, and a plain reminders command all got answered as if they were
+replies to a stuck invoice-email prompt.
+
+_arm_awaiting() is the fix: it clears every known awaiting_* flag before
+setting the one being armed, so at most one is ever True. These tests pin
+that contract down directly, independent of any single call site.
+"""
+import os
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from unittest.mock import MagicMock, patch
+
+
+def _make_svc():
+    with patch("services.intent_service.GeminiService"), \
+         patch("services.intent_service.ResendEmailService"), \
+         patch("services.intent_service.SupabaseService"), \
+         patch("services.intent_service.MemoryService"):
+        from services.intent_service import IntentService
+        svc = IntentService()
+    svc.gemini = MagicMock()
+    svc.email = MagicMock()
+    svc.supabase = MagicMock()
+    svc.memory = MagicMock()
+    return svc
+
+
+class TestArmAwaitingMutualExclusivity:
+    def test_arming_a_flag_clears_all_others(self):
+        svc = _make_svc()
+        svc._arm_awaiting("u1", "awaiting_bank_details")
+        patch = svc.memory.update_user_memory.call_args.args[1]
+        for flag in svc._AWAITING_FLAGS:
+            if flag == "awaiting_bank_details":
+                assert patch[flag] is True
+            else:
+                assert patch[flag] is False, f"{flag} should be explicitly cleared"
+
+    def test_extra_context_keys_are_preserved(self):
+        svc = _make_svc()
+        svc._arm_awaiting("u1", "awaiting_invoice_month", {
+            "pending_invoice_client": "Nike", "pending_invoice_send_email": True,
+        })
+        patch = svc.memory.update_user_memory.call_args.args[1]
+        assert patch["awaiting_invoice_month"] is True
+        assert patch["pending_invoice_client"] == "Nike"
+        assert patch["pending_invoice_send_email"] is True
+
+    def test_single_write_call(self):
+        """One memory write per arm -- not a read-then-write race that could
+        interleave with a concurrent turn."""
+        svc = _make_svc()
+        svc._arm_awaiting("u1", "awaiting_link_id")
+        assert svc.memory.update_user_memory.call_count == 1
+
+    def test_every_call_site_flag_name_is_a_known_flag(self):
+        """Guards against a typo introducing a 15th flag that never gets
+        cleared by the other 14 -- re-creating exactly this bug class for a
+        newly-added awaiting_* state."""
+        import re
+        src = open(os.path.join(os.path.dirname(__file__), "..",
+                                 "services", "intent_service.py")).read()
+        armed = set(re.findall(r'_arm_awaiting\(\s*[^,]+,\s*"(awaiting_[a-z_]+)"', src))
+        assert armed, "expected at least one _arm_awaiting call site"
+        assert armed.issubset(set(_make_svc()._AWAITING_FLAGS))
+
+
+class TestStuckFlowNoLongerSwallowsUnrelatedInput:
+    """End-to-end shape of the originally reported bug: arming bank-details
+    while an invoice-email prompt is still active must let the NEXT message
+    reach the bank-details handler, not the stale invoice one."""
+
+    def test_arming_bank_details_clears_stale_invoice_awaits(self):
+        svc = _make_svc()
+        # Simulate: an invoice-email flow is stuck (already armed from an
+        # earlier, unfinished turn).
+        svc.memory.get_user_memory.return_value = {
+            "awaiting_invoice_poc_email": True,
+            "pending_poc_email_client": "Nike",
+        }
+        svc._prompt_bank_details_format("u1", "update my bank details")
+        patch = svc.memory.update_user_memory.call_args.args[1]
+        assert patch["awaiting_bank_details"] is True
+        assert patch["awaiting_invoice_poc_email"] is False

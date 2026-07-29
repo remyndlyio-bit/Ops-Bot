@@ -1013,3 +1013,34 @@ class TestAuditReplyDoesNotHijackQuestions:
     def test_genuine_numbered_reply_still_works(self):
         svc, result = self._run("paid 1")
         assert result is not None and result.get("operation") == "audit_paid"
+
+    def test_named_client_update_does_not_hijack_unrelated_pending_row(self):
+        """Live production bug found in a 134-scenario test run: "Mark
+        ZZTEST Nike as paid" was a targeted update for a specific client,
+        but with exactly one unrelated audit row pending ("Amazent"), the
+        bare 'paid' substring check marked THAT row paid instead — a real
+        client's real invoice got mutated based on a message that never
+        named it. Must fall through (None) so the real update pipeline,
+        which actually resolves by client name, handles it instead."""
+        svc, result = self._run("Mark ZZTEST Nike as paid")
+        assert result is None, f"Named-client update was hijacked by the audit-reply shortcut: {result}"
+        assert not any("update" in (c.args[0].lower() if c.args else "")
+                       for c in svc.supabase.execute_sql.call_args_list)
+
+    @pytest.mark.parametrize("msg", [
+        "Mark Nike as paid",
+        "Payment received from Star Studios",
+        "Mark the Adidas invoice as paid",
+    ])
+    def test_other_named_client_shapes_fall_through(self, msg):
+        svc, result = self._run(msg)
+        assert result is None, f"{msg!r} was treated as a bare audit reply: {result}"
+        assert not any("update" in (c.args[0].lower() if c.args else "")
+                       for c in svc.supabase.execute_sql.call_args_list)
+
+    def test_bare_mark_paid_phrasing_still_works(self):
+        """Over-correction guard: short generic phrasings with no named
+        client must still work as a reply to the audit nudge."""
+        for msg in ("mark paid", "it's paid", "yes paid"):
+            svc, result = self._run(msg)
+            assert result is not None and result.get("operation") == "audit_paid", msg
