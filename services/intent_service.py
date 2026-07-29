@@ -3643,11 +3643,13 @@ class IntentService:
                 # match one of these escape hatches).
                 _form_result = self._handle_form_step(user_id, message)
                 if _form_result is not None:
+                    logger.info(f"[ROUTE] form_step claimed message: {message[:60]!r}")
                     return _form_result
 
             # 0+. Check for pending payment reminders (WhatsApp reply flow)
             reminder_result = self._handle_pending_reminder(user_id, message)
             if reminder_result:
+                logger.info(f"[ROUTE] pending_reminder claimed message: {message[:60]!r}")
                 return reminder_result
 
             # Explicit, unambiguous account/profile commands are handled
@@ -3662,6 +3664,7 @@ class IntentService:
                 and ("ifsc" in msg_lower or "upi" in msg_lower or "account is" in msg_lower)
             )
             if _has_bank_inline:
+                logger.info(f"[ROUTE] bank_details_response claimed message: {message[:60]!r}")
                 return self._handle_bank_details_response(user_id, message)
             # Each explicit command is typo-tolerant (a misspelled target noun +
             # an intent verb still routes here), so a typo can't silently fall
@@ -3669,9 +3672,11 @@ class IntentService:
             _BANK_TYPOS = ("bnk", "banck", "bnak", "detials", "detals", "deatils")
             if self._cmd_with_typos(msg_lower, self._UPDATE_BANK_TRIGGERS, _BANK_TYPOS,
                                     ("update", "change", "set", "edit", "add", "save", "new")):
+                logger.info(f"[ROUTE] prompt_bank_details claimed message: {message[:60]!r}")
                 return self._prompt_bank_details_format(user_id, message)
             if self._cmd_with_typos(msg_lower, self._VIEW_BANK_TRIGGERS, _BANK_TYPOS,
                                     ("show", "view", "see", "get", "check", "my", "what")):
+                logger.info(f"[ROUTE] show_bank_details claimed message: {message[:60]!r}")
                 return self._show_bank_details(user_id, message)
 
             _NAME_CHANGE_TRIGGERS = [
@@ -3681,6 +3686,7 @@ class IntentService:
             if self._cmd_with_typos(msg_lower, _NAME_CHANGE_TRIGGERS,
                                     ("nme", "naem", "namee", "naame"),
                                     ("change", "update", "set", "rename", "fix", "correct", "wrong")):
+                logger.info(f"[ROUTE] name_change claimed message: {message[:60]!r}")
                 return self._handle_name_change(user_id, message)
 
             _ADDRESS_UPDATE_TRIGGERS = [
@@ -3693,10 +3699,12 @@ class IntentService:
             if self._cmd_with_typos(msg_lower, _ADDRESS_UPDATE_TRIGGERS,
                                     ("adress", "adres", "addres", "addresss", "addrress", "adddress"),
                                     ("change", "update", "edit", "set", "fix", "correct", "wrong")):
+                logger.info(f"[ROUTE] address_update claimed message: {message[:60]!r}")
                 return self._handle_address_update(user_id, message, data_user_id)
 
             _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
             if any(t in msg_lower for t in _USER_ID_TRIGGERS):
+                logger.info(f"[ROUTE] show_user_id claimed message: {message[:60]!r}")
                 platform = "Telegram" if user_id.isdigit() else "WhatsApp"
                 response = f"Your {platform} user ID is:\n`{user_id}`\n\nShare this with your other platform to link accounts."
                 self._store_conversation(user_id, message, response)
@@ -3711,6 +3719,7 @@ class IntentService:
                                     ("lnk account", "conect account", "link telegrm",
                                      "link whatsap", "conect telegram", "conect whatsapp"),
                                     intents=("",)):  # typos are full phrases
+                logger.info(f"[ROUTE] link_account claimed message: {message[:60]!r}")
                 return self._handle_link_account(user_id, message)
 
             # ── FlowMachine v2 — session 1 (classifier + IDLE leaf routing) ──
@@ -3949,8 +3958,10 @@ class IntentService:
                                 break
                     merged = f"{pending_action} {remainder}".strip() if remainder else pending_action
                     logger.info(f"[COMPOUND] User confirmed next action: '{merged}' (pending='{pending_action}', qualifier='{remainder}')")
+                    logger.info(f"[ROUTE] awaiting_compound_response claimed message: {message[:60]!r}")
                     return self.process_request(user_id=user_id, message=merged)
                 elif msg_lower_check in {"no", "nah", "nope", "skip", "not now", "later"}:
+                    logger.info(f"[ROUTE] awaiting_compound_response declined: {message[:60]!r}")
                     response = "👍 No problem. Let me know if you need anything else."
                     self._store_conversation(user_id, message, response)
                     return {"operation": "compound_declined", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -3969,6 +3980,7 @@ class IntentService:
             _awaiting_modify = bool(user_mem.get("awaiting_modify_field"))
             # Allow user to escape the modify state with standard cancel words.
             if _awaiting_modify and _msg_l in ("cancel", "stop", "quit", "exit", "nevermind", "nvm", "no", "abort", "skip"):
+                logger.info(f"[ROUTE] awaiting_modify_field cancelled: {message[:60]!r}")
                 self.memory.update_user_memory(user_id, {"awaiting_modify_field": False, "modify_row_id": None})
                 response = "No problem, cancelled. What else can I help with?"
                 self._store_conversation(user_id, message, response)
@@ -3976,6 +3988,7 @@ class IntentService:
             if _has_modify_verb or _awaiting_modify:
                 _resp = self._handle_modify_intent(user_id, message, user_mem)
                 if _resp is not None:
+                    logger.info(f"[ROUTE] modify claimed message: {message[:60]!r}")
                     return _resp
                 # else: fall through (extraction failed AND no row context — let
                 # normal pipeline handle it; better than dead-ending here).
@@ -4102,39 +4115,48 @@ class IntentService:
 
             # 0b1.4. Check if user is providing the month for a pending invoice
             if user_mem.get("awaiting_invoice_month"):
+                logger.info(f"[ROUTE] awaiting_invoice_month claimed message: {message[:60]!r}")
                 return self._handle_invoice_month_reply(user_id, message, user_mem, data_user_id, conversation_history)
 
             # 0b1.5. Check if user is providing a client POC email
             if user_mem.get("awaiting_poc_email"):
+                logger.info(f"[ROUTE] awaiting_poc_email claimed message: {message[:60]!r}")
                 return self._handle_poc_email_response(user_id, message)
 
             # 0b1.6. Check if user is confirming sending invoice to client email
             if user_mem.get("awaiting_send_confirmation"):
+                logger.info(f"[ROUTE] awaiting_send_confirmation claimed message: {message[:60]!r}")
                 return self._handle_send_confirmation(user_id, message)
 
             # 0b1.7. Check if user is providing client billing details
             if user_mem.get("awaiting_client_billing"):
+                logger.info(f"[ROUTE] awaiting_client_billing claimed message: {message[:60]!r}")
                 return self._handle_client_billing_response(user_id, message)
 
             # 0b1.8. Check if user is providing POC name for an invoice
             if user_mem.get("awaiting_poc_name"):
+                logger.info(f"[ROUTE] awaiting_poc_name claimed message: {message[:60]!r}")
                 return self._handle_poc_name_response(user_id, message)
 
             # 0b1.8a. POC email supplied to the pre-generation readiness gate
             # (distinct from awaiting_poc_email, which is the send-time flow).
             if user_mem.get("awaiting_invoice_poc_email"):
+                logger.info(f"[ROUTE] awaiting_invoice_poc_email claimed message: {message[:60]!r}")
                 return self._handle_invoice_poc_email_response(user_id, message)
 
             # 0b1.9. Check if user is providing their business address for the invoice (#2)
             if user_mem.get("awaiting_invoice_address"):
+                logger.info(f"[ROUTE] awaiting_invoice_address claimed message: {message[:60]!r}")
                 return self._handle_invoice_address_response(user_id, message)
 
             # 0b1.10. Check if user is providing a missing job description (#3)
             if user_mem.get("awaiting_job_description"):
+                logger.info(f"[ROUTE] awaiting_job_description claimed message: {message[:60]!r}")
                 return self._handle_job_description_response(user_id, message)
 
             # 0b2. Check if user is responding with bank details (awaiting state)
             if user_mem.get("awaiting_bank_details"):
+                logger.info(f"[ROUTE] awaiting_bank_details claimed message: {message[:60]!r}")
                 return self._handle_bank_details_response(user_id, message)
 
             # msg_lower is used throughout the rest of process_request.
@@ -5241,6 +5263,7 @@ class IntentService:
                 # to the planner so the user still gets a best-effort answer.
 
             # Generate SQL via query planner pipeline (Classify → Plan → Resolve → Validate → SQL)
+            logger.info(f"[ROUTE] query_pipeline claimed message: {message[:60]!r}")
             conv_ctx = user_mem.get("uscf_context") or {}
             conv_ctx["last_saved_job"] = user_mem.get("last_saved_job")
             logger.info(f"[PIPELINE] Starting query plan for user {user_id}: {message[:100]}")
