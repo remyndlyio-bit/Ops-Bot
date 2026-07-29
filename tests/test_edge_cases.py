@@ -584,6 +584,35 @@ class TestBankDetailsParser:
         assert parsed.get("bank_account_name") == "John"
         assert parsed.get("bank_account_number") == "9988776655"
 
+    def test_literal_backslash_n_treated_as_newline(self):
+        """Known pending bug: a message can arrive with a LITERAL backslash-n
+        (two characters, "\\" + "n") instead of an actual newline. Without
+        normalising it first, "." happily matches those literal characters,
+        so the very first field's capture swallows the rest of the message
+        whole -- everything ends up crammed into bank_account_name, and every
+        other field is lost. Confirmed live: "Show my bank details" afterward
+        displayed "Account Holder: Darshit\\nBank: HDFC\\nAccount: 123456\\n
+        IFSC: HDFC001" as one garbled blob."""
+        parsed = self._parse(
+            "Account Name: Darshit\\nBank: HDFC\\nAccount: 123456\\nIFSC: HDFC001"
+        )
+        assert parsed.get("bank_account_name") == "Darshit"
+        assert parsed.get("bank_name") == "HDFC"
+        assert parsed.get("bank_account_number") == "123456"
+        assert parsed.get("bank_ifsc") == "HDFC001"
+
+    def test_single_line_comma_separated_still_splits_fields(self):
+        """A user pasting everything on ONE line, comma-separated, is another
+        shape where the same swallow-everything failure could recur (no
+        newline boundary between fields at all)."""
+        parsed = self._parse(
+            "Account Name: Darshit, Bank: HDFC, Account: 123456, IFSC: HDFC001"
+        )
+        assert parsed.get("bank_account_name") == "Darshit"
+        assert parsed.get("bank_name") == "HDFC"
+        assert parsed.get("bank_account_number") == "123456"
+        assert parsed.get("bank_ifsc") == "HDFC001"
+
 
 class TestStandaloneBankDetailsUpdateClearsStaleInvoice:
     """Live bug (found in the #95 investigation): a general "Update my bank

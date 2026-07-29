@@ -3005,6 +3005,13 @@ class IntentService:
         """
         import re
         text = message.strip()
+        # Normalise escaped newlines to real ones. A message can arrive with a
+        # LITERAL backslash-n (two characters, "\" + "n") instead of an actual
+        # newline -- e.g. pasted from a source that escaped its line breaks.
+        # Without this, the whole rest of the message (every other field's
+        # label + value) gets swallowed into the FIRST field's capture group,
+        # since "." matches literal backslash/n characters just fine.
+        text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
         result = {}
 
         # Map of possible labels → db field name.
@@ -3022,10 +3029,19 @@ class IntentService:
             "bank_ifsc": [r"ifsc\s*(?:code)?"],
             "upi_id": [r"upi\s*(?:id)?"],
         }
+        # All recognised labels, used as a lookahead boundary so a value on
+        # the SAME line as the next field (e.g. comma-separated, one line —
+        # "Account Name: Darshit, Bank: HDFC, Account: 123456") stops at the
+        # next label instead of swallowing the rest of the message too.
+        _all_label_alts = "|".join(pat for pats in label_map.values() for pat in pats)
 
         for field, patterns in label_map.items():
             for pat in patterns:
-                match = re.search(rf"(?:^|\n)\s*{pat}\s*[:=\-]\s*(.+)", text, re.IGNORECASE)
+                match = re.search(
+                    rf"(?:^|\n|[,;]\s*)\s*{pat}\s*[:=\-]\s*(.+?)"
+                    rf"(?=\s*[,;]?\s*(?:{_all_label_alts})\s*[:=\-]|\n|$)",
+                    text, re.IGNORECASE,
+                )
                 if match:
                     val = match.group(1).strip().rstrip(",;")
                     if val.lower() not in ("", "none", "na", "n/a", "-", "skip"):
