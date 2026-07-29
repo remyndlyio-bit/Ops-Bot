@@ -96,3 +96,49 @@ class TestStuckFlowNoLongerSwallowsUnrelatedInput:
         patch = svc.memory.update_user_memory.call_args.args[1]
         assert patch["awaiting_bank_details"] is True
         assert patch["awaiting_invoice_poc_email"] is False
+
+
+class TestPendingDisambiguationMutualExclusivity:
+    """pending_disambiguation is a SEPARATE state mechanism from the 14
+    awaiting_* flags (a numbered "which one did you mean?" list, not a
+    boolean) and wasn't covered by the original _arm_awaiting fix. A live
+    scenario-suite run found a stale disambiguation list from an earlier
+    turn still active, and it took precedence (checked before any
+    awaiting_* flag) over a freshly-armed awaiting_link_id, swallowing the
+    account-linking reply as if it were a disambiguation pick."""
+
+    def test_arm_awaiting_clears_stale_disambiguation(self):
+        svc = _make_svc()
+        svc._arm_awaiting("u1", "awaiting_link_id")
+        patch = svc.memory.update_user_memory.call_args.args[1]
+        assert patch["pending_disambiguation"] is None
+
+    def test_arm_disambiguation_clears_all_awaiting_flags(self):
+        svc = _make_svc()
+        svc._arm_disambiguation("u1", {"rows": [{"id": 1}], "sql": "UPDATE ..."})
+        patch = svc.memory.update_user_memory.call_args.args[1]
+        for flag in svc._AWAITING_FLAGS:
+            assert patch[flag] is False, f"{flag} should be cleared when arming disambiguation"
+        assert patch["pending_disambiguation"] == {"rows": [{"id": 1}], "sql": "UPDATE ..."}
+
+    def test_end_to_end_stale_disambiguation_no_longer_blocks_link_reply(self):
+        """The exact reported shape: a stale disambiguation list (from an
+        earlier "mark paid" ambiguity) must not swallow a subsequent
+        account-linking ID reply."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "pending_disambiguation": {"rows": [{"id": 1}, {"id": 2}], "sql": "UPDATE ..."},
+        }
+        svc._handle_link_account("u1", "link my telegram account")
+        patch = svc.memory.update_user_memory.call_args.args[1]
+        assert patch["awaiting_link_id"] is True
+        assert patch["pending_disambiguation"] is None
+
+    def test_every_pending_disambiguation_call_site_goes_through_arm_disambiguation(self):
+        """Guards against a new disambiguation arm-site being added directly
+        via update_user_memory again, silently reopening this gap."""
+        import re
+        src = open(os.path.join(os.path.dirname(__file__), "..",
+                                 "services", "intent_service.py")).read()
+        direct_arms = re.findall(r'update_user_memory\([^)]*\{\s*\n?\s*"pending_disambiguation":\s*\{', src)
+        assert not direct_arms, "found a pending_disambiguation arm-site bypassing _arm_disambiguation"

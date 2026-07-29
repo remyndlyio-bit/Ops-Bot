@@ -830,6 +830,31 @@ class IntentService:
         """
         patch = {k: False for k in self._AWAITING_FLAGS if k != flag}
         patch[flag] = True
+        # pending_disambiguation is a SEPARATE state mechanism (a numbered
+        # "which one did you mean?" list, not a boolean flag) that isn't in
+        # _AWAITING_FLAGS, so it was never cleared by this method — a
+        # scripted test run found a stale disambiguation list from an
+        # earlier turn still active, and it took precedence (checked before
+        # any awaiting_* flag) over a freshly-armed awaiting_link_id,
+        # swallowing the account-linking reply as if it were a disambiguation
+        # pick. Arming any single-question state means whatever the user is
+        # being asked now supersedes an old disambiguation they were never
+        # shown again.
+        patch["pending_disambiguation"] = None
+        if extra:
+            patch.update(extra)
+        self.memory.update_user_memory(user_id, patch)
+
+    def _arm_disambiguation(self, user_id: str, disambiguation: dict, extra: dict = None) -> None:
+        """Set pending_disambiguation (a numbered "which one did you mean?"
+        list), clearing every awaiting_* flag first -- the mirror image of
+        _arm_awaiting's own clearing of pending_disambiguation. Without this,
+        an active awaiting_* prompt from an unrelated flow could take
+        precedence over a freshly-shown disambiguation list, or vice versa,
+        the same mutual-exclusivity gap _arm_awaiting was built to close.
+        """
+        patch = {k: False for k in self._AWAITING_FLAGS}
+        patch["pending_disambiguation"] = disambiguation
         if extra:
             patch.update(extra)
         self.memory.update_user_memory(user_id, patch)
@@ -1373,14 +1398,11 @@ class IntentService:
                     lines.append(f"{i}. {r.get('client_name') or r.get('brand_name') or '—'} · bill {r.get('bill_no') or '—'} · ₹{r.get('fees') or '—'}")
                 resp = "\n".join(lines)
                 # Store pending disambiguation so user can reply with a number
-                self.memory.update_user_memory(user_id, {
-                    "pending_disambiguation": {
-                        "type": "modify",
-                        "rows": rows,
-                        "field": field,
-                        "value": value,
-                    },
-                    "awaiting_modify_field": False,
+                self._arm_disambiguation(user_id, {
+                    "type": "modify",
+                    "rows": rows,
+                    "field": field,
+                    "value": value,
                 })
                 self._store_conversation(user_id, message, resp)
                 return {"operation": "modify_disambiguate", "response": resp, "trigger_invoice": False, "invoke_data": {}}
@@ -5180,17 +5202,15 @@ class IntentService:
                             r"\bpaid\s*=\s*'(?:false|0|no)'", "paid = 'No'",
                             _set_clauses_disambig, flags=re.IGNORECASE,
                         )
-                        self.memory.update_user_memory(user_id, {
-                            "pending_disambiguation": {
-                                "sql": (
-                                    f"UPDATE public.job_entries "
-                                    f"SET {_set_clauses_disambig} "
-                                    f"WHERE id = '{{id}}' RETURNING *"
-                                ),
-                                "rows": _pre_rows,
-                                "data_user_id": data_user_id,
-                                "updates": _plan_updates,
-                            }
+                        self._arm_disambiguation(user_id, {
+                            "sql": (
+                                f"UPDATE public.job_entries "
+                                f"SET {_set_clauses_disambig} "
+                                f"WHERE id = '{{id}}' RETURNING *"
+                            ),
+                            "rows": _pre_rows,
+                            "data_user_id": data_user_id,
+                            "updates": _plan_updates,
                         })
                         _opts = [f"I found {len(_pre_rows)} matching records. Which one did you mean?\n"]
                         for _i, _r in enumerate(_pre_rows[:10], 1):
@@ -5400,12 +5420,10 @@ class IntentService:
                     _pre = self.supabase.execute_sql(_pre_sql)
                     if _pre.get("ok") and len(_pre.get("rows", [])) > 1:
                         _cands = _pre["rows"]
-                        self.memory.update_user_memory(user_id, {
-                            "pending_disambiguation": {
-                                "sql": sanitized_sql,
-                                "rows": _cands,
-                                "data_user_id": data_user_id,
-                            }
+                        self._arm_disambiguation(user_id, {
+                            "sql": sanitized_sql,
+                            "rows": _cands,
+                            "data_user_id": data_user_id,
                         })
                         _opts = [f"I found {len(_cands)} matching records. Which one did you mean?\n"]
                         for _i, _r in enumerate(_cands[:10], 1):
@@ -5519,12 +5537,10 @@ class IntentService:
                                 _pre2_rows = _pre2.get("rows", [])
                                 if len(_pre2_rows) > 1:
                                     # Multiple candidates — ask the user to pick
-                                    self.memory.update_user_memory(user_id, {
-                                        "pending_disambiguation": {
-                                            "sql": _retry_sql,
-                                            "rows": _pre2_rows,
-                                            "data_user_id": data_user_id,
-                                        }
+                                    self._arm_disambiguation(user_id, {
+                                        "sql": _retry_sql,
+                                        "rows": _pre2_rows,
+                                        "data_user_id": data_user_id,
                                     })
                                     _opts = [f"I found {len(_pre2_rows)} matching records. Which one did you mean?\n"]
                                     for _i, _r in enumerate(_pre2_rows[:10], 1):
@@ -6176,13 +6192,11 @@ class IntentService:
 
         # Bulk path: user said "all" — confirm before nuking everything we found.
         if is_bulk and len(candidate_rows) > 1:
-            self.memory.update_user_memory(user_id, {
-                "pending_disambiguation": {
-                    "rows": candidate_rows,
-                    "data_user_id": data_user_id,
-                    "bulk_mode": True,
-                    "client_hint": client_hint,
-                }
+            self._arm_disambiguation(user_id, {
+                "rows": candidate_rows,
+                "data_user_id": data_user_id,
+                "bulk_mode": True,
+                "client_hint": client_hint,
             })
             _label = f"{len(candidate_rows)} jobs"
             if client_hint:
@@ -6209,12 +6223,10 @@ class IntentService:
                 f"UPDATE public.job_entries SET \"isDeleted\" = true "
                 f"WHERE user_id = '{uid}' AND {_not_deleted} RETURNING *"
             )
-            self.memory.update_user_memory(user_id, {
-                "pending_disambiguation": {
-                    "sql": update_sql,
-                    "rows": candidate_rows,
-                    "data_user_id": data_user_id,
-                }
+            self._arm_disambiguation(user_id, {
+                "sql": update_sql,
+                "rows": candidate_rows,
+                "data_user_id": data_user_id,
             })
             opts = [f"I found {len(candidate_rows)} jobs. Which one do you want to delete?\n"]
             for i, r in enumerate(candidate_rows[:10], 1):
