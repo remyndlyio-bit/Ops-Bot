@@ -3926,10 +3926,13 @@ class IntentService:
                             logger.warning(f"[V2] idle dispatch failed, falling back: {_v2_err}")
 
             # 0a-. Small talk detection (greetings, thanks, etc.) — avoid expensive SQL path
-            small_talk_resp = self._detect_small_talk(message, user_id=user_id)
-            if small_talk_resp:
-                self._store_conversation(user_id, message, small_talk_resp)
-                return {"operation": "small_talk", "response": small_talk_resp, "trigger_invoice": False, "invoice_data": {}}
+            # When FLOW_MACHINE_V2 is on, the classifier handles SMALL_TALK later.
+            # Only run legacy detection when v2 is off.
+            if not _flow_machine_v2_enabled_for(user_id):
+                small_talk_resp = self._detect_small_talk(message, user_id=user_id)
+                if small_talk_resp:
+                    self._store_conversation(user_id, message, small_talk_resp)
+                    return {"operation": "small_talk", "response": small_talk_resp, "trigger_invoice": False, "invoice_data": {}}
 
             # 0a. Check if user is responding with job data (awaiting smart capture input)
             user_mem = self.memory.get_user_memory(user_id)
