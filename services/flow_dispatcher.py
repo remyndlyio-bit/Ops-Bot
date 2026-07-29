@@ -264,12 +264,44 @@ def dispatch_in_flow(
             return SHADOW_ONLY
 
         # NEW_FLOW — user is starting a different operation mid-flow.
-        # Session 2 takes the safe path: fall back to legacy. The existing
-        # intent-shift guard will decide whether to clear the legacy awaiting
-        # flag based on the message. Push/pop semantics land in session 3
-        # once more flows are migrated and we can guarantee stack invariants.
+        # True push/pop (resume the abandoned flow later with a nudge) needs
+        # every flow's COMPLETION point to know how to pop back — that's a
+        # bigger lift (ASSISTANT_PLAN.md WP-3) deferred until more flows are
+        # migrated and stack invariants can be guaranteed everywhere.
+        #
+        # What we CAN do safely now: the classifier has already decided
+        # NEW_FLOW using the full flow context (per-flow prompt guidance,
+        # ledger, history) — that is the EXACT same question legacy's
+        # intent-shift guard asks via its OWN separate LLM call
+        # (gemini_service.is_new_query_not_response). Applying the verdict's
+        # decision directly means that second call never happens: we clear
+        # the current flow's legacy mirror flags now, so by the time legacy's
+        # guard checks `_active_pending` it's already empty and skips
+        # straight past its own LLM call. Net effect: same outcome legacy
+        # would have reached, one fewer LLM call per turn (TODO.md Phase 3
+        # latency goal), with NO change to which messages start a new flow.
+        #
+        # Gated on confidence: low-confidence verdicts fall through
+        # unchanged (no clear, plain SHADOW_ONLY) so an uncertain call
+        # defers entirely to legacy's own — more conservative, heuristic-
+        # gated — guard exactly as before. Nothing is lost from the
+        # abandoned flow either way (same as today: no push, no resume).
         if fc == "NEW_FLOW":
-            logger.info(f"[V2_DISPATCH] NEW_FLOW in flow={current_flow} — shadow (legacy decides)")
+            _confidence = verdict.get("confidence") or 0.0
+            if _confidence >= 0.7:
+                try:
+                    intent_service._clear_flow_state(user_id)
+                    logger.info(
+                        f"[V2_DISPATCH] NEW_FLOW (confidence={_confidence:.2f}) — cleared "
+                        f"flow={current_flow}, message proceeds fresh (shadow, no double LLM ask)"
+                    )
+                except Exception as e:
+                    logger.warning(f"[V2_DISPATCH] NEW_FLOW flow-clear failed (non-fatal): {e}")
+            else:
+                logger.info(
+                    f"[V2_DISPATCH] NEW_FLOW (low confidence={_confidence:.2f}) "
+                    f"in flow={current_flow} — shadow, legacy decides"
+                )
             return SHADOW_ONLY
 
         # Missing or unknown flow_compatible — shadow.

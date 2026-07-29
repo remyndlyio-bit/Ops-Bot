@@ -102,12 +102,12 @@ class TestTTLStalenessClears:
         "awaiting_job_description", "pending_jobdesc_row_id", "pending_jobdesc_user_id",
     ])
     def test_stale_clear_includes_flag(self, flag):
-        import inspect
-        from services import intent_service as mod
-        src = inspect.getsource(mod.IntentService._process_request_impl)
-        start = src.index("_stale_clear = {")
-        block = src[start:start + 2600]
-        assert f'"{flag}"' in block
+        # _stale_clear was factored out into the shared _ALL_AWAITING_CLEAR_PATCH
+        # module constant (services/intent_service.py) — used by both the TTL
+        # site and dispatch_in_flow's NEW_FLOW branch via
+        # IntentService._clear_flow_state.
+        from services.intent_service import _ALL_AWAITING_CLEAR_PATCH
+        assert flag in _ALL_AWAITING_CLEAR_PATCH
 
 
 class TestInvoiceAddressFlow:

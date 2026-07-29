@@ -55,6 +55,43 @@ _QUESTION_STARTERS = (
     "would", "should", "why", "what", "when", "which", "who", "how",
 )
 
+# Every legacy awaiting_*/pending_* key that mirrors a FlowMachine v2 flow.
+# Shared by the TTL stale-reset (below) and dispatch_in_flow's NEW_FLOW branch
+# (services/flow_dispatcher.py) — both mean the same thing: "this flow's
+# pending state must no longer intercept the next message." Flows are
+# mutually exclusive in practice (a user is never mid bank-details AND mid
+# name-change at once — see _reconcile_legacy_to_flow_machine's own comment),
+# so clearing the whole set rather than hand-picking per-flow keys is simpler
+# and just as safe.
+_ALL_AWAITING_CLEAR_PATCH = {
+    "awaiting_send_confirmation": False,
+    "pending_send_invoice":       None,
+    "awaiting_client_billing":    False,
+    "pending_billing_client":     None,
+    "pending_billing_user_id":    None,
+    "pending_invoice":            None,
+    "awaiting_poc_name":          False,
+    "pending_poc_client":         None,
+    "pending_poc_user_id":        None,
+    "pending_poc_row_ids":        None,
+    "awaiting_invoice_poc_email": False,
+    "pending_poc_email_client":   None,
+    "pending_poc_email_user_id":  None,
+    "pending_poc_email_row_ids":  None,
+    "awaiting_poc_email":         False,
+    "poc_email_client":           None,
+    "awaiting_job_input":         False,
+    "pending_disambiguation":     None,
+    "awaiting_bank_details":      False,
+    "awaiting_name_change":       False,
+    "awaiting_link_id":           False,
+    "awaiting_invoice_address":   False,
+    "pending_address_user_id":    None,
+    "awaiting_job_description":   False,
+    "pending_jobdesc_row_id":     None,
+    "pending_jobdesc_user_id":    None,
+}
+
 
 def _looks_like_a_question(message: str) -> bool:
     """True if `message` reads as a genuine question rather than a direct
@@ -670,6 +707,27 @@ class IntentService:
         # nothing in the small-talk/personalization paths that reads it also
         # writes the profile in the same turn.
         self._turn_cache = threading.local()
+
+    def _clear_flow_state(self, user_id: str) -> None:
+        """Reset FlowMachine to IDLE and clear every legacy awaiting_*/pending_*
+        mirror flag plus any in-progress smart-capture form. Used whenever a
+        flow's pending state must stop intercepting the next message: TTL
+        expiry (below) and dispatch_in_flow's NEW_FLOW branch (services/
+        flow_dispatcher.py) both call this. Never raises — a failed clear
+        should not break the turn that triggered it."""
+        try:
+            self.flow_machine.reset(user_id)
+        except Exception as e:
+            logger.warning(f"[FLOW_STATE] FlowMachine.reset failed (non-fatal): {e}")
+        try:
+            self.memory.update_user_memory(user_id, _ALL_AWAITING_CLEAR_PATCH)
+        except Exception as e:
+            logger.warning(f"[FLOW_STATE] legacy flag clear failed (non-fatal): {e}")
+        try:
+            if self.memory.get_form_state(user_id):
+                self.memory.cancel_form(user_id)
+        except Exception as e:
+            logger.warning(f"[FLOW_STATE] form cancel failed (non-fatal): {e}")
 
     def _reconcile_legacy_to_flow_machine(self, user_id: str, user_mem: Dict) -> None:
         """Once per message: if FlowMachine is IDLE but a legacy awaiting_* flag
@@ -3766,54 +3824,13 @@ class IntentService:
                     # isn't trapped in a stale state from hours ago. When the
                     # FlowMachine resets, also clear ALL legacy awaiting flags
                     # so they don't re-arm the flow on the next message.
+                    # expire_if_stale() already reset FlowMachine itself; the
+                    # extra flow_machine.reset() inside _clear_flow_state is a
+                    # harmless no-op re-write of the same IDLE state — the
+                    # legacy-flag clear + form-cancel is the part this site
+                    # actually needs.
                     if self.flow_machine.expire_if_stale(user_id):
-                        _stale_clear = {
-                            "awaiting_send_confirmation": False,
-                            "pending_send_invoice":       None,
-                            "awaiting_client_billing":    False,
-                            "pending_billing_client":     None,
-                            "pending_billing_user_id":    None,
-                            "pending_invoice":            None,
-                            "awaiting_poc_name":          False,
-                            "pending_poc_client":         None,
-                            "pending_poc_user_id":        None,
-                            "pending_poc_row_ids":        None,
-                            "awaiting_invoice_poc_email": False,
-                            "pending_poc_email_client":   None,
-                            "pending_poc_email_user_id":  None,
-                            "pending_poc_email_row_ids":  None,
-                            "awaiting_poc_email":         False,
-                            "poc_email_client":           None,
-                            "awaiting_job_input":         False,
-                            # WP-3: without this, a TTL-based FlowMachine
-                            # reset left the legacy pending_disambiguation
-                            # flag standing — the NEXT message's
-                            # reconciliation would then re-arm FlowMachine
-                            # to DISAMBIGUATION against data the TTL logic
-                            # had just decided was stale, silently
-                            # resurrecting an old numbered list.
-                            "pending_disambiguation":     None,
-                            # WP-3 slice 2: same reasoning — these three must
-                            # be cleared alongside the FlowMachine TTL reset,
-                            # or the next reconciliation re-arms a flow the
-                            # TTL logic just decided was stale.
-                            "awaiting_bank_details":      False,
-                            "awaiting_name_change":       False,
-                            "awaiting_link_id":           False,
-                            # WP-3 slice 3 — same reasoning again.
-                            "awaiting_invoice_address":   False,
-                            "pending_address_user_id":    None,
-                            "awaiting_job_description":   False,
-                            "pending_jobdesc_row_id":      None,
-                            "pending_jobdesc_user_id":     None,
-                        }
-                        self.memory.update_user_memory(user_id, _stale_clear)
-                        # Also drop any in-progress smart-capture form.
-                        try:
-                            if self.memory.get_form_state(user_id):
-                                self.memory.cancel_form(user_id)
-                        except Exception:
-                            pass
+                        self._clear_flow_state(user_id)
                         user_mem = self.memory.get_user_memory(user_id)
                 except Exception as _ttl_err:
                     logger.warning(f"[V2] TTL check failed: {_ttl_err}")

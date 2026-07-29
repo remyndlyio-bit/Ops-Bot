@@ -145,16 +145,12 @@ class TestTTLStalenessClearsDisambiguation:
     logic had just decided was stale."""
 
     def test_stale_clear_includes_pending_disambiguation(self):
-        import inspect
-        from services import intent_service as mod
-        src = inspect.getsource(mod.IntentService._process_request_impl)
-        # The _stale_clear dict literal must include this key -- a direct
-        # source-text check because the dict is only constructed inline,
-        # deep inside a huge method, behind a TTL branch that's expensive
-        # to exercise as a black-box integration test.
-        start = src.index("_stale_clear = {")
-        stale_clear_block = src[start:start + 1800]
-        assert '"pending_disambiguation"' in stale_clear_block
+        # _stale_clear was factored out into the shared _ALL_AWAITING_CLEAR_PATCH
+        # module constant (services/intent_service.py) — used by both the TTL
+        # site and dispatch_in_flow's NEW_FLOW branch via
+        # IntentService._clear_flow_state.
+        from services.intent_service import _ALL_AWAITING_CLEAR_PATCH
+        assert "pending_disambiguation" in _ALL_AWAITING_CLEAR_PATCH
 
 
 class TestDisambiguationFlowHandleResponse:
