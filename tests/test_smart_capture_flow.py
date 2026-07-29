@@ -257,3 +257,139 @@ class TestSaveSmartCaptureJob:
         awaiting = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
                     if "awaiting_compound_response" in c.args[1]]
         assert awaiting and awaiting[-1]["awaiting_compound_response"] is True
+
+
+class TestCompoundIntentEntryPoint:
+    """The gap _save_smart_capture_job's own test doesn't cover: does a
+    compound "add job ... and send invoice" message flowing through
+    process_request() actually reach decompose_compound_intent() and set
+    suggested_next_action in the first place? (Previously untested end to
+    end — a live scenario-suite run found "Add job for Nike 20 April shoot
+    25k and send invoice" never surfaced the "want me to send invoice?"
+    follow-up; that turned out to trace back to a DIFFERENT bug -- a stale
+    confirmation form from the PRECEDING turn swallowing the message before
+    it ever reached this code path (fixed by adding "add " to the
+    new-intent escape hatch) -- but the compound-detection entry point
+    itself had zero direct test coverage, so that conclusion couldn't be
+    verified. These tests close that gap.)"""
+
+    def _make_onboarded_svc(self):
+        svc = _make_svc()
+        svc.supabase.get_user_profile.return_value = {
+            "ok": True, "data": {"onboarded_at": "2024-01-01T00:00:00", "name": "Test User"},
+        }
+        svc.supabase.db_url = "postgresql://fake"
+        svc.gemini.is_history_question.return_value = False
+        svc.memory.get_form_state.return_value = None
+        return svc
+
+    def test_compound_add_job_message_calls_decompose_and_sets_suggestion(self):
+        svc = self._make_onboarded_svc()
+        svc.gemini.decompose_compound_intent.return_value = [
+            "Add job for Nike 20 April shoot 25k",
+            "send invoice",
+        ]
+        svc.gemini.extract_job_fields.return_value = {
+            "brand_name": "Nike", "job_date": "2026-04-20",
+            "job_description_details": "shoot", "fees": 25000,
+        }
+        result = svc.process_request("u1", "Add job for Nike 20 April shoot 25k and send invoice")
+        svc.gemini.decompose_compound_intent.assert_called_once()
+        saved = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
+                 if "suggested_next_action" in c.args[1]]
+        assert saved and saved[-1]["suggested_next_action"] == "send invoice"
+        assert result["operation"] == "smart_capture_confirm"
+
+    def test_full_compound_flow_confirm_then_yes_surfaces_next_action(self):
+        """End to end: add job (compound) -> confirm save -> the save
+        response must surface the "want me to send invoice?" follow-up."""
+        svc = self._make_onboarded_svc()
+        svc.gemini.decompose_compound_intent.return_value = [
+            "Add job for Nike 20 April shoot 25k",
+            "send invoice",
+        ]
+        svc.gemini.extract_job_fields.return_value = {
+            "brand_name": "Nike", "job_date": "2026-04-20",
+            "job_description_details": "shoot", "fees": 25000,
+        }
+        svc.supabase.insert_job_entry.return_value = {"ok": True, "rows": [{"id": 1}]}
+
+        first = svc.process_request("u1", "Add job for Nike 20 April shoot 25k and send invoice")
+        assert first["operation"] == "smart_capture_confirm"
+
+        # Simulate what got persisted: the confirmation form + the
+        # suggested_next_action set by the first turn.
+        svc.memory.get_form_state.return_value = _form(
+            "smart_capture_confirm",
+            values={"brand_name": "Nike", "job_date": "2026-04-20",
+                    "job_description_details": "shoot", "fees": 25000},
+        )
+        svc.memory.get_user_memory.return_value = {"suggested_next_action": "send invoice"}
+
+        second = svc.process_request("u1", "Yes")
+        assert "send invoice" in second["response"].lower()
+
+    def test_single_intent_add_job_does_not_call_decompose_for_short_messages(self):
+        """decompose_compound_intent is only worth calling on messages long
+        enough to plausibly contain two actions -- a short single-intent
+        message shouldn't pay for the extra AI round trip."""
+        svc = self._make_onboarded_svc()
+        svc.gemini.extract_job_fields.return_value = {
+            "brand_name": "Nike", "job_date": "2026-04-20",
+            "job_description_details": "shoot", "fees": 25000,
+        }
+        svc.process_request("u1", "add job Nike 25k")
+        svc.gemini.decompose_compound_intent.assert_not_called()
+
+
+class TestFormStepNoneDoesNotCrashTheWholeTurn:
+    """The actual root cause of the intermittent-looking None-crash bug
+    (process_request() dying with "'NoneType' object has no attribute
+    'get'"). _handle_form_step legitimately returns None on several of its
+    OWN escape hatches (stale form, a "+..." new job entry, or a message
+    matching an obvious new-intent word) -- each cancels the stale form and
+    is documented to "fall through to normal processing." But the call site
+    in _process_request_impl did `return self._handle_form_step(...)`
+    directly, propagating that None as _process_request_impl's own result
+    instead of falling through -- skipping the entire rest of the pipeline
+    and crashing the wrapper. It reproduced for ANY message that both (a)
+    arrives while some form (even a stale/irrelevant one) is active, and
+    (b) matches one of those escape hatches -- e.g. "+Nike 20 Jul shoot
+    25k" (starts with "+") or "What are my total earnings?" (starts with
+    "what ")."""
+
+    def _make_onboarded_svc(self):
+        svc = _make_svc()
+        svc.supabase.get_user_profile.return_value = {
+            "ok": True, "data": {"onboarded_at": "2024-01-01T00:00:00", "name": "Test User"},
+        }
+        svc.supabase.db_url = "postgresql://fake"
+        svc.gemini.is_history_question.return_value = False
+        return svc
+
+    def test_plus_prefixed_message_with_active_form_does_not_crash(self):
+        svc = self._make_onboarded_svc()
+        svc.memory.get_form_state.return_value = _form("smart_capture_confirm")
+        svc.gemini.extract_job_fields.return_value = {
+            "brand_name": "Nike", "job_date": "2026-07-20",
+            "job_description_details": "shoot", "fees": 25000,
+        }
+        result = svc.process_request("u1", "+Nike 20 Jul shoot 25k")
+        assert isinstance(result, dict)
+        assert result.get("operation") != "error"
+
+    def test_what_question_with_active_form_does_not_crash(self):
+        svc = self._make_onboarded_svc()
+        svc.memory.get_form_state.return_value = _form("smart_capture_missing")
+        result = svc.process_request("u1", "What are my total earnings?")
+        assert isinstance(result, dict)
+        assert result.get("operation") != "error"
+
+    def test_stale_form_with_any_message_does_not_crash(self):
+        svc = self._make_onboarded_svc()
+        svc.memory.get_form_state.return_value = _form(
+            "smart_capture_confirm", created_at=(datetime.now() - timedelta(minutes=45)).isoformat(),
+        )
+        result = svc.process_request("u1", "show my jobs")
+        assert isinstance(result, dict)
+        assert result.get("operation") != "error"

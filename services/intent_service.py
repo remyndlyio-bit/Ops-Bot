@@ -3471,7 +3471,24 @@ class IntentService:
             # 0. Check for active form (smart capture confirmation / missing fields)
             form_state = self.memory.get_form_state(user_id)
             if form_state:
-                return self._handle_form_step(user_id, message)
+                # _handle_form_step legitimately returns None on several of
+                # its own escape hatches (stale form >30min, a "+..." new
+                # job entry, or a message matching an obvious new-intent
+                # word like "add "/"what "/"show ") -- each of those cancels
+                # the stale form and comments "fall through to normal
+                # processing." This call site used to `return` that None
+                # directly as _process_request_impl's OWN result instead of
+                # falling through, silently skipping the entire rest of the
+                # pipeline (reminders, smart capture, queries, everything)
+                # and crashing process_request()'s wrapper with 'NoneType
+                # has no attribute get' -- the actual root cause of the
+                # intermittent-looking None-crash bug found in scripted
+                # test runs (it reproduced for "+Nike 20 Jul shoot 25k" and
+                # "What are my total earnings?" precisely because both
+                # match one of these escape hatches).
+                _form_result = self._handle_form_step(user_id, message)
+                if _form_result is not None:
+                    return _form_result
 
             # 0+. Check for pending payment reminders (WhatsApp reply flow)
             reminder_result = self._handle_pending_reminder(user_id, message)
