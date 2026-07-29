@@ -410,6 +410,33 @@ class TestKeywordAggregates:
         # Should filter for unpaid
         assert "paid" in sql.lower()
 
+    def test_show_all_jobs_keyword_sql_has_no_client_filter(self):
+        """The genuine unfiltered case must still work."""
+        svc = self._make_intent_stub()
+        sql = svc._keyword_sql_fallback("Show all my jobs", "user123")
+        assert sql is not None
+        assert "LIMIT 25" in sql.upper()
+
+    def test_client_scoped_jobs_request_does_not_fall_back_to_unfiltered(self):
+        """Live production bug: when the planner's own client-filtered SQL
+        legitimately returned 0 rows (e.g. a client name that doesn't
+        literally match either the client_name or brand_name column), this
+        keyword fallback's "show ... jobs" pattern ALSO matched "Show jobs
+        for Nike" (the ".*" between "show" and "jobs" doesn't care what
+        follows) and silently dropped the client filter entirely, returning
+        the user's 25 most recent jobs across every client instead —
+        phrased as if the search for "Nike" had succeeded. Must return None
+        here (or a differently-scoped SQL) rather than an unfiltered
+        listing, so the caller falls through to an honest "no match" reply
+        instead of misrepresenting unrelated data as the answer."""
+        svc = self._make_intent_stub()
+        for msg in ("Show jobs for Nike", "show jobs for ZZTEST Nike", "list jobs for Star Studios"):
+            sql = svc._keyword_sql_fallback(msg, "user123")
+            if sql is not None:
+                assert "LIMIT 25" not in sql.upper() or "client_name" in sql.lower(), (
+                    f"{msg!r} fell back to an unfiltered 25-row listing: {sql}"
+                )
+
     def test_count_post_correction_forces_count_metric(self):
         """'how many' with metric=null → metric forced to count in execute_query_plan."""
         import re

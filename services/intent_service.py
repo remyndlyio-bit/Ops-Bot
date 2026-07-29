@@ -6020,8 +6020,17 @@ class IntentService:
                 f"AND {_client_expr} IS NOT NULL ORDER BY 1"
             )
 
-        # "show all jobs" / "list jobs" / "my jobs"
-        if re.search(r'\b(show|list|all|my)\b.*\b(jobs?|entr(?:y|ies)?|records?|work)\b', msg):
+        # "show all jobs" / "list jobs" / "my jobs" — but NOT a client-scoped
+        # request like "show jobs for Nike". Regression: the planner's own
+        # (correctly client-filtered) SQL can legitimately return 0 rows —
+        # e.g. a client_name value that doesn't literally match either the
+        # client_name or brand_name column alone — and this fallback used
+        # to catch "show jobs for Nike" too (the ".*" between "show" and
+        # "jobs" doesn't care what follows), silently DROPPING the client
+        # filter entirely and returning the user's 25 most recent jobs
+        # across every client instead, phrased as if the search succeeded.
+        if re.search(r'\b(show|list|all|my)\b.*\b(jobs?|entr(?:y|ies)?|records?|work)\b', msg) \
+                and not re.search(r'\b(jobs?|entr(?:y|ies)?|records?|work)\b.{0,3}\bfor\b', msg):
             return f"{base} ORDER BY job_date DESC NULLS LAST LIMIT 25"
 
         # Hinglish/Roman Hindi: "pichhle quarter/mahine mein kitna paisa aaya" — earnings SUM (no client filter)
