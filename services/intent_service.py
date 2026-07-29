@@ -4506,64 +4506,75 @@ class IntentService:
                     return {"operation": "invoice_feedback", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             # 2. Invoice retrieval (keyword-based; use LLM to extract params, fetch from Supabase)
-            # Broad verb list (logging/telemetry only — routing is driven by the
-            # invoice noun below + the AI classifier).
-            _INVOICE_VERBS = ["get", "download", "send", "give", "show", "retrieve", "fetch",
-                              "generate", "create", "make", "prepare", "need", "want", "share",
-                              "provide", "issue", "produce", "raise", "cut", "forward",
-                              "regenerate", "redo", "rebuild"]
-            has_verb = any(w in msg_lower for w in _INVOICE_VERBS)
-            _VERB_TYPOS = ["genrate", "generat", "crete", "creat", "mke", "prepre", "prepar"]
-            has_verb = has_verb or any(t in msg_lower for t in _VERB_TYPOS)
-            # "bill" must match as a whole word — "billing"/"billed"/"billable" are
-            # financial/revenue terms and must NOT route to the invoice pipeline.
-            _bill_as_word = bool(re.search(r'\bbill\b', msg_lower))
-            has_invoice_word = (
-                "invoice" in msg_lower or _bill_as_word or "pdf" in msg_lower
-                or any(t in msg_lower for t in self._INVOICE_TYPOS)
-            )
-            # An invoice noun is what routes here; many such messages are actually
-            # READS ("show unpaid invoices", "how many invoices last month"), so the
-            # AI classifier confirms below. AI is far more reliable than keyword lists.
-            is_retrieval = has_invoice_word
-            # Hard-keyword shortcut: a clear action verb + an invoice noun is
-            # unambiguously an invoice action, regardless of what the downstream AI
-            # classifier says — prevents v2 READ_QUERY over-triggering on e.g.
-            # "Generate invoice for X for March". (See _INVOICE_ACTION_VERBS.)
-            _invoice_action_definite = self._is_definite_invoice_action(message)
-            if is_retrieval:
-                # First-line guard: defer to the v2 classifier when it confidently
-                # called this a READ. The legacy invoice keyword check used to
-                # silently override v2 — that was the "kiska invoice baki hai
-                # bhejna" bug. v2 has full multilingual context + the column
-                # registry's semantic mappings; it should win on reads.
-                _v2_says_read = (
-                    not _invoice_action_definite  # never downgrade a clear action verb
-                    and _v2_verdict is not None
-                    and _v2_verdict.get("intent") in ("READ_QUERY", "READ_AGGREGATE")
-                    and float(_v2_verdict.get("confidence") or 0) >= 0.85
+            # When FLOW_MACHINE_V2 is on, the classifier has already classified the message.
+            # Skip the legacy keyword check and let the v2 verdict decide routing downstream.
+            # When v2 is off, use the legacy keyword-based detection.
+            if not _flow_machine_v2_enabled_for(user_id):
+                # Legacy invoice keyword check (runs only when v2 is off)
+                # Broad verb list (logging/telemetry only — routing is driven by the
+                # invoice noun below + the AI classifier).
+                _INVOICE_VERBS = ["get", "download", "send", "give", "show", "retrieve", "fetch",
+                                  "generate", "create", "make", "prepare", "need", "want", "share",
+                                  "provide", "issue", "produce", "raise", "cut", "forward",
+                                  "regenerate", "redo", "rebuild"]
+                has_verb = any(w in msg_lower for w in _INVOICE_VERBS)
+                _VERB_TYPOS = ["genrate", "generat", "crete", "creat", "mke", "prepre", "prepar"]
+                has_verb = has_verb or any(t in msg_lower for t in _VERB_TYPOS)
+                # "bill" must match as a whole word — "billing"/"billed"/"billable" are
+                # financial/revenue terms and must NOT route to the invoice pipeline.
+                _bill_as_word = bool(re.search(r'\bbill\b', msg_lower))
+                has_invoice_word = (
+                    "invoice" in msg_lower or _bill_as_word or "pdf" in msg_lower
+                    or any(t in msg_lower for t in self._INVOICE_TYPOS)
                 )
-                _v2_says_invoice = (
-                    _v2_verdict is not None
-                    and _v2_verdict.get("intent") == "WRITE_INVOICE"
-                )
-                if _v2_says_read:
-                    logger.info(
-                        f"[INVOICE_CHECK] v2 classifier confidently said "
-                        f"{_v2_verdict.get('intent')} (conf={_v2_verdict.get('confidence')}) — "
-                        f"routing to query pipeline."
+                # An invoice noun is what routes here; many such messages are actually
+                # READS ("show unpaid invoices", "how many invoices last month"), so the
+                # AI classifier confirms below. AI is far more reliable than keyword lists.
+                is_retrieval = has_invoice_word
+                # Hard-keyword shortcut: a clear action verb + an invoice noun is
+                # unambiguously an invoice action, regardless of what the downstream AI
+                # classifier says — prevents v2 READ_QUERY over-triggering on e.g.
+                # "Generate invoice for X for March". (See _INVOICE_ACTION_VERBS.)
+                _invoice_action_definite = self._is_definite_invoice_action(message)
+                if is_retrieval:
+                    # First-line guard: defer to the v2 classifier when it confidently
+                    # called this a READ. The legacy invoice keyword check used to
+                    # silently override v2 — that was the "kiska invoice baki hai
+                    # bhejna" bug. v2 has full multilingual context + the column
+                    # registry's semantic mappings; it should win on reads.
+                    _v2_says_read = (
+                        not _invoice_action_definite  # never downgrade a clear action verb
+                        and _v2_verdict is not None
+                        and _v2_verdict.get("intent") in ("READ_QUERY", "READ_AGGREGATE")
+                        and float(_v2_verdict.get("confidence") or 0) >= 0.85
                     )
-                    is_retrieval = False
-                    has_invoice_word = False
-                elif _invoice_action_definite or _v2_says_invoice:
-                    # Clear action verb or v2 confirmed WRITE_INVOICE — skip the
-                    # redundant is_invoice_action_request LLM call.
-                    logger.info(f"[INVOICE_CHECK] definite={_invoice_action_definite} v2_invoice={_v2_says_invoice} — skipping secondary AI check")
-                elif not self.gemini.is_invoice_action_request(message):
-                    logger.info(f"[INVOICE_CHECK] AI rejected invoice routing for msg='{message[:80]}' — routing to query pipeline")
-                    is_retrieval = False
-                    has_invoice_word = False
-            logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
+                    _v2_says_invoice = (
+                        _v2_verdict is not None
+                        and _v2_verdict.get("intent") == "WRITE_INVOICE"
+                    )
+                    if _v2_says_read:
+                        logger.info(
+                            f"[INVOICE_CHECK] v2 classifier confidently said "
+                            f"{_v2_verdict.get('intent')} (conf={_v2_verdict.get('confidence')}) — "
+                            f"routing to query pipeline."
+                        )
+                        is_retrieval = False
+                        has_invoice_word = False
+                    elif _invoice_action_definite or _v2_says_invoice:
+                        # Clear action verb or v2 confirmed WRITE_INVOICE — skip the
+                        # redundant is_invoice_action_request LLM call.
+                        logger.info(f"[INVOICE_CHECK] definite={_invoice_action_definite} v2_invoice={_v2_says_invoice} — skipping secondary AI check")
+                    elif not self.gemini.is_invoice_action_request(message):
+                        logger.info(f"[INVOICE_CHECK] AI rejected invoice routing for msg='{message[:80]}' — routing to query pipeline")
+                        is_retrieval = False
+                        has_invoice_word = False
+                logger.info(f"[INVOICE_CHECK] msg='{message[:80]}' has_verb={has_verb} has_invoice={has_invoice_word} is_retrieval={is_retrieval}")
+            else:
+                # v2 is on — skip legacy keyword check entirely.
+                # The v2 verdict will be used by downstream routing (dispatcher or fallback).
+                is_retrieval = False
+                has_invoice_word = False
+                logger.info(f"[INVOICE_CHECK] v2 enabled, skipping legacy check")
             if is_retrieval:
                 # For definite invoice actions (generate/create/send + invoice word), skip
                 # parse_user_intent — it sometimes returns GEMINI_ERROR and silently falls
