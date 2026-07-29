@@ -1477,6 +1477,7 @@ class IntentService:
             "which client", "what client", "which brand", "all client", "all brand",
             "have paid", "haven't paid", "not paid", "unpaid clients", "pending payment",
             "so far", "overall", "across",
+            "by client", "by brand", "group by", "earnings by", "breakdown by",
         ]
         if any(ind in msg_lower for ind in standalone_indicators):
             return None

@@ -161,6 +161,18 @@ class TestFollowupDetectionGuards:
         assert svc._is_followup_field_request("mark this as paid", COLUMNS) is None
         assert svc._is_followup_field_request("change the fee to 30000", COLUMNS) is None
 
+    def test_group_by_client_not_a_followup(self):
+        """Live production bug: "Show earnings by client" matched "client"
+        as a field alias and got answered from a single cached row (whatever
+        job happened to be cached from the PREVIOUS turn) instead of running
+        the GROUP BY aggregate the user actually asked for -- the response
+        described one client's one job as if it answered "earnings by
+        client" for the whole account."""
+        svc = _make_svc()
+        assert svc._is_followup_field_request("Show earnings by client", COLUMNS) is None
+        assert svc._is_followup_field_request("earnings by brand", COLUMNS) is None
+        assert svc._is_followup_field_request("group by client", COLUMNS) is None
+
     def test_dated_aggregate_not_a_followup(self):
         svc = _make_svc()
         assert svc._is_followup_field_request("Total earnings last quarter?", COLUMNS) is None
