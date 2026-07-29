@@ -2924,7 +2924,17 @@ class IntentService:
 
     def _prompt_bank_details_format(self, user_id: str, message: str) -> Dict:
         """Ask the user to send all bank details in a single structured message."""
-        self._arm_awaiting(user_id, "awaiting_bank_details")
+        # This is a standalone "update my bank details" command, unrelated to any
+        # invoice flow. _handle_bank_details_response auto-resumes pending_invoice
+        # after a successful save (so the invoice-readiness gate's OWN bank-details
+        # ask continues into the next missing field) -- but without clearing it
+        # here, a stale pending_invoice left over from a completely unrelated,
+        # long-since-abandoned invoice attempt gets silently resumed too: a live
+        # run saved the new bank details correctly but returned "To bill BB2, I
+        # need their billing details..." instead of a plain save confirmation,
+        # because a pending_invoice for BB2 from 27 turns earlier was still sitting
+        # in memory. Clear it so a general bank-details update always just confirms.
+        self._arm_awaiting(user_id, "awaiting_bank_details", {"pending_invoice": None})
         response = (
             "Sure! Please send your bank details in this format:\n\n"
             "Account Name: Darshit Mody\n"

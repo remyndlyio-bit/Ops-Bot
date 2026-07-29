@@ -542,6 +542,41 @@ class TestBankDetailsParser:
         assert parsed.get("bank_account_number") == "9988776655"
 
 
+class TestStandaloneBankDetailsUpdateClearsStaleInvoice:
+    """Live bug (found in the #95 investigation): a general "Update my bank
+    details" command doesn't clear a stale pending_invoice left over from a
+    completely unrelated, long-abandoned invoice attempt. _handle_bank_details_
+    response auto-resumes pending_invoice after a successful save (needed so
+    the invoice-readiness gate's OWN bank-details ask can continue to the next
+    missing field) -- but for a STANDALONE bank-details update that's wrong: a
+    live run saved new bank details correctly but returned "To bill BB2, I
+    need their billing details..." instead of a plain save confirmation,
+    because a pending_invoice for BB2 from 27 turns earlier was still sitting
+    in memory. The fix clears pending_invoice when arming the standalone
+    prompt."""
+
+    def test_standalone_prompt_clears_pending_invoice(self):
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {
+            "pending_invoice": {"client_name": "BB2", "bill_number": "BB2"},
+        }
+        svc._prompt_bank_details_format("u1", "Update my bank details")
+        patch = svc.memory.update_user_memory.call_args.args[1]
+        assert patch["awaiting_bank_details"] is True
+        assert patch["pending_invoice"] is None
+
+    def test_saving_bank_details_after_standalone_prompt_just_confirms(self):
+        svc = _make_svc()
+        svc.supabase.upsert_user_config.return_value = {"ok": True}
+        # Simulate the arm having already cleared pending_invoice.
+        svc.memory.get_user_memory.return_value = {"pending_invoice": None}
+        result = svc._handle_bank_details_response(
+            "u1", "Account Name: Darshit\nBank: HDFC\nAccount: 123456\nIFSC: HDFC001"
+        )
+        assert result["operation"] == "bank_config_complete"
+        assert "bill" not in result["response"].lower()
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 139 – Stale cached invoice (>30 min TTL)
 # ══════════════════════════════════════════════════════════════════════════
