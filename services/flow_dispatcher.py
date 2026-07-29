@@ -185,12 +185,78 @@ def dispatch_in_flow(
                     "trigger_invoice": False,
                     "invoice_data": {},
                 }
-            # READ_QUERY / READ_AGGREGATE side questions — fall back to legacy
-            # query path. The active flow's awaiting_* legacy flag remains set
-            # in parallel, so the next message still routes to the flow handler.
-            # Note: legacy code will append no nudge — accepted as a limitation
-            # for session 2. Session 3 will own SIDE_QUESTION for read paths
-            # too once the typed query plan lands.
+            # READ_QUERY / READ_AGGREGATE side questions — Phase 1.5: try the
+            # deterministic router first (no LLM, no plan retry — the common
+            # query shapes it covers are exactly the ones safe to answer
+            # inline without risking a slow/expensive planner detour mid-flow).
+            # On a match we get BOTH the answer and the resume_nudge, fixing
+            # the session-2 limitation noted above. Anything the router
+            # doesn't recognise falls through to SHADOW_ONLY exactly as
+            # before — legacy's LLM planner still owns those, unchanged.
+            if verdict["intent"] in ("READ_QUERY", "READ_AGGREGATE"):
+                try:
+                    # Scope-clarifying questions about the PREVIOUS answer
+                    # ("does that include paid and unpaid?") must be checked
+                    # BEFORE the router: a stray keyword like "unpaid" inside
+                    # such a question matches the router's unpaid_list route
+                    # and would answer the wrong thing entirely (a NEW list of
+                    # unpaid jobs, not a description of the prior answer's
+                    # scope). Same ordering rationale as the legacy cascade's
+                    # AnswerLedger check (see intent_service.py ~line 5290).
+                    from services.answer_ledger import answer_scope_question, is_scope_question
+                    _scope_answer = answer_scope_question(
+                        raw, intent_service.memory.get_user_memory(user_id)
+                    )
+                    if _scope_answer:
+                        _nudge = flow.resume_nudge(current_context)
+                        _reply = _scope_answer + (_nudge or "")
+                        intent_service._store_conversation(user_id, raw, _reply)
+                        logger.info(
+                            f"[V2_DISPATCH] SIDE_QUESTION (READ) answered via ledger scope, "
+                            f"staying in {current_flow}"
+                        )
+                        return {
+                            "operation": "scope_question",
+                            "response": _reply,
+                            "trigger_invoice": False,
+                            "invoice_data": {},
+                        }
+
+                    # Scope-shaped but nothing to answer from (empty/stale
+                    # ledger) — do NOT hand this to the router. A stray word
+                    # like "unpaid" inside "does this include unpaid?" would
+                    # false-match the unpaid_list route and answer a totally
+                    # different question. Fall through to legacy instead.
+                    if is_scope_question(raw):
+                        logger.info(
+                            f"[V2_DISPATCH] SIDE_QUESTION (READ) scope-shaped but no ledger "
+                            f"to answer from — shadow, flow={current_flow} preserved"
+                        )
+                        return SHADOW_ONLY
+
+                    from services.query_router import route_common_query
+                    _routed = route_common_query(raw, user_id)
+                    if _routed is not None:
+                        _result = intent_service._execute_routed_query(
+                            _routed, user_id, user_id, raw, conversation_history,
+                        )
+                        if _result is not None:
+                            _nudge = flow.resume_nudge(current_context)
+                            if _nudge:
+                                _result = dict(_result)
+                                _result["response"] = (_result.get("response") or "") + _nudge
+                                intent_service._store_conversation(user_id, raw, _result["response"])
+                            logger.info(
+                                f"[V2_DISPATCH] SIDE_QUESTION (READ) answered via router, "
+                                f"staying in {current_flow}"
+                            )
+                            return _result
+                except Exception as e:
+                    logger.warning(f"[V2_DISPATCH] SIDE_QUESTION router attempt failed: {e}")
+            # No deterministic match (or a WRITE-shaped side question) — fall
+            # back to legacy. The active flow's awaiting_* legacy flag remains
+            # set in parallel, so the next message still routes to the flow
+            # handler. Legacy code appends no nudge for this path.
             logger.info(
                 f"[V2_DISPATCH] SIDE_QUESTION (READ) → shadow (legacy answers, "
                 f"flow={current_flow} preserved via legacy awaiting flag)"
