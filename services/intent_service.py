@@ -6262,8 +6262,12 @@ class IntentService:
         if re.search(r'\b(how\s+many|count|total\s+number\s+of|number\s+of)\b.*\b(jobs?|entr(?:y|ies)?|records?|work)\b', msg):
             return f"SELECT COUNT(*) AS result FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
 
-        # "total fees" / "total earnings" / "sum of fees"
-        if re.search(r'\b(total|sum|overall)\b.*\b(fees?|earnings?|income|revenue|billing)\b', msg):
+        # "total fees" / "total earnings" / "earnings last quarter" / value-oriented phrasing
+        # Matches both "total earnings" and standalone "earnings"/"billing" (value-oriented phrasing).
+        # But exclude "show earnings" / "list earnings" (which want rows, not sum).
+        if re.search(r'\b(total|sum|overall)\b.*\b(fees?|earnings?|income|revenue|billing)\b', msg) \
+                or (re.search(r'\b(earnings?|income|revenue|billing|kamai)\b', msg)
+                    and not re.search(r'\b(show|list|display|get|view)\b.*\b(earnings?|billing)\b', msg)):
             return f"SELECT SUM(fees) AS result FROM public.job_entries WHERE user_id = '{uid}' AND (\"isDeleted\" IS NOT TRUE)"
 
         # "show all my clients" / "list clients" / "which clients" (NOT how many)
