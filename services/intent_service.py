@@ -4113,6 +4113,21 @@ class IntentService:
             if user_mem.get("awaiting_link_id"):
                 return self._process_link_id(user_id, message)
 
+            # 0b4b. A bare cancel/stop word with NOTHING pending to cancel (every
+            # awaiting_*/pending_disambiguation/form check above already had its
+            # own chance to consume it) must not fall through to the AI query
+            # planner. Live bug: "cancel" reached the planner, which pulled
+            # "id": "2" out of the PREVIOUS turn's disambiguation-pick reply
+            # ("2") still sitting in conversation_history and generated
+            # `UPDATE ... WHERE id = 2` — a raw integer against a UUID column,
+            # crashing 3x with "operator does not exist: uuid = integer"
+            # before falling back to a generic error message. There is
+            # nothing here for "cancel" to mean except "never mind."
+            if msg_lower in ("cancel", "stop", "nevermind", "never mind", "nvm", "abort", "quit", "exit"):
+                response = "👍 Nothing pending to cancel. Let me know if you need anything else."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "no_op_cancel", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
             # 0b5. Negative intent — user declining a follow-up question
             _NEGATIVE_RESPONSES = {
                 "no", "nope", "nah", "not required", "not needed", "no thanks",

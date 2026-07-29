@@ -392,6 +392,49 @@ class TestCancelDisambiguation:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 138a – A bare "cancel" with NOTHING pending must never reach the AI query
+# planner. Live bug: a numbered disambiguation pick ("2") on one turn, then
+# an unrelated "cancel" on the NEXT turn (with the disambiguation already
+# resolved) reached the planner, which pulled "id": "2" out of the previous
+# turn still sitting in conversation_history and generated
+# `UPDATE ... WHERE id = 2` — a raw integer against a UUID `id` column,
+# crashing 3x with "operator does not exist: uuid = integer" before falling
+# back to a generic "I fumbled that one" error.
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestBareCancelWithNothingPendingNeverReachesPlanner:
+    @pytest.mark.parametrize("msg", ["cancel", "stop", "nevermind", "never mind", "nvm", "abort", "quit", "exit"])
+    def test_bare_cancel_short_circuits_before_the_planner(self, msg):
+        svc = _make_svc()
+        # No awaiting_* flag, no pending_disambiguation, no form active —
+        # exactly the state after an earlier flow already resolved itself.
+        svc.memory.get_conversation_history.return_value = [
+            {"role": "user", "content": "2"},
+            {"role": "assistant", "content": "✅ Updated paid to Yes."},
+        ]
+        result = svc.process_request("user1", msg)
+        # "nevermind"/"nvm" get caught by small-talk detection first, which is
+        # also a valid short-circuit before the planner -- the invariant that
+        # matters is that the planner never ran, not which specific operation
+        # label the short-circuit used.
+        assert result.get("operation") in ("no_op_cancel", "small_talk"), (
+            f"{msg!r} with nothing pending reached the query planner instead of "
+            f"short-circuiting: {result}"
+        )
+        svc.gemini.parse_user_intent.assert_not_called()
+
+    def test_cancel_during_an_active_flow_is_unaffected(self):
+        """Over-correction guard: 'cancel' while something IS actually
+        pending must still be handled by that flow's own cancel logic, not
+        swallowed by the generic no-op guard."""
+        svc = _make_svc()
+        svc.memory.get_user_memory.return_value = {"awaiting_bank_details": True}
+        result = svc.process_request("user1", "cancel")
+        assert result.get("operation") != "no_op_cancel"
+        assert "bank" in result.get("response", "").lower() or "cancel" in result.get("response", "").lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 138b – CRITICAL: a bare "yes" must NEVER bulk-delete in a numbered
 #        disambiguation. Regression for the "Yes to email → deleted job" bug.
 # ══════════════════════════════════════════════════════════════════════════
