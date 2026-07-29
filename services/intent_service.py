@@ -3359,6 +3359,30 @@ class IntentService:
         this wrapper only observes it."""
         with Turn(user_id) as t:
             result = self._process_request_impl(user_id, message)
+            if not isinstance(result, dict):
+                # Observed live and in scripted test runs: _process_request_impl
+                # is ~2000 lines with dozens of exit points across onboarding,
+                # smart-capture, invoice, and query branches, and on rare,
+                # non-deterministic occasions it returns None instead of a
+                # response dict (root cause not yet isolated — it reproduced
+                # for different, unrelated message shapes on different runs,
+                # pointing at something transient rather than a fixed
+                # code-path bug). Previously this crashed the whole request
+                # with 'NoneType has no attribute get' and the user got zero
+                # reply. This is the safety net: whatever the cause, the
+                # public entry point must never hand back anything but a
+                # valid response dict.
+                logger.error(
+                    f"[PROCESS_REQUEST] _process_request_impl returned {result!r} "
+                    f"(expected a dict) for user={user_id} msg={message[:80]!r} — "
+                    "falling back to a graceful error reply."
+                )
+                result = {
+                    "operation": "error",
+                    "response": format_response(ERROR_MODE, error_detail=error_calm_phrase()),
+                    "trigger_invoice": False,
+                    "invoice_data": {},
+                }
             t.operation = result.get("operation")
             t.response_text = result.get("response") or ""
             return result
