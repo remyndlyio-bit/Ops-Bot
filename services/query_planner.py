@@ -393,25 +393,30 @@ def build_operation_plan(
                 logger.info("[PLANNER] KnowledgeBook grounding injected")
         except Exception as _e:
             logger.warning(f"[PLANNER] KnowledgeBook grounding skipped: {_e}")
-    try:
-        raw = gemini_service._call_api(prompt, generation_config={
-            "responseMimeType": "application/json",
-            "temperature": 0,
-            "maxOutputTokens": 800,
-        })
-        if not raw:
-            return {"_error": "Empty response from LLM."}
-        raw = _strip_markdown_json(raw)
-        plan = json.loads(raw)
-        plan["operation"] = operation
-        logger.info(f"[PLANNER] Plan: {json.dumps(plan)[:300]}")
-        return plan
-    except json.JSONDecodeError as e:
-        logger.error(f"[PLANNER] JSON parse error: {e}")
-        return {"_error": f"Invalid JSON from LLM: {e}"}
-    except Exception as e:
-        logger.error(f"[PLANNER] LLM error: {e}")
-        return {"_error": str(e)}
+    for attempt in range(2):
+        try:
+            raw = gemini_service._call_api(prompt, generation_config={
+                "responseMimeType": "application/json",
+                "temperature": 0,
+                "maxOutputTokens": 800,
+            })
+            if not raw:
+                return {"_error": "Empty response from LLM."}
+            raw = _strip_markdown_json(raw)
+            plan = json.loads(raw)
+            plan["operation"] = operation
+            logger.info(f"[PLANNER] Plan: {json.dumps(plan)[:300]}")
+            return plan
+        except json.JSONDecodeError as e:
+            if attempt == 0:
+                logger.warning(f"[PLANNER] JSON parse error on attempt 1, retrying: {e}")
+                continue
+            else:
+                logger.error(f"[PLANNER] JSON parse error on attempt 2 (final): {e}")
+                return {"_error": f"Invalid JSON from LLM: {e}"}
+        except Exception as e:
+            logger.error(f"[PLANNER] LLM error: {e}")
+            return {"_error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

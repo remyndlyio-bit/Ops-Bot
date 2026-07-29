@@ -205,3 +205,70 @@ class TestValidPlanFirstTryNoRetry:
 
         assert result["_error"] is None
         assert result["sql"] is not None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Phase 0 — JSON retry on malformed upstream response
+# ─────────────────────────────────────────────────────────────────────
+
+class TestJSONParseRetry:
+    """The planner LLM occasionally returns malformed JSON despite
+    responseMimeType: "application/json". Verify that a single retry
+    recovers from the first parse error, and that we don't infinite-loop
+    on persistent parse errors."""
+
+    def test_malformed_json_first_try_valid_json_second_try(self, monkeypatch):
+        """First call returns invalid JSON. Second call returns valid JSON.
+        The plan should be successfully parsed and returned (no error)."""
+        monkeypatch.setenv("STRICT_PLAN_VALIDATION", "0")
+
+        gemini = _gemini_with_scripted_responses(
+            # First planner call — malformed JSON (missing closing bracket):
+            '{"operation": "query", "metric": "count", "filters": null',
+            # Second planner call — valid JSON:
+            json.dumps({
+                "operation": "query",
+                "metric": "count",
+                "filters": None,
+                "confidence": "high",
+            }),
+        )
+
+        result = execute_query_plan(
+            message="how many jobs",
+            gemini_service=gemini,
+            supabase_service=_fake_supabase(),
+            user_id="test-user",
+        )
+
+        # Should succeed — the retry recovered from the parse error.
+        assert result["_error"] is None
+        assert result["sql"] is not None
+        # Verify the LLM was called twice (first malformed, second valid).
+        assert gemini._call_api.call_count == 2
+
+    def test_malformed_json_both_attempts_returns_error(self, monkeypatch):
+        """Both calls return invalid JSON. After exhausting retries,
+        should return an error dict."""
+        monkeypatch.setenv("STRICT_PLAN_VALIDATION", "0")
+
+        gemini = _gemini_with_scripted_responses(
+            # First attempt — malformed JSON:
+            '{"operation": "query", "metric":',
+            # Second attempt — also malformed JSON:
+            '{"broken": "again"',
+        )
+
+        result = execute_query_plan(
+            message="how many jobs",
+            gemini_service=gemini,
+            supabase_service=_fake_supabase(),
+            user_id="test-user",
+        )
+
+        # Should have an error; no SQL generated.
+        assert result["_error"] is not None
+        assert "Invalid JSON" in result["_error"]
+        assert result.get("sql") is None
+        # Verify exactly two attempts.
+        assert gemini._call_api.call_count == 2
