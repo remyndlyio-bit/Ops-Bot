@@ -3321,8 +3321,16 @@ class IntentService:
         # question about an unrelated earlier answer) matches "paid" and silently
         # marks a job paid. This flag is a dangling background nudge the user may
         # not even remember exists, so it must not hijack an ordinary sentence.
+        #
+        # The question-word check used to be anchored to the START of the
+        # message only. Live bug: "Out of 28 how many have paid" — a genuine
+        # follow-up question, question word mid-sentence, no "?" — slipped
+        # past the guard, matched "paid", pulled "28" out as a selection
+        # index against a 2-item pending list, and answered "Please choose a
+        # number between 1 and 2." instead of addressing the actual
+        # question. Search the whole message, not just its start.
         if "?" in message or re.search(
-            r"^\s*(do|does|did|is|are|was|were|can|could|would|should|why|what|when|which|who|how)\b",
+            r"\b(do|does|did|is|are|was|were|can|could|would|should|why|what|when|which|who|how)\b",
             msg_lower,
         ):
             return None

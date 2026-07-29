@@ -793,6 +793,17 @@ def _build_select(plan: Dict, user_id: str, date_column: Optional[str]) -> Dict[
             select = f"{_gb_select}, {metric.upper()}({column}) AS result"
         else:
             select = f"{_gb_select}, COUNT(*) AS result"
+    elif metric == "count" and column in ("client_name", "brand_name", "production_house", "poc_email"):
+        # metric=count WITH an identity-style column but no group_by means
+        # "how many DISTINCT <column> values" (e.g. "how many clients do I
+        # have" -> column=client_name), not "how many rows total". Live bug:
+        # this fell into a bare COUNT(*) below, so "What are the number of
+        # clients i have" against 28 job rows answered "You've got 28
+        # clients" -- actually the job count, not the distinct client count.
+        # Scoped to identity-like columns only (not e.g. "paid"/"bill_no"),
+        # where DISTINCT-counting is the only sensible reading and the
+        # planner prompt's own rules never intend a plain non-null count.
+        select = f"COUNT(DISTINCT {_client_expr(column)}) AS result"
     elif metric == "count":
         select = "COUNT(*) AS result"
     elif metric in ("sum", "avg", "min", "max") and column:

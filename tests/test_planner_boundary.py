@@ -275,6 +275,64 @@ class TestGenericShapes:
 
 
 # ════════════════════════════════════════════════════════════════════════
+# metric=count + identity column (no group_by) -> COUNT(DISTINCT ...)
+# Live bug: "What are the number of clients i have" against 28 job rows
+# answered "You've got 28 clients" -- the plan came back as metric=count,
+# column=client_name, group_by=null, and the SQL builder ignored `column`
+# entirely for a bare metric=count, emitting COUNT(*) over every JOB row
+# instead of counting distinct clients.
+# ════════════════════════════════════════════════════════════════════════
+
+class TestCountDistinctIdentityColumn:
+    def _sql(self, column, group_by=None):
+        from services.query_planner import plan_to_sql
+        plan = {
+            "operation": "query", "sheet": "sheet1", "metric": "count",
+            "column": column, "filters": None, "group_by": group_by,
+            "limit": None, "order": None, "offset": None,
+        }
+        result = plan_to_sql(plan, user_id="u1", date_column="job_date")
+        return result["sql"]
+
+    def test_count_client_name_uses_distinct(self):
+        sql = self._sql("client_name")
+        assert "COUNT(DISTINCT" in sql
+        assert "COUNT(*)" not in sql
+
+    def test_count_client_name_coalesces_brand_and_production_house(self):
+        """A job entered with only a brand (client_name NULL) still counts
+        as its own distinct client identity."""
+        sql = self._sql("client_name")
+        assert "brand_name" in sql
+        assert "production_house" in sql
+
+    def test_count_poc_email_uses_distinct(self):
+        sql = self._sql("poc_email")
+        assert "COUNT(DISTINCT poc_email)" in sql
+
+    def test_bare_count_no_column_still_counts_rows(self):
+        """Over-correction guard: 'how many jobs' (column=null) must still
+        be a plain row count, not distinct-anything."""
+        from services.query_planner import plan_to_sql
+        plan = {
+            "operation": "query", "sheet": "sheet1", "metric": "count",
+            "column": None, "filters": None, "group_by": None,
+            "limit": None, "order": None, "offset": None,
+        }
+        sql = plan_to_sql(plan, user_id="u1", date_column="job_date")["sql"]
+        assert "COUNT(*)" in sql
+        assert "DISTINCT" not in sql
+
+    def test_count_non_identity_column_falls_back_to_star(self):
+        """Over-correction guard: a non-identity column (e.g. 'fees') must
+        not be swept into DISTINCT-counting — that's a different intent
+        this fix isn't scoped to handle."""
+        sql = self._sql("fees")
+        assert "COUNT(*)" in sql
+        assert "DISTINCT" not in sql
+
+
+# ════════════════════════════════════════════════════════════════════════
 # Routing — v2 classifier verdict beats legacy invoice keyword check
 # ════════════════════════════════════════════════════════════════════════
 

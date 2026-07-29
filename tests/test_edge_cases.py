@@ -1207,3 +1207,20 @@ class TestAuditReplyDoesNotHijackQuestions:
         for msg in ("mark paid", "it's paid", "yes paid"):
             svc, result = self._run(msg)
             assert result is not None and result.get("operation") == "audit_paid", msg
+
+    @pytest.mark.parametrize("msg", [
+        "Out of 28 how many have paid",
+        "So how many are paid",
+        "of those how many have paid so far",
+    ])
+    def test_mid_sentence_question_word_falls_through(self, msg):
+        """Live production bug: the question-word guard was anchored to the
+        START of the message, so "Out of 28 how many have paid" (question
+        word mid-sentence, no leading question word, no "?") slipped past
+        it, matched the loose 'paid' substring check, pulled "28" out as a
+        selection index against a small pending list, and answered "Please
+        choose a number between 1 and 2" instead of the actual question."""
+        svc, result = self._run(msg)
+        assert result is None, f"{msg!r} was treated as a numeric audit reply: {result}"
+        assert not any("update" in (c.args[0].lower() if c.args else "")
+                       for c in svc.supabase.execute_sql.call_args_list)
