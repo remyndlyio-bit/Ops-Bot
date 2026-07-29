@@ -5,7 +5,7 @@ from utils.date_utils import month_name_to_number, number_to_month_name
 from services.answer_ledger import (
     answer_scope_question, build_entry, build_entry_from_sql, append_entry,
     get_entries as get_ledger_entries, is_scope_question as answer_ledger_is_scope_question,
-    scope_from_sql,
+    scope_from_sql, format_inr,
 )
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
@@ -110,7 +110,7 @@ def _format_job_card(row: dict) -> str:
 
     fees = row.get("fees")
     try:
-        amount = f"₹{int(float(fees)):,}" if fees is not None else "—"
+        amount = f"₹{format_inr(fees)}" if fees is not None else "—"
     except (ValueError, TypeError):
         amount = str(fees) if fees else "—"
 
@@ -165,7 +165,7 @@ def _format_aggregate_fallback(payload: dict, user_message: str) -> str:
             amount = int(val or 0)
             if is_zero:
                 return "₹0 for that period — no matching records."
-            return f"₹{amount:,}"
+            return f"₹{format_inr(amount)}"
 
     if p_type in ("multi_record", "job_summary", "job_list"):
         data = payload.get("data") or []
@@ -179,7 +179,7 @@ def _format_aggregate_fallback(payload: dict, user_message: str) -> str:
             client = row.get("client_name") or row.get("brand_name") or "Unknown"
             amount = row.get("result") or row.get("fee") or row.get("fees") or 0
             try:
-                lines.append(f"• {client}: ₹{int(float(amount)):,}")
+                lines.append(f"• {client}: ₹{format_inr(float(amount))}")
             except (ValueError, TypeError):
                 lines.append(f"• {client}: {amount}")
         return "\n".join(lines) if lines else "No matching records found."
@@ -1424,9 +1424,9 @@ class IntentService:
         # Build change-history entry to append to notes
         from datetime import date as _date
         _label = self._MODIFY_FIELD_ALIASES.get(field, field).replace("_", " ")
-        _old_disp = (f"₹{int(float(old_value)):,}" if field == "fees" and old_value is not None
+        _old_disp = (f"₹{format_inr(old_value)}" if field == "fees" and old_value is not None
                      else str(old_value) if old_value is not None else "—")
-        _new_disp = f"₹{value:,}" if field == "fees" else str(value)
+        _new_disp = f"₹{format_inr(value)}" if field == "fees" else str(value)
         history_entry = f"[{_date.today().strftime('%d %b %Y')}] {_label}: {_old_disp} → {_new_disp}"
         new_notes = (existing_notes + "\n" + history_entry).strip() if existing_notes else history_entry
 
@@ -2001,7 +2001,7 @@ class IntentService:
             val = extracted.get(key)
             if val is not None:
                 if key == "fees":
-                    val = f"₹{val:,}" if isinstance(val, (int, float)) else val
+                    val = f"₹{format_inr(val)}" if isinstance(val, (int, float)) else val
                 elif key == "paid":
                     val = "Paid ✅" if str(val).lower() in ("true", "yes", "1") else "Unpaid"
                 lines.append(f"{label}: {val}")
@@ -2132,7 +2132,7 @@ class IntentService:
                 val = extracted.get(key)
                 if val is not None:
                     if key == "fees":
-                        val = f"₹{val:,}" if isinstance(val, (int, float)) else val
+                        val = f"₹{format_inr(val)}" if isinstance(val, (int, float)) else val
                     lines.append(f"{label}: {val}")
 
             lines.append(f"\nI still need: {missing_str}")
@@ -3161,7 +3161,7 @@ class IntentService:
             return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         try:
-            amount_str = f"₹{int(float(fees)):,}"
+            amount_str = f"₹{format_inr(fees)}"
         except (ValueError, TypeError):
             amount_str = str(fees) if fees else "N/A"
 
@@ -3281,7 +3281,7 @@ class IntentService:
                     remove_single(user_id, job_id)
                     client = target.get("client_name") or "the invoice"
                     try:
-                        amt = f" — ₹{int(float(target.get('fees') or 0)):,}"
+                        amt = f" — ₹{format_inr(float(target.get('fees') or 0))}"
                     except Exception:
                         amt = ""
                     remaining = get_pending(user_id)
@@ -3353,7 +3353,7 @@ class IntentService:
                 continue
 
             try:
-                amount_str = f"₹{int(float(fees)):,}"
+                amount_str = f"₹{format_inr(fees)}"
             except (ValueError, TypeError):
                 amount_str = str(fees) if fees else "N/A"
 
@@ -5202,7 +5202,7 @@ class IntentService:
                             if _c: _parts.append(_c)
                             if _d: _parts.append(_d)
                             if _desc: _parts.append(_desc)
-                            if isinstance(_f, (int, float)): _parts.append(f"₹{int(_f):,}")
+                            if isinstance(_f, (int, float)): _parts.append(f"₹{format_inr(_f)}")
                             _opts.append(" | ".join(_parts))
                         _opts.append("\nReply with a number to pick, or 'cancel' to abort.")
                         response = "\n".join(_opts)
@@ -5417,7 +5417,7 @@ class IntentService:
                             if _c: _parts.append(_c)
                             if _d: _parts.append(_d)
                             if _desc: _parts.append(_desc)
-                            if isinstance(_f, (int, float)): _parts.append(f"₹{int(_f):,}")
+                            if isinstance(_f, (int, float)): _parts.append(f"₹{format_inr(_f)}")
                             _opts.append(" | ".join(_parts))
                         _opts.append("\nReply with a number to pick, or 'cancel' to abort.")
                         response = "\n".join(_opts)
@@ -5473,8 +5473,8 @@ class IntentService:
                             _new_v = _updated_row.get(_f)
                             if str(_old_v) != str(_new_v):
                                 _lbl = _f.replace("_", " ")
-                                _old_d = f"₹{int(float(_old_v)):,}" if _f == "fees" and _old_v is not None else str(_old_v) if _old_v is not None else "—"
-                                _new_d = f"₹{int(float(_new_v)):,}" if _f == "fees" and _new_v is not None else str(_new_v) if _new_v is not None else "—"
+                                _old_d = f"₹{format_inr(_old_v)}" if _f == "fees" and _old_v is not None else str(_old_v) if _old_v is not None else "—"
+                                _new_d = f"₹{format_inr(_new_v)}" if _f == "fees" and _new_v is not None else str(_new_v) if _new_v is not None else "—"
                                 _history_parts.append(f"{_lbl}: {_old_d} → {_new_d}")
                         if _history_parts:
                             _entry = f"[{_today}] " + "; ".join(_history_parts)
@@ -5536,7 +5536,7 @@ class IntentService:
                                         if _c: _parts.append(_c)
                                         if _d: _parts.append(_d)
                                         if _desc: _parts.append(_desc)
-                                        if isinstance(_f, (int, float)): _parts.append(f"₹{int(_f):,}")
+                                        if isinstance(_f, (int, float)): _parts.append(f"₹{format_inr(_f)}")
                                         _opts.append(" | ".join(_parts))
                                     _opts.append("\nReply with a number to pick, or 'cancel' to abort.")
                                     response = "\n".join(_opts)

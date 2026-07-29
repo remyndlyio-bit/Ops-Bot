@@ -124,6 +124,32 @@ class TestFormStepEscapeHatches:
         svc.memory.cancel_form.assert_called_once_with("u1")
 
 
+class TestSmartCaptureConfirmationFeeFormatting:
+    """Regression: the smart-capture confirmation card displayed fees using
+    Python's default Western digit grouping (₹150,000) while every other
+    part of the product (query responses, reminder emails) uses Indian
+    grouping (₹1,50,000) via answer_ledger.format_inr — an inconsistency a
+    scripted test run flagged directly ("Parses fees as ₹1,50,000" expected,
+    got "₹150,000")."""
+
+    def test_confirmation_card_uses_indian_grouping(self):
+        svc = _make_svc()
+        result = svc._show_smart_capture_confirmation("u1", {"brand_name": "Nike", "fees": 150000})
+        assert "₹1,50,000" in result["response"]
+        assert "₹150,000" not in result["response"]
+
+    def test_confirmation_after_missing_fields_completed_uses_indian_grouping(self):
+        svc = _make_svc()
+        svc.gemini.extract_job_fields.return_value = {"job_date": "2026-04-10"}
+        result = svc._handle_smart_capture_missing(
+            "u1", "10 April",
+            _form("smart_capture_missing", values={"brand_name": "Nike", "fees": 150000},
+                  missing_fields=["job_date"]),
+        )
+        assert result["operation"] == "smart_capture_confirm"
+        assert "₹1,50,000" in result["response"]
+
+
 class TestSmartCaptureConfirm:
     VALUES = {"brand_name": "Nike", "fees": 25000, "paid": "Yes"}
 
