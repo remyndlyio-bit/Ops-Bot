@@ -834,6 +834,50 @@ class IntentService:
             patch.update(extra)
         self.memory.update_user_memory(user_id, patch)
 
+    @staticmethod
+    def _fuzzy_match_client_name(client_name: str, db_clients: List[str], message: str) -> str:
+        """Resolve an LLM-extracted client_name against the account's real
+        client/brand/production_house values (Gemini often normalizes names,
+        e.g. "Bridgestone12" -> "Bridgestone"). Returns client_name unchanged
+        if nothing better is found.
+
+        Short queries (<=3 chars, e.g. "MS", "AB") are guarded against raw
+        substring matching -- "ms" appears inside "samsung", which would be
+        a dangerous false match -- by requiring a word-boundary match. But a
+        short TYPO missing just its trailing letter(s), e.g. "Nik" for
+        "Nike", is a genuine PREFIX of the real name, not a coincidental
+        substring, so it gets a second, still-guarded chance (candidate
+        must start with the query and be at most 3 characters longer).
+        """
+        cn_lower = client_name.lower()
+        exact = [c for c in db_clients if c.lower() == cn_lower]
+        if exact:
+            return exact[0]
+
+        if len(cn_lower) <= 3:
+            _pat = re.compile(rf"\b{re.escape(cn_lower)}\b")
+            partial = [c for c in db_clients if _pat.search(c.lower())]
+            if not partial:
+                partial = [
+                    c for c in db_clients
+                    if c.lower().startswith(cn_lower) and len(c) - len(cn_lower) <= 3
+                ]
+        else:
+            partial = [c for c in db_clients if cn_lower in c.lower() or c.lower() in cn_lower]
+
+        if len(partial) == 1:
+            logger.info(f"[INVOICE] Fuzzy matched '{client_name}' → '{partial[0]}'")
+            return partial[0]
+        elif len(partial) > 1:
+            # Multiple partial matches — check the original message for the best one
+            msg_low = message.lower()
+            for p in partial:
+                if p.lower() in msg_low:
+                    logger.info(f"[INVOICE] Matched '{client_name}' → '{p}' from message text")
+                    return p
+
+        return client_name
+
     def _reconstruct_message(self, user_id: str, message: str, conversation_history: List[Dict]) -> str:
         """
         Context reconstruction: if the message is short/ambiguous, merge it
@@ -4505,36 +4549,7 @@ class IntentService:
                             # De-duplicate (case-insensitive)
                             _seen = set()
                             db_clients = [x for x in db_clients if not (x.lower() in _seen or _seen.add(x.lower()))]
-
-                            cn_lower = client_name.lower()
-                            # Exact match first
-                            exact = [c for c in db_clients if c.lower() == cn_lower]
-                            if exact:
-                                client_name = exact[0]
-                            else:
-                                # SAFETY: short queries (<= 3 chars like "MS", "AB") must
-                                # NOT do raw substring matching — "ms" appears inside
-                                # "samsung", which is dangerous. Require a word-boundary
-                                # match against DB candidates for short queries.
-                                if len(cn_lower) <= 3:
-                                    _pat = re.compile(rf"\b{re.escape(cn_lower)}\b")
-                                    partial = [c for c in db_clients if _pat.search(c.lower())]
-                                else:
-                                    partial = [
-                                        c for c in db_clients
-                                        if cn_lower in c.lower() or c.lower() in cn_lower
-                                    ]
-                                if len(partial) == 1:
-                                    logger.info(f"[INVOICE] Fuzzy matched '{client_name}' → '{partial[0]}'")
-                                    client_name = partial[0]
-                                elif len(partial) > 1:
-                                    # Multiple partial matches — check the original message for the best one
-                                    msg_low = message.lower()
-                                    for p in partial:
-                                        if p.lower() in msg_low:
-                                            logger.info(f"[INVOICE] Matched '{client_name}' → '{p}' from message text")
-                                            client_name = p
-                                            break
+                            client_name = self._fuzzy_match_client_name(client_name, db_clients, message)
 
                     # Resolve "this job" / missing client from context
                     if not client_name and not bill_number:

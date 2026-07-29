@@ -864,6 +864,50 @@ class TestInvoiceClientLabel:
         assert self._name("", []) == "Client"
 
 
+class TestFuzzyMatchClientName:
+    """_fuzzy_match_client_name -- resolving an LLM-extracted client name
+    against the account's real client/brand/production_house values."""
+    from services.intent_service import IntentService
+    _match = staticmethod(IntentService._fuzzy_match_client_name)
+
+    def test_exact_match_wins(self):
+        assert self._match("nike", ["Nike", "Adidas"], "invoice for nike") == "Nike"
+
+    def test_long_query_substring_match(self):
+        assert self._match("Bridgestone12", ["Bridgestone", "Nike"], "x") == "Bridgestone"
+
+    def test_short_typo_prefix_matches(self):
+        """Live production bug: "Generate invoice for Nik" echoed "Nik"
+        back verbatim instead of correcting to "Nike" -- the short-query
+        (<=3 char) safety guard only allowed a word-boundary match, and
+        "Nik" has no word boundary before the "e" in "Nike"."""
+        assert self._match("Nik", ["Nike", "Adidas"], "invoice for Nik") == "Nike"
+
+    def test_short_ambiguous_abbreviation_does_not_falsely_match(self):
+        """Over-correction guard: "MS" must NOT match inside "Samsung" --
+        that's a coincidental substring, not a prefix, and this is the
+        exact case the short-query guard exists to prevent."""
+        assert self._match("MS", ["Samsung", "Adidas"], "invoice for MS") == "MS"
+
+    def test_short_prefix_too_far_from_candidate_does_not_match(self):
+        """The prefix fallback is guarded to at most 3 extra trailing
+        characters -- "Ni" matching all the way to "Nikeworld Studios"
+        would be too loose."""
+        assert self._match("Ni", ["Nikeworld Studios"], "x") == "Ni"
+
+    def test_no_match_returns_original(self):
+        assert self._match("Xyz Corp", ["Nike", "Adidas"], "x") == "Xyz Corp"
+
+    def test_multiple_partial_matches_disambiguated_by_message_text(self):
+        result = self._match("star", ["Star Studios", "Star Media"], "invoice for star media please")
+        assert result == "Star Media"
+
+    def test_exact_short_match_not_affected_by_prefix_guard(self):
+        """A genuine short client name ("MS") must still resolve to itself
+        via the exact-match path, unaffected by the new prefix fallback."""
+        assert self._match("MS", ["MS", "Samsung"], "x") == "MS"
+
+
 class TestInvoiceAlreadyIssued:
     """An invoice with an invoice_date on file is a RETRIEVAL — give it back,
     don't treat "send me the invoice" as a fresh build."""
