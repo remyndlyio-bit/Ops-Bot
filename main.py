@@ -519,7 +519,6 @@ async def process_and_send_invoice(
                     }
                 }
                 if poc_email:
-                    _patch["awaiting_send_confirmation"] = True
                     # Clear any stale disambiguation so a "Yes" meant for THIS email
                     # prompt can't be hijacked by a leftover delete/select disambiguation
                     # (which previously caused "Yes" to silently delete a job).
@@ -535,9 +534,10 @@ async def process_and_send_invoice(
                     }
                 intent_service.memory.update_user_memory(user_id, _patch)
                 logger.info(f"[INVOICE] Cached invoice + armed email confirm state for user {user_id}")
-                # Mirror into FlowMachine v2 so dispatch_in_flow can recognise
-                # this state when FLOW_MACHINE_V2 is on. Legacy flag still
-                # drives behaviour today; FlowMachine is a parallel writer.
+                # Phase 2.3: FlowMachine is the SOLE source of truth for this
+                # flow now (no legacy awaiting_send_confirmation flag left —
+                # this used to be a "parallel mirror" write, now it's the
+                # only write).
                 if poc_email:
                     try:
                         from services.flow_machine import FLOW_INVOICE_AWAIT_SEND_CONFIRM
@@ -552,7 +552,7 @@ async def process_and_send_invoice(
                             },
                         )
                     except Exception as fm_err:
-                        logger.warning(f"[FLOW_V2] mirror set_state failed (non-fatal): {fm_err}")
+                        logger.warning(f"[FLOW_V2] set_state failed (non-fatal): {fm_err}")
         except Exception as cache_err:
             logger.warning(f"Failed to cache invoice context: {cache_err}")
 

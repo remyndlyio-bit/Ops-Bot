@@ -241,7 +241,7 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 
 | Legacy flag | Companion `pending_*` keys | FlowMachine flow | Status |
 |---|---|---|---|
-| `awaiting_send_confirmation` | `pending_send_invoice` | `INVOICE_AWAIT_SEND_CONFIRM` | ✅ Mirrored + owned (session 2) |
+| ~~`awaiting_send_confirmation`~~ | `pending_send_invoice` (payload, stays) | `INVOICE_AWAIT_SEND_CONFIRM` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth; no legacy flag, no reconciliation branch, no mirror. First flow to complete the full migration. |
 | `awaiting_client_billing` | `pending_billing_client`, `pending_billing_user_id` | `INVOICE_NEED_BILLING` | ✅ Mirrored + owned (2.5) |
 | `awaiting_poc_name` | `pending_poc_client`, `pending_poc_user_id`, `pending_poc_row_ids` | `INVOICE_NEED_POC_NAME` | ✅ Mirrored + owned (2.5) |
 | `awaiting_poc_email` | `pending_send_invoice`, `poc_email_client` | `INVOICE_NEED_POC_EMAIL` | ✅ Mirrored + owned (2.5) |

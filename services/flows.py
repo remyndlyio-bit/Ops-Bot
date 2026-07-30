@@ -91,8 +91,10 @@ class InvoiceAwaitSendConfirm(Flow):
             f"user={user_id} ctx_client={context.get('client_name')!r}"
         )
         result = intent_service._handle_send_confirmation(user_id, message)
-        # _handle_send_confirmation has already cleared the legacy
-        # awaiting_send_confirmation flag. Tell the FlowMachine the flow's done.
+        # _handle_send_confirmation has already cleared pending_send_invoice
+        # (the payload). FlowMachine is the sole source of truth for whether
+        # this flow is active (Phase 2.3 — no legacy awaiting_* flag exists
+        # for it anymore), so THIS reset is what actually ends the flow.
         try:
             intent_service.flow_machine.reset(user_id)
         except Exception as e:

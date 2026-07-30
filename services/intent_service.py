@@ -64,7 +64,11 @@ _QUESTION_STARTERS = (
 # so clearing the whole set rather than hand-picking per-flow keys is simpler
 # and just as safe.
 _ALL_AWAITING_CLEAR_PATCH = {
-    "awaiting_send_confirmation": False,
+    # NOTE: awaiting_send_confirmation itself is gone (Phase 2.3 — FlowMachine
+    # is now the sole source of truth for INVOICE_AWAIT_SEND_CONFIRM; see
+    # flows.py's InvoiceAwaitSendConfirm). pending_send_invoice is PAYLOAD
+    # data _handle_send_confirmation still reads regardless of which path
+    # triggers it, so it still needs clearing here.
     "pending_send_invoice":       None,
     "awaiting_client_billing":    False,
     "pending_billing_client":     None,
@@ -762,7 +766,7 @@ class IntentService:
         legacy arm site. No-op when FlowMachine is already tracking a flow."""
         from services.flow_machine import (
             FLOW_IDLE,
-            FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_INVOICE_NEED_BILLING,
+            FLOW_INVOICE_NEED_BILLING,
             FLOW_INVOICE_NEED_POC_NAME, FLOW_INVOICE_NEED_POC_EMAIL,
             FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
             FLOW_DISAMBIGUATION, FLOW_BANK_DETAILS, FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
@@ -781,18 +785,12 @@ class IntentService:
             )
             return
 
-        if user_mem.get("awaiting_send_confirmation"):
-            pend = user_mem.get("pending_send_invoice") or {}
-            self.flow_machine.set_state(
-                user_id, FLOW_INVOICE_AWAIT_SEND_CONFIRM,
-                {
-                    "client_name": pend.get("client_name"),
-                    "month":       pend.get("month"),
-                    "year":        pend.get("year"),
-                    "poc_email":   pend.get("poc_email"),
-                },
-            )
-            return
+        # NOTE: INVOICE_AWAIT_SEND_CONFIRM has no reconciliation branch here
+        # (Phase 2.3) — its two arm sites (main.py's process_and_send_invoice,
+        # and the "cached invoice + send intent detected" branch inside
+        # _process_request_impl) write flow_machine.set_state() directly, so
+        # FlowMachine is already correct at arm time; there's no legacy flag
+        # left to reconcile FROM.
 
         if user_mem.get("awaiting_client_billing"):
             self.flow_machine.set_state(
@@ -940,10 +938,12 @@ class IntentService:
     # legacy pipeline tracks. Kept as one list so arming any one of them can
     # reliably clear all the others — see _arm_awaiting below.
     _AWAITING_FLAGS = (
+        # awaiting_send_confirmation removed (Phase 2.3) — FlowMachine is now
+        # the sole source of truth for INVOICE_AWAIT_SEND_CONFIRM.
         "awaiting_job_input", "awaiting_compound_response", "awaiting_invoice_month",
         "awaiting_poc_email", "awaiting_invoice_address", "awaiting_client_billing",
         "awaiting_poc_name", "awaiting_invoice_poc_email", "awaiting_job_description",
-        "awaiting_bank_details", "awaiting_send_confirmation", "awaiting_modify_field",
+        "awaiting_bank_details", "awaiting_modify_field",
         "awaiting_link_id", "awaiting_name_change",
     )
 
@@ -2437,9 +2437,12 @@ class IntentService:
         is_feedback = any(w in msg_lower for w in _FEEDBACK_WORDS)
 
         if is_feedback:
-            # Clear confirmation state but keep the cached invoice for the feedback handler
+            # Clear confirmation state but keep the cached invoice for the
+            # feedback handler. FlowMachine itself is reset by the caller
+            # (flows.py's InvoiceAwaitSendConfirm.handle_response) after this
+            # returns — Phase 2.3 removed the legacy awaiting_send_confirmation
+            # flag, so only the payload needs clearing here.
             self.memory.update_user_memory(user_id, {
-                "awaiting_send_confirmation": False,
                 "pending_send_invoice": None,
             })
             client_name = pending.get("client_name", "Client")
@@ -2456,9 +2459,9 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "invoice_feedback", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Clear the awaiting flag
+        # Clear the payload — FlowMachine reset happens in the caller (see
+        # note above; Phase 2.3 removed the legacy flag this used to clear).
         self.memory.update_user_memory(user_id, {
-            "awaiting_send_confirmation": False,
             "pending_send_invoice": None,
         })
 
@@ -3332,16 +3335,22 @@ class IntentService:
         # isn't trapped. (A genuine reminder reply is a standalone number / skip /
         # all, which the user can send once the sub-flow is done.)
         _mem = self.memory.get_user_memory(user_id)
+        # awaiting_send_confirmation removed (Phase 2.3) — FlowMachine is the
+        # sole source of truth for INVOICE_AWAIT_SEND_CONFIRM now, checked
+        # explicitly below instead of via the legacy flag list.
         _active_subflow = bool(_mem.get("pending_disambiguation")) or any(
             _mem.get(k) for k in (
                 "awaiting_job_input", "awaiting_poc_email", "awaiting_invoice_month",
-                "awaiting_send_confirmation", "awaiting_bank_details",
+                "awaiting_bank_details",
                 "awaiting_client_billing", "awaiting_poc_name", "awaiting_name_change",
                 "awaiting_link_id", "awaiting_modify_field", "awaiting_compound_response",
                 "awaiting_invoice_address", "awaiting_job_description",
                 "awaiting_invoice_poc_email",
             )
         )
+        if not _active_subflow:
+            from services.flow_machine import FLOW_INVOICE_AWAIT_SEND_CONFIRM
+            _active_subflow = self.flow_machine.current_flow(user_id) == FLOW_INVOICE_AWAIT_SEND_CONFIRM
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
             return None
@@ -3968,9 +3977,13 @@ class IntentService:
                 else:
                     # IDLE path — also gated on no legacy awaiting flag set so
                     # mid-migration flows still use legacy handlers.
+                    # awaiting_send_confirmation removed (Phase 2.3): FlowMachine's
+                    # own current_flow check (the `if _v2_in_owned_flow` above this
+                    # else) already routes that flow correctly — nothing left to
+                    # list here for it.
                     _idle_blockers = (
                         "awaiting_job_input", "awaiting_invoice_month", "awaiting_poc_email",
-                        "awaiting_send_confirmation", "awaiting_client_billing",
+                        "awaiting_client_billing",
                         "awaiting_poc_name", "awaiting_bank_details", "awaiting_name_change",
                         "awaiting_modify_field", "pending_disambiguation",
                         "awaiting_invoice_address", "awaiting_job_description",
@@ -4039,9 +4052,12 @@ class IntentService:
             # confirmation) takes precedence over a STALE disambiguation. Otherwise a
             # reply meant for the email prompt (an address, "yes"/"no") gets swallowed
             # by a leftover delete/select disambiguation. Drop the stale state here.
+            # awaiting_send_confirmation removed (Phase 2.3) — checked via
+            # FlowMachine's current_flow instead of a legacy flag.
+            from services.flow_machine import FLOW_INVOICE_AWAIT_SEND_CONFIRM as _FLOW_SEND_CONFIRM
             _invoice_await_active = (
                 user_mem.get("awaiting_poc_email")
-                or user_mem.get("awaiting_send_confirmation")
+                or self.flow_machine.current_flow(user_id) == _FLOW_SEND_CONFIRM
             )
             if _invoice_await_active and user_mem.get("pending_disambiguation"):
                 logger.info("[DISAMBIG] Invoice-email flow active — clearing stale disambiguation so the email reply is handled correctly")
@@ -4188,10 +4204,13 @@ class IntentService:
             # Universal intent-shift guard: if the bot is in any single-question awaiting state
             # and the user's message looks like a brand-new query, clear the pending state and
             # continue with the new request instead of silently treating it as a (wrong) answer.
+            # awaiting_send_confirmation removed (Phase 2.3) — the classifier's
+            # own flow_compatible guidance for INVOICE_AWAIT_SEND_CONFIRM
+            # (services/classifier.py's per-flow block) covers this now;
+            # this dict only needs to describe states with no v2 equivalent.
             _PENDING_STATES = {
                 "awaiting_invoice_month": "the month name for a pending invoice (e.g. 'March')",
                 "awaiting_poc_email":     "a client POC email address",
-                "awaiting_send_confirmation": "a yes/no confirmation to send the invoice over email",
                 "awaiting_client_billing":   "client billing details (name, address, GST)",
                 "awaiting_poc_name":         "a POC name to address the invoice to",
                 "awaiting_invoice_poc_email": "the client's email address for the invoice",
@@ -4261,11 +4280,11 @@ class IntentService:
                 note_route("awaiting_poc_email")
                 return self._handle_poc_email_response(user_id, message)
 
-            # 0b1.6. Check if user is confirming sending invoice to client email
-            if user_mem.get("awaiting_send_confirmation"):
-                logger.info(f"[ROUTE] awaiting_send_confirmation claimed message: {message[:60]!r}")
-                note_route("awaiting_send_confirmation")
-                return self._handle_send_confirmation(user_id, message)
+            # 0b1.6. (removed, Phase 2.3) — invoice-send confirmation is now
+            # owned exclusively by dispatch_in_flow / flows.py's
+            # InvoiceAwaitSendConfirm (FLOW_RESPONSE / CANCEL), reached
+            # earlier in this function via the v2 in-flow block above. No
+            # legacy awaiting_send_confirmation flag exists to check here.
 
             # 0b1.7. Check if user is providing client billing details
             if user_mem.get("awaiting_client_billing"):
@@ -4539,8 +4558,19 @@ class IntentService:
                     self._store_conversation(user_id, message, response)
                     return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-                # We have the PDF and the email — ask for confirmation
-                self._arm_awaiting(user_id, "awaiting_send_confirmation", {
+                # We have the PDF and the email — ask for confirmation.
+                # Phase 2.3: FlowMachine is the sole source of truth for this
+                # flow now (no legacy awaiting_send_confirmation flag left to
+                # mirror) — write flow_machine.set_state() directly, same
+                # pattern main.py's process_and_send_invoice already uses.
+                from services.flow_machine import FLOW_INVOICE_AWAIT_SEND_CONFIRM
+                self.flow_machine.set_state(user_id, FLOW_INVOICE_AWAIT_SEND_CONFIRM, {
+                    "client_name": cached_client,
+                    "month": cached_month,
+                    "year": cached_year,
+                    "poc_email": poc_email,
+                })
+                self.memory.update_user_memory(user_id, {
                     "pending_send_invoice": {
                         "client_name": cached_client,
                         "month": cached_month,
@@ -4548,6 +4578,10 @@ class IntentService:
                         "poc_email": poc_email,
                         "row_ids": cached_row_ids,
                     },
+                    # Defensive clear, same reasoning as _arm_awaiting's own:
+                    # a stale disambiguation list must not outrank this
+                    # freshly-armed flow.
+                    "pending_disambiguation": None,
                 })
                 response = (
                     f"I have the invoice for {cached_client} ({cached_month}) ready.\n\n"
