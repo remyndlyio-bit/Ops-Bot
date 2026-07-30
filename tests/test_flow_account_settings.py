@@ -48,22 +48,11 @@ class TestFlowMachineRegistration:
 
 
 class TestReconciliation:
-    # awaiting_bank_details removed from this parametrization (Phase 2.3):
-    # FlowMachine is BANK_DETAILS' sole source of truth now, with no legacy
-    # flag left to reconcile FROM — see TestBankDetailsIsFlowMachineOnly
-    # below instead.
-    @pytest.mark.parametrize("legacy_flag,flow_name", [
-        ("awaiting_name_change", FLOW_NAME_CHANGE),
-        ("awaiting_link_id", FLOW_LINK_ACCOUNT),
-    ])
-    def test_reconciles_each_flag(self, legacy_flag, flow_name):
-        svc = _make_svc()
-        svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = None
-        svc._reconcile_legacy_to_flow_machine("u1", {legacy_flag: True})
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == flow_name
-
+    # Phase 2.3: all three of this module's original flows (bank-details,
+    # name-change, link-account) are now FlowMachine-only — none has a
+    # reconciliation branch left, since there's no legacy flag left to
+    # reconcile FROM for any of them. What remains worth testing here is
+    # that reconciliation for OTHER (not-yet-migrated) flags is unaffected.
     def test_no_flags_no_op(self):
         svc = _make_svc()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
@@ -71,33 +60,49 @@ class TestReconciliation:
         svc._reconcile_legacy_to_flow_machine("u1", {})
         svc.flow_machine.set_state.assert_not_called()
 
-    def test_disambiguation_checked_before_these_three(self):
-        """If both happen to be set (shouldn't normally happen), the
-        disambiguation branch runs first and returns before reaching these."""
+    def test_still_legacy_flag_reconciles_normally(self):
+        """A flow NOT yet migrated (awaiting_client_billing) still
+        reconciles the normal way — this module's migrations didn't touch
+        the mechanism itself, only removed three branches from it."""
+        svc = _make_svc()
+        svc.flow_machine.current_flow.return_value = FLOW_IDLE
+        svc.memory.get_form_state.return_value = None
+        from services.flow_machine import FLOW_INVOICE_NEED_BILLING
+        svc._reconcile_legacy_to_flow_machine("u1", {"awaiting_client_billing": True})
+        args = svc.flow_machine.set_state.call_args.args
+        assert args[1] == FLOW_INVOICE_NEED_BILLING
+
+    def test_disambiguation_checked_before_later_flags(self):
+        """If a stale disambiguation and a still-legacy flag checked AFTER
+        it in reconciliation's own order both happen to be set,
+        disambiguation wins."""
         svc = _make_svc()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
         svc.memory.get_form_state.return_value = None
         svc._reconcile_legacy_to_flow_machine("u1", {
             "pending_disambiguation": {"rows": [], "type": "delete"},
-            "awaiting_name_change": True,
+            "awaiting_invoice_address": True,
         })
         from services.flow_machine import FLOW_DISAMBIGUATION
         args = svc.flow_machine.set_state.call_args.args
         assert args[1] == FLOW_DISAMBIGUATION
 
 
-class TestTTLStalenessClearsAllThree:
-    # awaiting_bank_details removed from this parametrization (Phase 2.3) —
-    # it's no longer in _ALL_AWAITING_CLEAR_PATCH since there's no legacy
-    # flag left to clear (FlowMachine.reset handles BANK_DETAILS directly).
-    @pytest.mark.parametrize("flag", ["awaiting_name_change", "awaiting_link_id"])
-    def test_stale_clear_includes_flag(self, flag):
-        # _stale_clear was factored out into the shared _ALL_AWAITING_CLEAR_PATCH
-        # constant (also used by dispatch_in_flow's NEW_FLOW branch) — both the
-        # TTL site and NEW_FLOW now clear via IntentService._clear_flow_state,
-        # which applies this same patch.
+class TestNoLegacyMirrorForTheseThreeFlows:
+    """Phase 2.3: bank-details, name-change, and link-account are all
+    FlowMachine-only now — none of their flags exist in
+    _ALL_AWAITING_CLEAR_PATCH (the TTL/NEW_FLOW clear patch) or
+    _AWAITING_FLAGS (the mutual-exclusivity set _arm_awaiting clears)."""
+
+    def test_none_in_clear_patch(self):
         from services.intent_service import _ALL_AWAITING_CLEAR_PATCH
-        assert flag in _ALL_AWAITING_CLEAR_PATCH
+        for flag in ("awaiting_bank_details", "awaiting_name_change", "awaiting_link_id"):
+            assert flag not in _ALL_AWAITING_CLEAR_PATCH, f"{flag} should be removed"
+
+    def test_none_in_awaiting_flags(self):
+        svc = _make_svc()
+        for flag in ("awaiting_bank_details", "awaiting_name_change", "awaiting_link_id"):
+            assert flag not in svc._AWAITING_FLAGS, f"{flag} should be removed"
 
 
 class TestBankDetailsFlow:

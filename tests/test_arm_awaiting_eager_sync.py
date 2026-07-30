@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from unittest.mock import MagicMock, patch
 
-from services.flow_machine import FLOW_NAME_CHANGE, FLOW_IDLE, FLOW_DISAMBIGUATION
+from services.flow_machine import FLOW_INVOICE_NEED_BILLING, FLOW_IDLE, FLOW_DISAMBIGUATION
 
 
 def _make_svc():
@@ -53,10 +53,10 @@ class TestEagerSyncWhenV2Enabled:
 
     def test_arm_awaiting_resets_then_reconciles(self):
         svc = _make_svc()
-        svc.memory.get_user_memory.return_value = {"awaiting_name_change": True}
+        svc.memory.get_user_memory.return_value = {"awaiting_client_billing": True}
 
         with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
-            svc._arm_awaiting("u1", "awaiting_name_change")
+            svc._arm_awaiting("u1", "awaiting_client_billing")
 
         svc.flow_machine.reset.assert_called_once_with("u1")
         # Reconciliation reads the FRESH memory (post-patch) and sets state.
@@ -64,7 +64,7 @@ class TestEagerSyncWhenV2Enabled:
         svc.flow_machine.set_state.assert_called_once()
         args = svc.flow_machine.set_state.call_args.args
         assert args[0] == "u1"
-        assert args[1] == FLOW_NAME_CHANGE
+        assert args[1] == FLOW_INVOICE_NEED_BILLING
 
     def test_arm_disambiguation_resets_then_reconciles(self):
         svc = _make_svc()
@@ -84,13 +84,13 @@ class TestEagerSyncWhenV2Enabled:
         'no-op unless FlowMachine is IDLE' guard would block the sync when
         FlowMachine was already tracking a DIFFERENT, now-abandoned flow."""
         svc = _make_svc()
-        svc.memory.get_user_memory.return_value = {"awaiting_link_id": True}
+        svc.memory.get_user_memory.return_value = {"awaiting_poc_name": True}
         call_order = []
         svc.flow_machine.reset.side_effect = lambda uid: call_order.append("reset")
         svc.flow_machine.set_state.side_effect = lambda *a, **k: call_order.append("set_state")
 
         with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
-            svc._arm_awaiting("u1", "awaiting_link_id")
+            svc._arm_awaiting("u1", "awaiting_poc_name")
 
         assert call_order == ["reset", "set_state"]
 
@@ -102,7 +102,7 @@ class TestNoSyncWhenV2Disabled:
         svc = _make_svc()
 
         with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
-            svc._arm_awaiting("u1", "awaiting_name_change")
+            svc._arm_awaiting("u1", "awaiting_client_billing")
 
         svc.flow_machine.reset.assert_not_called()
         svc.flow_machine.set_state.assert_not_called()
@@ -124,12 +124,12 @@ class TestNoSyncWhenV2Disabled:
         svc = _make_svc()
 
         with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
-            svc._arm_awaiting("u1", "awaiting_name_change")
+            svc._arm_awaiting("u1", "awaiting_client_billing")
 
         svc.memory.update_user_memory.assert_called_once()
         patch_arg = svc.memory.update_user_memory.call_args.args[1]
-        assert patch_arg["awaiting_name_change"] is True
-        assert patch_arg["awaiting_link_id"] is False
+        assert patch_arg["awaiting_client_billing"] is True
+        assert patch_arg["awaiting_poc_name"] is False
 
 
 class TestEagerSyncExceptionSafety:
@@ -141,7 +141,7 @@ class TestEagerSyncExceptionSafety:
 
         with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
             # Must not raise.
-            svc._arm_awaiting("u1", "awaiting_name_change")
+            svc._arm_awaiting("u1", "awaiting_client_billing")
 
         # The legacy patch (the actual fix this helper exists for) still landed.
         svc.memory.update_user_memory.assert_called_once()
@@ -171,11 +171,11 @@ class TestSyncFlowMachineNowDirectly:
         from before the patch -- otherwise it would reconcile against
         pre-arm state and set the WRONG flow (or none at all)."""
         svc = _make_svc()
-        svc.memory.get_user_memory.return_value = {"awaiting_name_change": True}
+        svc.memory.get_user_memory.return_value = {"awaiting_client_billing": True}
 
         with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
             svc._sync_flow_machine_now("u1")
 
         svc.memory.get_user_memory.assert_called_once_with("u1")
         svc.flow_machine.set_state.assert_called_once()
-        assert svc.flow_machine.set_state.call_args.args[1] == FLOW_NAME_CHANGE
+        assert svc.flow_machine.set_state.call_args.args[1] == FLOW_INVOICE_NEED_BILLING

@@ -490,8 +490,17 @@ class NameChange(Flow):
 class LinkAccount(Flow):
     """Bot asked for the user's ID from the other platform (Telegram/
     WhatsApp) to link cross-platform data access. Delegates to the existing
-    _process_link_id, which accepts 'cancel'/'nevermind'/'no' and otherwise
-    treats the reply as the ID to link — always completes in one turn."""
+    _process_link_id, which accepts 'cancel'/'nevermind'/'no', validates
+    the ID shape and re-prompts on an invalid one, and otherwise treats the
+    reply as the ID to link.
+
+    Pre-Phase-2.3 note: this class used to unconditionally reset FlowMachine
+    after every call, even on the invalid-ID retry path — that "worked" only
+    because the legacy awaiting_link_id flag got re-armed by
+    _process_link_id and reconciliation picked it back up on the NEXT
+    message (FlowMachine bounced IDLE -> LINK_ACCOUNT again). With no legacy
+    flag left to reconcile FROM, that trick no longer exists, so this now
+    checks the returned operation directly, same pattern as BankDetails."""
 
     name = FLOW_LINK_ACCOUNT
 
@@ -499,10 +508,11 @@ class LinkAccount(Flow):
                         context: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"[FLOW_V2] LinkAccount.handle_response user={user_id}")
         result = intent_service._process_link_id(user_id, message)
-        try:
-            intent_service.flow_machine.reset(user_id)
-        except Exception:
-            pass
+        if result.get("operation") != "link_invalid_id":
+            try:
+                intent_service.flow_machine.reset(user_id)
+            except Exception:
+                pass
         return result
 
     def resume_nudge(self, context: Dict[str, Any]) -> str:

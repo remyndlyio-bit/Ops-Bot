@@ -247,8 +247,8 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 | `awaiting_poc_email` | `pending_send_invoice`, `poc_email_client` | `INVOICE_NEED_POC_EMAIL` | ✅ Mirrored + owned (2.5) |
 | `awaiting_job_input` | — | `SMART_CAPTURE_NEED_DESCRIPTION` | ✅ Mirrored + owned (2.5) |
 | ~~`awaiting_bank_details`~~ | — (`pending_invoice` shared with other checkpoints) | `BANK_DETAILS` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Second flow migrated; more involved than send-confirm due to a shared `_prompt()` helper (5 other checkpoints) and a check-after retry pattern, both worked around without touching the other checkpoints. |
-| `awaiting_name_change` | — | `NAME_CHANGE` | ✅ Mirrored + owned (WP-3.2) |
-| `awaiting_link_id` | — | `LINK_ACCOUNT` | ✅ Mirrored + owned (WP-3.2) |
+| ~~`awaiting_name_change`~~ | — | `NAME_CHANGE` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Simplest migration in this batch: single arm site, no retry loop. |
+| ~~`awaiting_link_id`~~ | — | `LINK_ACCOUNT` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Uncovered a real pre-existing bug during migration: `LinkAccount.handle_response`'s docstring claimed "always completes in one turn," but `_process_link_id` has an invalid-ID retry path that only "worked" pre-migration via the legacy flag re-arming + reconciliation-on-next-message side door. Fixed to check the returned operation directly (`link_invalid_id`), same pattern as `BankDetails`. |
 | `awaiting_invoice_address` | `pending_invoice`, `pending_address_user_id` | `INVOICE_ADDRESS` | ✅ Mirrored + owned (WP-3.3) |
 | `awaiting_job_description` | `pending_jobdesc_row_id`, `pending_jobdesc_user_id` | `INVOICE_NEED_JOB_DESCRIPTION` | ✅ Mirrored + owned (WP-3.3) |
 | `awaiting_invoice_month` | — (reads `pending_invoice_client` / conversation) | *none* | ❌ Legacy-only. Not in `_reconcile_*`; a user mid-this-flow reads as FlowMachine-IDLE, so `dispatch_idle` (not `dispatch_in_flow`) handles their next message. |

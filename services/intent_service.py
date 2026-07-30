@@ -86,10 +86,9 @@ _ALL_AWAITING_CLEAR_PATCH = {
     "poc_email_client":           None,
     "awaiting_job_input":         False,
     "pending_disambiguation":     None,
-    # awaiting_bank_details removed (Phase 2.3) — FlowMachine is now the
-    # sole source of truth for BANK_DETAILS.
-    "awaiting_name_change":       False,
-    "awaiting_link_id":           False,
+    # awaiting_bank_details, awaiting_name_change, and awaiting_link_id
+    # removed (Phase 2.3) — FlowMachine is now the sole source of truth for
+    # BANK_DETAILS, NAME_CHANGE, and LINK_ACCOUNT.
     "awaiting_invoice_address":   False,
     "pending_address_user_id":    None,
     "awaiting_job_description":   False,
@@ -770,7 +769,7 @@ class IntentService:
             FLOW_INVOICE_NEED_BILLING,
             FLOW_INVOICE_NEED_POC_NAME, FLOW_INVOICE_NEED_POC_EMAIL,
             FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
-            FLOW_DISAMBIGUATION, FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
+            FLOW_DISAMBIGUATION,
             FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
         )
         # Already tracking — nothing to reconcile.
@@ -841,17 +840,11 @@ class IntentService:
 
         # WP-3 slice 2: originally three simple, self-contained, single-reply-
         # completes flows (mutually exclusive in practice — a user is never
-        # simultaneously mid bank-details AND mid name-change). BANK_DETAILS
-        # has no branch here anymore (Phase 2.3) — its arm sites write
-        # flow_machine.set_state() directly now, so there's no legacy flag
-        # left to reconcile FROM.
-        if user_mem.get("awaiting_name_change"):
-            self.flow_machine.set_state(user_id, FLOW_NAME_CHANGE, {})
-            return
-
-        if user_mem.get("awaiting_link_id"):
-            self.flow_machine.set_state(user_id, FLOW_LINK_ACCOUNT, {})
-            return
+        # simultaneously mid bank-details AND mid name-change). None of the
+        # three have a branch here anymore (Phase 2.3) — BANK_DETAILS,
+        # NAME_CHANGE, and LINK_ACCOUNT all write flow_machine.set_state()
+        # directly at their arm sites now, so there's no legacy flag left
+        # to reconcile FROM for any of them.
 
         # WP-3 slice 3: the last two invoice-readiness-gate prompts.
         if user_mem.get("awaiting_invoice_address"):
@@ -957,14 +950,15 @@ class IntentService:
     # legacy pipeline tracks. Kept as one list so arming any one of them can
     # reliably clear all the others — see _arm_awaiting below.
     _AWAITING_FLAGS = (
-        # awaiting_send_confirmation and awaiting_bank_details removed
-        # (Phase 2.3) — FlowMachine is now the sole source of truth for
-        # INVOICE_AWAIT_SEND_CONFIRM and BANK_DETAILS.
+        # awaiting_send_confirmation, awaiting_bank_details,
+        # awaiting_name_change, and awaiting_link_id removed (Phase 2.3) —
+        # FlowMachine is now the sole source of truth for
+        # INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE, and
+        # LINK_ACCOUNT.
         "awaiting_job_input", "awaiting_compound_response", "awaiting_invoice_month",
         "awaiting_poc_email", "awaiting_invoice_address", "awaiting_client_billing",
         "awaiting_poc_name", "awaiting_invoice_poc_email", "awaiting_job_description",
         "awaiting_modify_field",
-        "awaiting_link_id", "awaiting_name_change",
     )
 
     def _arm_awaiting(self, user_id: str, flag: str, extra: dict = None) -> None:
@@ -3374,15 +3368,15 @@ class IntentService:
         # isn't trapped. (A genuine reminder reply is a standalone number / skip /
         # all, which the user can send once the sub-flow is done.)
         _mem = self.memory.get_user_memory(user_id)
-        # awaiting_send_confirmation and awaiting_bank_details removed
-        # (Phase 2.3) — FlowMachine is the sole source of truth for
-        # INVOICE_AWAIT_SEND_CONFIRM and BANK_DETAILS now, checked
-        # explicitly below instead of via the legacy flag list.
+        # awaiting_send_confirmation, awaiting_bank_details,
+        # awaiting_name_change, and awaiting_link_id removed (Phase 2.3) —
+        # FlowMachine is the sole source of truth for those four flows now,
+        # checked explicitly below instead of via the legacy flag list.
         _active_subflow = bool(_mem.get("pending_disambiguation")) or any(
             _mem.get(k) for k in (
                 "awaiting_job_input", "awaiting_poc_email", "awaiting_invoice_month",
-                "awaiting_client_billing", "awaiting_poc_name", "awaiting_name_change",
-                "awaiting_link_id", "awaiting_modify_field", "awaiting_compound_response",
+                "awaiting_client_billing", "awaiting_poc_name",
+                "awaiting_modify_field", "awaiting_compound_response",
                 "awaiting_invoice_address", "awaiting_job_description",
                 "awaiting_invoice_poc_email",
             )
@@ -3390,9 +3384,11 @@ class IntentService:
         if not _active_subflow:
             from services.flow_machine import (
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
+                FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
             )
             _active_subflow = self.flow_machine.current_flow(user_id) in (
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
+                FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
             )
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
@@ -4020,18 +4016,19 @@ class IntentService:
                 else:
                     # IDLE path — also gated on no legacy awaiting flag set so
                     # mid-migration flows still use legacy handlers.
-                    # awaiting_send_confirmation and awaiting_bank_details
-                    # removed (Phase 2.3): FlowMachine's own current_flow
-                    # check (the `if _v2_in_owned_flow` above this else)
-                    # already routes those flows correctly — nothing left to
-                    # list here for them.
+                    # awaiting_send_confirmation, awaiting_bank_details,
+                    # awaiting_name_change, and awaiting_link_id removed
+                    # (Phase 2.3): FlowMachine's own current_flow check (the
+                    # `if _v2_in_owned_flow` above this else) already routes
+                    # those flows correctly — nothing left to list here for
+                    # them.
                     _idle_blockers = (
                         "awaiting_job_input", "awaiting_invoice_month", "awaiting_poc_email",
                         "awaiting_client_billing",
-                        "awaiting_poc_name", "awaiting_name_change",
+                        "awaiting_poc_name",
                         "awaiting_modify_field", "pending_disambiguation",
                         "awaiting_invoice_address", "awaiting_job_description",
-                        "awaiting_link_id", "awaiting_invoice_poc_email",
+                        "awaiting_invoice_poc_email",
                     )
                     _is_idle = (
                         not any(user_mem.get(k) for k in _idle_blockers)
@@ -4248,17 +4245,17 @@ class IntentService:
             # Universal intent-shift guard: if the bot is in any single-question awaiting state
             # and the user's message looks like a brand-new query, clear the pending state and
             # continue with the new request instead of silently treating it as a (wrong) answer.
-            # awaiting_send_confirmation removed (Phase 2.3) — the classifier's
-            # own flow_compatible guidance for INVOICE_AWAIT_SEND_CONFIRM
-            # (services/classifier.py's per-flow block) covers this now;
-            # this dict only needs to describe states with no v2 equivalent.
+            # awaiting_send_confirmation and awaiting_name_change removed
+            # (Phase 2.3) — the classifier's own flow_compatible guidance
+            # for those flows (services/classifier.py's per-flow block)
+            # covers this now; this dict only needs to describe states with
+            # no v2 equivalent.
             _PENDING_STATES = {
                 "awaiting_invoice_month": "the month name for a pending invoice (e.g. 'March')",
                 "awaiting_poc_email":     "a client POC email address",
                 "awaiting_client_billing":   "client billing details (name, address, GST)",
                 "awaiting_poc_name":         "a POC name to address the invoice to",
                 "awaiting_invoice_poc_email": "the client's email address for the invoice",
-                "awaiting_name_change":      "the user's new display name",
             }
             _active_pending = [k for k in _PENDING_STATES if user_mem.get(k)]
             if _active_pending:
@@ -4371,11 +4368,12 @@ class IntentService:
             # handled earlier, before the v2 classifier.)
             msg_lower = message.strip().lower()
 
-            # Awaiting-reply handlers for the commands moved above.
-            if user_mem.get("awaiting_name_change"):
-                return self._process_name_change(user_id, message)
-            if user_mem.get("awaiting_link_id"):
-                return self._process_link_id(user_id, message)
+            # (removed, Phase 2.3) — name-change and account-link replies are
+            # now owned exclusively by dispatch_in_flow / flows.py's
+            # NameChange and LinkAccount (FLOW_RESPONSE / CANCEL), reached
+            # earlier in this function via the v2 in-flow block above. No
+            # legacy awaiting_name_change / awaiting_link_id flags exist to
+            # check here.
 
             # 0b4b. A bare cancel/stop word with NOTHING pending to cancel (every
             # awaiting_*/pending_disambiguation/form check above already had its
@@ -6891,8 +6889,18 @@ class IntentService:
         if candidate:
             return self._apply_link(user_id, message, candidate)
 
-        # No inline ID — prompt for it
-        self._arm_awaiting(user_id, "awaiting_link_id")
+        # No inline ID — prompt for it.
+        # Phase 2.3: FlowMachine is the sole source of truth for
+        # LINK_ACCOUNT — write flow_machine.set_state() directly instead of
+        # the (now-removed) legacy awaiting_link_id flag. Still clears
+        # every other legacy flag defensively, same mutual-exclusivity
+        # guarantee _arm_awaiting provides for flows not yet migrated.
+        from services.flow_machine import FLOW_LINK_ACCOUNT
+        self.flow_machine.set_state(user_id, FLOW_LINK_ACCOUNT, {})
+        self.memory.update_user_memory(
+            user_id,
+            {**{k: False for k in self._AWAITING_FLAGS}, "pending_disambiguation": None},
+        )
         platform = "telegram" if user_id.isdigit() else "whatsapp"
         other = "WhatsApp" if platform == "telegram" else "Telegram"
         response = (
@@ -6923,15 +6931,21 @@ class IntentService:
         return False
 
     def _process_link_id(self, user_id: str, message: str) -> Dict:
-        """Process the linked account ID after the user was prompted."""
-        self.memory.update_user_memory(user_id, {"awaiting_link_id": False})
+        """Process the linked account ID after the user was prompted.
+
+        Phase 2.3: no legacy awaiting_link_id flag exists anymore —
+        flows.py's LinkAccount.handle_response decides whether to stay in
+        the flow purely from the returned operation name
+        ("link_invalid_id"), not a memory re-read. No re-arm needed on
+        retry either: FlowMachine's current_flow was never reset in the
+        first place for this turn, so LINK_ACCOUNT stays active
+        automatically."""
         candidate = message.strip()
         if candidate.lower() in ("cancel", "nevermind", "never mind", "no"):
             response = "No worries, account not linked."
             self._store_conversation(user_id, message, response)
             return {"operation": "link_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
         if not self._is_valid_link_id(candidate):
-            self._arm_awaiting(user_id, "awaiting_link_id")
             response = (
                 f"'{candidate}' doesn't look like a valid user ID. It should be either "
                 "a Telegram chat ID (just digits, e.g. 751256859) or a WhatsApp ID "
@@ -6977,16 +6991,30 @@ class IntentService:
             new_name = m.group(1).strip().title()
             return self._apply_name_change(user_id, message, new_name)
 
-        # No inline name — prompt for it
-        self._arm_awaiting(user_id, "awaiting_name_change")
+        # No inline name — prompt for it.
+        # Phase 2.3: FlowMachine is the sole source of truth for NAME_CHANGE
+        # — write flow_machine.set_state() directly instead of the
+        # (now-removed) legacy awaiting_name_change flag. Still clears
+        # every other legacy flag defensively, same mutual-exclusivity
+        # guarantee _arm_awaiting provides for flows not yet migrated.
+        from services.flow_machine import FLOW_NAME_CHANGE
+        self.flow_machine.set_state(user_id, FLOW_NAME_CHANGE, {})
+        self.memory.update_user_memory(
+            user_id,
+            {**{k: False for k in self._AWAITING_FLAGS}, "pending_disambiguation": None},
+        )
         current_name = self._get_user_name(user_id) or "unknown"
         response = f"Your current name is '{current_name}'. What would you like to change it to?"
         self._store_conversation(user_id, message, response)
         return {"operation": "name_change_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _process_name_change(self, user_id: str, message: str) -> Dict:
-        """Process the new name after the user was prompted."""
-        self.memory.update_user_memory(user_id, {"awaiting_name_change": False})
+        """Process the new name after the user was prompted.
+
+        Phase 2.3: no legacy awaiting_name_change flag exists to clear
+        anymore — FlowMachine tracks flow state, reset by the caller
+        (flows.py's NameChange, which always resets after this returns —
+        no retry loop for this flow)."""
         new_name = message.strip()
         if new_name.lower() in ("cancel", "nevermind", "never mind", "no"):
             response = "No worries, name unchanged."

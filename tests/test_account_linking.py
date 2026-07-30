@@ -28,6 +28,7 @@ def _make_svc():
     svc.email = MagicMock()
     svc.supabase = MagicMock()
     svc.memory = MagicMock()
+    svc.flow_machine = MagicMock()
     svc.supabase.get_user_profile.return_value = {
         "ok": True, "data": {"onboarded_at": "2024-01-01T00:00:00", "name": "Test User"},
     }
@@ -102,17 +103,17 @@ class TestHandleLinkAccount:
         svc = _make_svc()
         result = svc._handle_link_account("u1", "link my account, it's like #123 I think")
         assert result["operation"] == "link_prompt"
-        awaiting = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
-                    if "awaiting_link_id" in c.args[1]]
-        assert awaiting and awaiting[-1]["awaiting_link_id"] is True
+        # Phase 2.3: FlowMachine is the sole source of truth (no legacy
+        # awaiting_link_id flag) — verify via flow_machine.set_state.
+        from services.flow_machine import FLOW_LINK_ACCOUNT
+        svc.flow_machine.set_state.assert_called_once_with("u1", FLOW_LINK_ACCOUNT, {})
 
     def test_no_inline_id_prompts_and_sets_awaiting_state(self):
         svc = _make_svc()
         result = svc._handle_link_account("u1", "link my account")
         assert result["operation"] == "link_prompt"
-        awaiting = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
-                    if "awaiting_link_id" in c.args[1]]
-        assert awaiting and awaiting[-1]["awaiting_link_id"] is True
+        from services.flow_machine import FLOW_LINK_ACCOUNT
+        svc.flow_machine.set_state.assert_called_once_with("u1", FLOW_LINK_ACCOUNT, {})
         assert svc.supabase.upsert_user_profile.call_count == 0, "must not write anything yet"
 
 
@@ -133,26 +134,22 @@ class TestProcessLinkId:
         assert result["operation"] == "account_linked"
         assert svc.supabase.upsert_user_profile.call_count == 1
 
-    def test_clears_awaiting_state_regardless_of_outcome(self):
-        svc = _make_svc()
-        svc._process_link_id("u1", "cancel")
-        awaiting = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
-                    if "awaiting_link_id" in c.args[1]]
-        assert awaiting and awaiting[0]["awaiting_link_id"] is False
-
     def test_garbage_reply_rejected_not_linked(self):
         """Regression: 'send all' (a reminders command, sent while
         awaiting_link_id happened to still be armed from an unrelated
         earlier flow) used to be accepted with zero validation and saved as
         the linked_user_id, silently making the account's own data
-        invisible to every later query."""
+        invisible to every later query.
+
+        Phase 2.3: no legacy awaiting_link_id flag exists to re-arm anymore
+        — _process_link_id doesn't touch FlowMachine at all on this path.
+        Staying in the flow is flows.py's LinkAccount.handle_response's job
+        (it checks this returned operation before deciding whether to
+        reset), covered by tests/test_flow_account_settings.py."""
         svc = _make_svc()
         result = svc._process_link_id("u1", "send all")
         assert result["operation"] == "link_invalid_id"
         assert svc.supabase.upsert_user_profile.call_count == 0
-        awaiting = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
-                    if "awaiting_link_id" in c.args[1]]
-        assert awaiting[-1]["awaiting_link_id"] is True, "must re-arm so the user can try again"
 
     @pytest.mark.parametrize("junk", ["skip", "hello", "1234", "not an id", ""])
     def test_various_non_id_replies_rejected(self, junk):

@@ -133,14 +133,20 @@ class TestPendingDisambiguationMutualExclusivity:
     def test_end_to_end_stale_disambiguation_no_longer_blocks_link_reply(self):
         """The exact reported shape: a stale disambiguation list (from an
         earlier "mark paid" ambiguity) must not swallow a subsequent
-        account-linking ID reply."""
+        account-linking ID reply.
+
+        Phase 2.3: LINK_ACCOUNT is FlowMachine-only now (no legacy
+        awaiting_link_id flag) — verify via flow_machine.set_state instead,
+        pending_disambiguation clearing is unaffected."""
         svc = _make_svc()
+        svc.flow_machine = MagicMock()
         svc.memory.get_user_memory.return_value = {
             "pending_disambiguation": {"rows": [{"id": 1}, {"id": 2}], "sql": "UPDATE ..."},
         }
         svc._handle_link_account("u1", "link my telegram account")
+        from services.flow_machine import FLOW_LINK_ACCOUNT
+        svc.flow_machine.set_state.assert_called_once_with("u1", FLOW_LINK_ACCOUNT, {})
         patch = svc.memory.update_user_memory.call_args.args[1]
-        assert patch["awaiting_link_id"] is True
         assert patch["pending_disambiguation"] is None
 
     def test_every_pending_disambiguation_call_site_goes_through_arm_disambiguation(self):
