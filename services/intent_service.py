@@ -115,6 +115,32 @@ def _is_full_job_row(row: dict) -> bool:
     return "bill_no" in row or "job_date" in row
 
 
+def _deterministic_aggregates_enabled() -> bool:
+    """TODO.md Phase 3.1: skip the synthesis LLM call entirely for a single
+    scalar aggregate row (rows == [{"result": N}]) and answer with the
+    existing deterministic renderer directly, instead of calling it only
+    as synthesis's post-hoc fallback. Same escape-hatch pattern as
+    STRICT_PLAN_VALIDATION: default ON, settable to 0/false/no/off if the
+    deterministic phrasing ever needs to be compared against LLM prose
+    live."""
+    return os.getenv("DETERMINISTIC_AGGREGATES", "1").lower() not in ("0", "false", "no", "off")
+
+
+def _is_single_scalar_aggregate(rows: list, plan: Optional[dict]) -> bool:
+    """True for an UNGROUPED scalar aggregate result: exactly one row whose
+    only key is the planner's `result` alias, produced by a sum/avg/count/
+    min/max metric. Deliberately excludes GROUP BY results (e.g. "biggest
+    client") — those rows carry a dimension column (client_name) alongside
+    `result` and read more like a summary card than a bare number; TODO.md
+    3.1 scopes this to the pure-scalar case only."""
+    if len(rows) != 1:
+        return False
+    if set(rows[0].keys()) - {"result"}:
+        return False  # extra columns -> a GROUP BY / job_summary row, not scalar
+    metric = (plan or {}).get("metric")
+    return metric in ("sum", "avg", "count", "min", "max")
+
+
 def _is_aggregate_sql(sql: str) -> bool:
     """True when the SQL is an aggregate / GROUP BY query (has GROUP BY, an
     aggregate function, or an `AS result` alias). Such queries must NOT be
@@ -5970,6 +5996,20 @@ class IntentService:
                     else:
                         response = _format_job_cards(rows)
                     logger.info(f"[QUERY] Success: {len(rows)} rows (structured card format)")
+                elif _deterministic_aggregates_enabled() and _is_single_scalar_aggregate(rows, _ledger_plan):
+                    # Phase 3.1 (TODO.md): a single scalar aggregate ("total
+                    # billing this year" -> rows == [{"result": N}]) doesn't
+                    # need an LLM to phrase — render_answer_payload already
+                    # produces "₹N — <scope>" deterministically, and until
+                    # now that renderer only ran as synthesis's POST-HOC
+                    # fallback (below) after paying for a call whose answer
+                    # got thrown away. Skips the call entirely for the most
+                    # common question shape, and removes synthesis's
+                    # truncation/refusal flake surface from it altogether.
+                    response = render_answer_payload(build_answer_payload(
+                        scope=_ledger_scope, metric=(_ledger_plan or {}).get("metric"),
+                        rows=rows, group_by=(_ledger_plan or {}).get("group_by")))
+                    logger.info(f"[QUERY] Success: scalar aggregate answered deterministically (no LLM call)")
                 else:
                     payload = build_clean_payload(rows, "select")
                     response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q, conversation_history=conversation_history)
@@ -6198,16 +6238,26 @@ class IntentService:
             return _finish(format_payment_status(rows, routed.meta))
 
         if routed.render == _RENDER_AGGREGATE:
-            payload = build_clean_payload(rows, "select")
-            resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
-            if not resp or not resp.strip():
-                # WP-4: the deterministic fallback now carries headline + scope
-                # + a follow-up, built from the SAME scope the SQL actually
-                # used (scope_from_sql(routed.sql)) — not a message-keyword
-                # guess like the old _format_aggregate_fallback made.
+            # Phase 3.1 (TODO.md): AGGREGATE is defined (query_router.py) as
+            # "single numeric result -> number-style reply" — always a bare
+            # {"result": N} row by construction, so unlike the planner
+            # pipeline (which also handles job_summary/list shapes here)
+            # there's no row-shape check needed before going deterministic.
+            _agg_metric = ("sum" if "SUM(" in routed.sql.upper()
+                           else "avg" if "AVG(" in routed.sql.upper() else "count")
+            if _deterministic_aggregates_enabled():
                 resp = render_answer_payload(build_answer_payload(
-                    scope=scope_from_sql(routed.sql), metric="sum" if "SUM(" in routed.sql.upper()
-                    else "avg" if "AVG(" in routed.sql.upper() else "count", rows=rows))
+                    scope=scope_from_sql(routed.sql), metric=_agg_metric, rows=rows))
+            else:
+                payload = build_clean_payload(rows, "select")
+                resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
+                if not resp or not resp.strip():
+                    # WP-4: the deterministic fallback now carries headline + scope
+                    # + a follow-up, built from the SAME scope the SQL actually
+                    # used (scope_from_sql(routed.sql)) — not a message-keyword
+                    # guess like the old _format_aggregate_fallback made.
+                    resp = render_answer_payload(build_answer_payload(
+                        scope=scope_from_sql(routed.sql), metric=_agg_metric, rows=rows))
             append_entry(self.memory, user_id, build_entry_from_sql(
                 question=message, sql=routed.sql, rows=rows, response=resp, render_kind="AGGREGATE"))
             return _finish(resp)

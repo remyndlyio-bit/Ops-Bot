@@ -210,13 +210,21 @@ class TestTruncatedSynthesisFallsBackToDeterministicAnswer:
 
     def test_normal_short_response_with_a_digit_is_not_treated_as_truncated(self):
         """Over-correction guard: a legitimately short, valid answer that
-        happens to contain a number must pass through untouched."""
+        happens to contain a number must pass through untouched.
+
+        This row shape (single scalar aggregate) is now answered
+        deterministically by default (Phase 3.1, DETERMINISTIC_AGGREGATES) —
+        synthesize_response is skipped entirely, so its mocked return value
+        would never be exercised. Disabling the flag for this one test keeps
+        it testing what it was written to test: the truncation guard's own
+        precision on synthesis output, not the deterministic renderer."""
         svc = _svc()
         svc.supabase.get_schema.return_value = {
             "table": "job_entries", "schema_name": "public",
             "columns": ["id", "client_name", "fees"], "description": "x",
         }
-        with patch("services.intent_service.execute_query_plan") as mock_exec:
+        with patch("services.intent_service.execute_query_plan") as mock_exec, \
+             patch("services.intent_service._deterministic_aggregates_enabled", return_value=False):
             mock_exec.return_value = {
                 "sql": "SELECT COUNT(*) AS result FROM public.job_entries WHERE user_id='u1'",
                 "plan": {"metric": "count", "column": None, "filters": None,
