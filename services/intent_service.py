@@ -86,7 +86,8 @@ _ALL_AWAITING_CLEAR_PATCH = {
     "poc_email_client":           None,
     "awaiting_job_input":         False,
     "pending_disambiguation":     None,
-    "awaiting_bank_details":      False,
+    # awaiting_bank_details removed (Phase 2.3) — FlowMachine is now the
+    # sole source of truth for BANK_DETAILS.
     "awaiting_name_change":       False,
     "awaiting_link_id":           False,
     "awaiting_invoice_address":   False,
@@ -769,7 +770,7 @@ class IntentService:
             FLOW_INVOICE_NEED_BILLING,
             FLOW_INVOICE_NEED_POC_NAME, FLOW_INVOICE_NEED_POC_EMAIL,
             FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
-            FLOW_DISAMBIGUATION, FLOW_BANK_DETAILS, FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
+            FLOW_DISAMBIGUATION, FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
             FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
         )
         # Already tracking — nothing to reconcile.
@@ -838,14 +839,12 @@ class IntentService:
             )
             return
 
-        # WP-3 slice 2: three simple, self-contained, single-reply-completes
-        # flows. Order among these three doesn't matter (mutually exclusive
-        # in practice — a user is never simultaneously mid bank-details AND
-        # mid name-change), each returns immediately on match.
-        if user_mem.get("awaiting_bank_details"):
-            self.flow_machine.set_state(user_id, FLOW_BANK_DETAILS, {})
-            return
-
+        # WP-3 slice 2: originally three simple, self-contained, single-reply-
+        # completes flows (mutually exclusive in practice — a user is never
+        # simultaneously mid bank-details AND mid name-change). BANK_DETAILS
+        # has no branch here anymore (Phase 2.3) — its arm sites write
+        # flow_machine.set_state() directly now, so there's no legacy flag
+        # left to reconcile FROM.
         if user_mem.get("awaiting_name_change"):
             self.flow_machine.set_state(user_id, FLOW_NAME_CHANGE, {})
             return
@@ -910,6 +909,26 @@ class IntentService:
         except Exception as e:
             logger.warning(f"[FLOW_V2] eager sync after arm failed (non-fatal): {e}")
 
+    def _arm_bank_details_v2(self, user_id: str, pending_invoice: Optional[dict]) -> None:
+        """Arm BANK_DETAILS (Phase 2.3: FlowMachine-only, no legacy flag).
+        Called from both of BANK_DETAILS' arm sites — the invoice-readiness
+        gate's own checkpoint (pending_invoice = the invoice being built,
+        so the gate resumes after saving) and the standalone "update my
+        bank details" command (pending_invoice = None, explicitly clearing
+        any stale invoice-resume link).
+
+        Still clears every OTHER legacy awaiting_* flag defensively — the
+        same mutual-exclusivity guarantee _arm_awaiting provides for flows
+        not yet migrated, so a stale unrelated flag can't linger alongside
+        this one even though BANK_DETAILS itself no longer has a flag to
+        clear FROM."""
+        from services.flow_machine import FLOW_BANK_DETAILS
+        self.flow_machine.set_state(user_id, FLOW_BANK_DETAILS, {})
+        patch = {k: False for k in self._AWAITING_FLAGS}
+        patch["pending_disambiguation"] = None
+        patch["pending_invoice"] = pending_invoice
+        self.memory.update_user_memory(user_id, patch)
+
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
         """Store user message and bot response in conversation history."""
         self.memory.add_message(user_id, "user", user_message)
@@ -938,12 +957,13 @@ class IntentService:
     # legacy pipeline tracks. Kept as one list so arming any one of them can
     # reliably clear all the others — see _arm_awaiting below.
     _AWAITING_FLAGS = (
-        # awaiting_send_confirmation removed (Phase 2.3) — FlowMachine is now
-        # the sole source of truth for INVOICE_AWAIT_SEND_CONFIRM.
+        # awaiting_send_confirmation and awaiting_bank_details removed
+        # (Phase 2.3) — FlowMachine is now the sole source of truth for
+        # INVOICE_AWAIT_SEND_CONFIRM and BANK_DETAILS.
         "awaiting_job_input", "awaiting_compound_response", "awaiting_invoice_month",
         "awaiting_poc_email", "awaiting_invoice_address", "awaiting_client_billing",
         "awaiting_poc_name", "awaiting_invoice_poc_email", "awaiting_job_description",
-        "awaiting_bank_details", "awaiting_modify_field",
+        "awaiting_modify_field",
         "awaiting_link_id", "awaiting_name_change",
     )
 
@@ -2842,17 +2862,25 @@ class IntentService:
                 "What was the work? (e.g. '2 master films, English VO' — or 'cancel' to stop)"
             )
 
-        # 4. Bank account number — the client can't pay without it
+        # 4. Bank account number — the client can't pay without it.
+        # Phase 2.3: BANK_DETAILS' legacy flag is gone, so this checkpoint
+        # can't go through the generic _prompt() helper anymore (it looks
+        # up the flag via `k in self._AWAITING_FLAGS`, which awaiting_bank_
+        # details no longer is). _arm_bank_details_v2 is the equivalent —
+        # writes FlowMachine directly, with the same defensive clear of
+        # every other legacy flag _arm_awaiting would have provided.
         _bank = self.supabase.get_user_bank_details(data_user_id)
         _bd = _bank.get("data") if _bank.get("ok") else None
         if not _bd or not str(_bd.get("bank_account_number") or "").strip():
-            return _prompt(
-                {"awaiting_bank_details": True},
+            self._arm_bank_details_v2(user_id, pending_invoice=invoice_data)
+            _text = (
                 "Before I generate it, I need your bank details so the client can pay:\n\n"
                 "Account Name: Your Name\nBank Name: HDFC Bank\nAccount Number: 1234567890\n"
                 "IFSC: HDFC0001234\nUPI: you@upi (optional)\n\n"
                 "(or 'cancel' to stop)"
             )
+            self._store_conversation(user_id, "", _text)
+            return {"operation": "ACTION_TRIGGER", "response": _text, "trigger_invoice": False, "invoice_data": {}}
 
         # 5. Invoicer business address (mandatory — no skip)
         _prof = self.supabase.get_user_profile(data_user_id)
@@ -3083,7 +3111,12 @@ class IntentService:
         # need their billing details..." instead of a plain save confirmation,
         # because a pending_invoice for BB2 from 27 turns earlier was still sitting
         # in memory. Clear it so a general bank-details update always just confirms.
-        self._arm_awaiting(user_id, "awaiting_bank_details", {"pending_invoice": None})
+        # Phase 2.3: FlowMachine is the sole source of truth for BANK_DETAILS —
+        # _arm_bank_details_v2 writes flow_machine.set_state() directly
+        # instead of the (now-removed) legacy awaiting_bank_details flag,
+        # plus the same defensive clear of every other legacy flag
+        # _arm_awaiting used to provide.
+        self._arm_bank_details_v2(user_id, pending_invoice=None)
         response = (
             "Sure! Please send your bank details in this format:\n\n"
             "Account Name: Darshit Mody\n"
@@ -3098,10 +3131,13 @@ class IntentService:
         return {"operation": "bank_details_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _handle_bank_details_response(self, user_id: str, message: str) -> Dict:
-        """Parse a single structured message containing bank details and upsert."""
-        # Clear the awaiting flag first
-        self.memory.update_user_memory(user_id, {"awaiting_bank_details": False})
+        """Parse a single structured message containing bank details and upsert.
 
+        Phase 2.3: there is no legacy awaiting_bank_details flag left to
+        clear here — FlowMachine tracks flow state, and flows.py's
+        BankDetails.handle_response resets it AFTER this call, based on
+        this function's returned `operation` (stays in the flow only when
+        it's "bank_details_retry")."""
         if message.strip().lower() in ("cancel", "stop", "nevermind", "skip"):
             response = "No problem, bank details update cancelled."
             self._store_conversation(user_id, message, response)
@@ -3119,8 +3155,11 @@ class IntentService:
                 "UPI: you@upi\n\n"
                 "Or type 'cancel' to skip."
             )
-            # Re-enable the awaiting flag so user can try again
-            self._arm_awaiting(user_id, "awaiting_bank_details")
+            # No re-arm needed (Phase 2.3): FlowMachine's current_flow was
+            # never reset in the first place for this turn, so BANK_DETAILS
+            # is still active. The "bank_details_retry" operation below is
+            # what tells flows.py's BankDetails.handle_response to leave it
+            # that way instead of resetting.
             self._store_conversation(user_id, message, response)
             return {"operation": "bank_details_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -3335,13 +3374,13 @@ class IntentService:
         # isn't trapped. (A genuine reminder reply is a standalone number / skip /
         # all, which the user can send once the sub-flow is done.)
         _mem = self.memory.get_user_memory(user_id)
-        # awaiting_send_confirmation removed (Phase 2.3) — FlowMachine is the
-        # sole source of truth for INVOICE_AWAIT_SEND_CONFIRM now, checked
+        # awaiting_send_confirmation and awaiting_bank_details removed
+        # (Phase 2.3) — FlowMachine is the sole source of truth for
+        # INVOICE_AWAIT_SEND_CONFIRM and BANK_DETAILS now, checked
         # explicitly below instead of via the legacy flag list.
         _active_subflow = bool(_mem.get("pending_disambiguation")) or any(
             _mem.get(k) for k in (
                 "awaiting_job_input", "awaiting_poc_email", "awaiting_invoice_month",
-                "awaiting_bank_details",
                 "awaiting_client_billing", "awaiting_poc_name", "awaiting_name_change",
                 "awaiting_link_id", "awaiting_modify_field", "awaiting_compound_response",
                 "awaiting_invoice_address", "awaiting_job_description",
@@ -3349,8 +3388,12 @@ class IntentService:
             )
         )
         if not _active_subflow:
-            from services.flow_machine import FLOW_INVOICE_AWAIT_SEND_CONFIRM
-            _active_subflow = self.flow_machine.current_flow(user_id) == FLOW_INVOICE_AWAIT_SEND_CONFIRM
+            from services.flow_machine import (
+                FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
+            )
+            _active_subflow = self.flow_machine.current_flow(user_id) in (
+                FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
+            )
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
             return None
@@ -3977,14 +4020,15 @@ class IntentService:
                 else:
                     # IDLE path — also gated on no legacy awaiting flag set so
                     # mid-migration flows still use legacy handlers.
-                    # awaiting_send_confirmation removed (Phase 2.3): FlowMachine's
-                    # own current_flow check (the `if _v2_in_owned_flow` above this
-                    # else) already routes that flow correctly — nothing left to
-                    # list here for it.
+                    # awaiting_send_confirmation and awaiting_bank_details
+                    # removed (Phase 2.3): FlowMachine's own current_flow
+                    # check (the `if _v2_in_owned_flow` above this else)
+                    # already routes those flows correctly — nothing left to
+                    # list here for them.
                     _idle_blockers = (
                         "awaiting_job_input", "awaiting_invoice_month", "awaiting_poc_email",
                         "awaiting_client_billing",
-                        "awaiting_poc_name", "awaiting_bank_details", "awaiting_name_change",
+                        "awaiting_poc_name", "awaiting_name_change",
                         "awaiting_modify_field", "pending_disambiguation",
                         "awaiting_invoice_address", "awaiting_job_description",
                         "awaiting_link_id", "awaiting_invoice_poc_email",
@@ -4214,7 +4258,6 @@ class IntentService:
                 "awaiting_client_billing":   "client billing details (name, address, GST)",
                 "awaiting_poc_name":         "a POC name to address the invoice to",
                 "awaiting_invoice_poc_email": "the client's email address for the invoice",
-                "awaiting_bank_details":     "the user's own bank details",
                 "awaiting_name_change":      "the user's new display name",
             }
             _active_pending = [k for k in _PENDING_STATES if user_mem.get(k)]
@@ -4317,11 +4360,11 @@ class IntentService:
                 note_route("awaiting_job_description")
                 return self._handle_job_description_response(user_id, message)
 
-            # 0b2. Check if user is responding with bank details (awaiting state)
-            if user_mem.get("awaiting_bank_details"):
-                logger.info(f"[ROUTE] awaiting_bank_details claimed message: {message[:60]!r}")
-                note_route("awaiting_bank_details")
-                return self._handle_bank_details_response(user_id, message)
+            # 0b2. (removed, Phase 2.3) — bank-details response is now owned
+            # exclusively by dispatch_in_flow / flows.py's BankDetails
+            # (FLOW_RESPONSE / CANCEL), reached earlier in this function via
+            # the v2 in-flow block above. No legacy awaiting_bank_details
+            # flag exists to check here.
 
             # msg_lower is used throughout the rest of process_request.
             # (Explicit bank / name / address / user-id / link commands are now

@@ -206,19 +206,22 @@ class TestClearFlowStateHelper:
         clearable here, or a NEW_FLOW clear could leave a stale flag that
         re-arms the SAME flow on the very next message.
 
-        awaiting_send_confirmation is deliberately excluded (Phase 2.3):
-        FlowMachine is now the sole source of truth for
-        INVOICE_AWAIT_SEND_CONFIRM, so there's no legacy flag left to clear.
+        awaiting_send_confirmation and awaiting_bank_details are deliberately
+        excluded (Phase 2.3): FlowMachine is now the sole source of truth
+        for INVOICE_AWAIT_SEND_CONFIRM and BANK_DETAILS, so there's no
+        legacy flag left to clear for either.
         """
         from services.intent_service import _ALL_AWAITING_CLEAR_PATCH
         expected_flags = {
             "awaiting_client_billing",
             "awaiting_poc_name", "awaiting_poc_email", "awaiting_invoice_poc_email",
             "awaiting_job_input", "pending_disambiguation",
-            "awaiting_bank_details", "awaiting_name_change", "awaiting_link_id",
+            "awaiting_name_change", "awaiting_link_id",
             "awaiting_invoice_address", "awaiting_job_description",
         }
         for flag in expected_flags:
             assert flag in _ALL_AWAITING_CLEAR_PATCH, f"missing {flag}"
         assert "awaiting_send_confirmation" not in _ALL_AWAITING_CLEAR_PATCH, \
+            "should be removed — FlowMachine owns this flow exclusively now"
+        assert "awaiting_bank_details" not in _ALL_AWAITING_CLEAR_PATCH, \
             "should be removed — FlowMachine owns this flow exclusively now"

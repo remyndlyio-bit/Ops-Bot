@@ -417,10 +417,9 @@ class Disambiguation(Flow):
 class BankDetails(Flow):
     """Bot asked the user to send their own bank details in one structured
     message. Delegates to the existing _handle_bank_details_response, which
-    already: accepts 'cancel'/'stop'/'nevermind'/'skip'; re-prompts (and
-    re-arms the legacy flag) on an unparseable message; and — if a
-    pending_invoice was waiting on this — resumes the invoice flow after a
-    successful save."""
+    already: accepts 'cancel'/'stop'/'nevermind'/'skip'; re-prompts on an
+    unparseable message; and — if a pending_invoice was waiting on this —
+    resumes the invoice flow after a successful save."""
 
     name = FLOW_BANK_DETAILS
 
@@ -428,14 +427,16 @@ class BankDetails(Flow):
                         context: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"[FLOW_V2] BankDetails.handle_response user={user_id}")
         result = intent_service._handle_bank_details_response(user_id, message)
-        # An unparseable message re-arms awaiting_bank_details so the user
-        # can retry — mirrors InvoiceNeedPocEmail's same check-after pattern.
-        try:
-            user_mem_after = intent_service.memory.get_user_memory(user_id) or {}
-            if not user_mem_after.get("awaiting_bank_details"):
+        # Phase 2.3: no legacy awaiting_bank_details flag exists to check-
+        # after anymore. _handle_bank_details_response signals "stay in the
+        # flow, let the user retry" via its returned operation name instead
+        # (it never touches FlowMachine on that path, so simply NOT
+        # resetting here is what keeps BANK_DETAILS active).
+        if result.get("operation") != "bank_details_retry":
+            try:
                 intent_service.flow_machine.reset(user_id)
-        except Exception:
-            pass
+            except Exception:
+                pass
         return result
 
     def resume_nudge(self, context: Dict[str, Any]) -> str:

@@ -48,8 +48,11 @@ class TestFlowMachineRegistration:
 
 
 class TestReconciliation:
+    # awaiting_bank_details removed from this parametrization (Phase 2.3):
+    # FlowMachine is BANK_DETAILS' sole source of truth now, with no legacy
+    # flag left to reconcile FROM — see TestBankDetailsIsFlowMachineOnly
+    # below instead.
     @pytest.mark.parametrize("legacy_flag,flow_name", [
-        ("awaiting_bank_details", FLOW_BANK_DETAILS),
         ("awaiting_name_change", FLOW_NAME_CHANGE),
         ("awaiting_link_id", FLOW_LINK_ACCOUNT),
     ])
@@ -76,7 +79,7 @@ class TestReconciliation:
         svc.memory.get_form_state.return_value = None
         svc._reconcile_legacy_to_flow_machine("u1", {
             "pending_disambiguation": {"rows": [], "type": "delete"},
-            "awaiting_bank_details": True,
+            "awaiting_name_change": True,
         })
         from services.flow_machine import FLOW_DISAMBIGUATION
         args = svc.flow_machine.set_state.call_args.args
@@ -84,7 +87,10 @@ class TestReconciliation:
 
 
 class TestTTLStalenessClearsAllThree:
-    @pytest.mark.parametrize("flag", ["awaiting_bank_details", "awaiting_name_change", "awaiting_link_id"])
+    # awaiting_bank_details removed from this parametrization (Phase 2.3) —
+    # it's no longer in _ALL_AWAITING_CLEAR_PATCH since there's no legacy
+    # flag left to clear (FlowMachine.reset handles BANK_DETAILS directly).
+    @pytest.mark.parametrize("flag", ["awaiting_name_change", "awaiting_link_id"])
     def test_stale_clear_includes_flag(self, flag):
         # _stale_clear was factored out into the shared _ALL_AWAITING_CLEAR_PATCH
         # constant (also used by dispatch_in_flow's NEW_FLOW branch) — both the
@@ -97,7 +103,7 @@ class TestTTLStalenessClearsAllThree:
 class TestBankDetailsFlow:
     def test_successful_save_resets_flow(self):
         svc = _make_svc()
-        svc.memory.get_user_memory.return_value = {}  # awaiting flag cleared after save
+        svc.memory.get_user_memory.return_value = {}
         svc.supabase.upsert_user_config.return_value = {"ok": True}
         flow = BankDetails()
         result = flow.handle_response(
@@ -109,10 +115,13 @@ class TestBankDetailsFlow:
         svc.flow_machine.reset.assert_called_once_with("u1")
 
     def test_unparseable_message_stays_in_flow(self):
+        # Phase 2.3: no legacy awaiting_bank_details flag exists anymore —
+        # BankDetails.handle_response decides whether to stay in the flow
+        # purely from the returned operation name ("bank_details_retry"),
+        # not a memory re-read. get_user_memory's value here is irrelevant
+        # to that decision; kept empty to make that explicit.
         svc = _make_svc()
-        # Legacy handler re-arms the flag on parse failure -- reconciliation
-        # would see this on the NEXT message and re-enter BANK_DETAILS.
-        svc.memory.get_user_memory.return_value = {"awaiting_bank_details": True}
+        svc.memory.get_user_memory.return_value = {}
         flow = BankDetails()
         result = flow.handle_response(svc, "u1", "uhh not sure what you need", {})
         assert result["operation"] == "bank_details_retry"

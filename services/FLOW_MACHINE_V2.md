@@ -246,7 +246,7 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 | `awaiting_poc_name` | `pending_poc_client`, `pending_poc_user_id`, `pending_poc_row_ids` | `INVOICE_NEED_POC_NAME` | ✅ Mirrored + owned (2.5) |
 | `awaiting_poc_email` | `pending_send_invoice`, `poc_email_client` | `INVOICE_NEED_POC_EMAIL` | ✅ Mirrored + owned (2.5) |
 | `awaiting_job_input` | — | `SMART_CAPTURE_NEED_DESCRIPTION` | ✅ Mirrored + owned (2.5) |
-| `awaiting_bank_details` | — | `BANK_DETAILS` | ✅ Mirrored + owned (WP-3.2) |
+| ~~`awaiting_bank_details`~~ | — (`pending_invoice` shared with other checkpoints) | `BANK_DETAILS` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Second flow migrated; more involved than send-confirm due to a shared `_prompt()` helper (5 other checkpoints) and a check-after retry pattern, both worked around without touching the other checkpoints. |
 | `awaiting_name_change` | — | `NAME_CHANGE` | ✅ Mirrored + owned (WP-3.2) |
 | `awaiting_link_id` | — | `LINK_ACCOUNT` | ✅ Mirrored + owned (WP-3.2) |
 | `awaiting_invoice_address` | `pending_invoice`, `pending_address_user_id` | `INVOICE_ADDRESS` | ✅ Mirrored + owned (WP-3.3) |

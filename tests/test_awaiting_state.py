@@ -85,7 +85,14 @@ class TestStuckFlowNoLongerSwallowsUnrelatedInput:
     reach the bank-details handler, not the stale invoice one."""
 
     def test_arming_bank_details_clears_stale_invoice_awaits(self):
+        # Phase 2.3: awaiting_bank_details itself is gone — FlowMachine
+        # (flow_machine.set_state) is BANK_DETAILS' source of truth now.
+        # This test still verifies the piece that matters: arming it must
+        # not leave a stale unrelated legacy flag (like
+        # awaiting_invoice_poc_email) lingering, via _arm_bank_details_v2's
+        # defensive clear of the whole _AWAITING_FLAGS set.
         svc = _make_svc()
+        svc.flow_machine = MagicMock()
         # Simulate: an invoice-email flow is stuck (already armed from an
         # earlier, unfinished turn).
         svc.memory.get_user_memory.return_value = {
@@ -93,8 +100,10 @@ class TestStuckFlowNoLongerSwallowsUnrelatedInput:
             "pending_poc_email_client": "Nike",
         }
         svc._prompt_bank_details_format("u1", "update my bank details")
+
+        from services.flow_machine import FLOW_BANK_DETAILS
+        svc.flow_machine.set_state.assert_called_once_with("u1", FLOW_BANK_DETAILS, {})
         patch = svc.memory.update_user_memory.call_args.args[1]
-        assert patch["awaiting_bank_details"] is True
         assert patch["awaiting_invoice_poc_email"] is False
 
 
@@ -207,9 +216,13 @@ class TestIntentShiftGuardCommandShapeGate:
     def test_genuine_new_query_while_awaiting_still_reaches_the_ai_classifier(self):
         """Over-correction guard: a message that DOES look command-shaped
         ("show my jobs") must still go through the AI check so the intent
-        shift can legitimately clear a stale awaiting state."""
+        shift can legitimately clear a stale awaiting state.
+
+        Uses awaiting_client_billing as the example flag (still legacy-flag-
+        based, unlike awaiting_bank_details which Phase 2.3 moved to
+        FlowMachine-only and removed from _PENDING_STATES)."""
         svc = _make_onboarded_svc()
         svc.gemini.is_new_query_not_response.return_value = True
-        svc.memory.get_user_memory.return_value = {"awaiting_bank_details": True}
+        svc.memory.get_user_memory.return_value = {"awaiting_client_billing": True}
         svc.process_request("u1", "show my jobs")
         svc.gemini.is_new_query_not_response.assert_called_once()

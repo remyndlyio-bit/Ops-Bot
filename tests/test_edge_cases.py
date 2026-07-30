@@ -426,12 +426,49 @@ class TestBareCancelWithNothingPendingNeverReachesPlanner:
     def test_cancel_during_an_active_flow_is_unaffected(self):
         """Over-correction guard: 'cancel' while something IS actually
         pending must still be handled by that flow's own cancel logic, not
-        swallowed by the generic no-op guard."""
+        swallowed by the generic no-op guard.
+
+        BANK_DETAILS is FlowMachine-only now (Phase 2.3, no legacy
+        awaiting_bank_details flag) — production routes 'cancel' through
+        dispatch_in_flow's CANCEL branch to BankDetails.on_cancel BEFORE
+        _process_request_impl's legacy cascade (including the bare-cancel
+        guard this test class is otherwise about) is ever reached, so this
+        verifies at that layer directly instead of faking legacy memory
+        process_request no longer reads for this flow."""
+        from services.flow_machine import FlowMachine, FLOW_BANK_DETAILS, FLOW_IDLE
+        from services.flow_dispatcher import dispatch_in_flow
+
         svc = _make_svc()
-        svc.memory.get_user_memory.return_value = {"awaiting_bank_details": True}
-        result = svc.process_request("user1", "cancel")
+
+        class _FakeMem:
+            def __init__(self):
+                self._store = {}
+            def get_user_memory(self, uid):
+                return dict(self._store.get(uid, {}))
+            def update_user_memory(self, uid, patch):
+                self._store.setdefault(uid, {}).update(patch)
+            def add_message(self, uid, role, content):
+                pass
+        svc.memory = _FakeMem()
+        svc.flow_machine = FlowMachine(svc.memory)
+        svc.flow_machine.set_state("user1", FLOW_BANK_DETAILS, {})
+
+        verdict = {
+            "intent": "SETTINGS_COMMAND", "flow_compatible": "CANCEL",
+            "raw_message": "cancel", "parameters": {}, "confidence": 0.95,
+            "historical": False, "bulk": False,
+        }
+        result = dispatch_in_flow(
+            verdict, intent_service=svc, user_id="user1",
+            current_flow=FLOW_BANK_DETAILS, current_context={},
+            conversation_history=[],
+        )
+
+        assert result is not None
         assert result.get("operation") != "no_op_cancel"
         assert "bank" in result.get("response", "").lower() or "cancel" in result.get("response", "").lower()
+        # BankDetails.on_cancel must reset FlowMachine when done.
+        assert svc.flow_machine.current_flow("user1") == FLOW_IDLE
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -628,13 +665,20 @@ class TestStandaloneBankDetailsUpdateClearsStaleInvoice:
     prompt."""
 
     def test_standalone_prompt_clears_pending_invoice(self):
+        # Phase 2.3: awaiting_bank_details itself is gone — FlowMachine
+        # (flow_machine.set_state) is the source of truth. This still
+        # verifies the actual bug fix: pending_invoice (payload) must be
+        # cleared for a standalone command.
         svc = _make_svc()
+        svc.flow_machine = MagicMock()
         svc.memory.get_user_memory.return_value = {
             "pending_invoice": {"client_name": "BB2", "bill_number": "BB2"},
         }
         svc._prompt_bank_details_format("u1", "Update my bank details")
+
+        from services.flow_machine import FLOW_BANK_DETAILS
+        svc.flow_machine.set_state.assert_called_once_with("u1", FLOW_BANK_DETAILS, {})
         patch = svc.memory.update_user_memory.call_args.args[1]
-        assert patch["awaiting_bank_details"] is True
         assert patch["pending_invoice"] is None
 
     def test_saving_bank_details_after_standalone_prompt_just_confirms(self):
