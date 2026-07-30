@@ -846,6 +846,46 @@ class IntentService:
             )
             return
 
+    def _sync_flow_machine_now(self, user_id: str) -> None:
+        """Phase 2.2 (TODO.md): make FlowMachine reflect a just-armed legacy
+        flag in THIS turn instead of waiting for the reconciliation that
+        normally only runs once, at the top of the NEXT incoming message.
+        Called from `_arm_awaiting` / `_arm_disambiguation` right after they
+        write the legacy patch.
+
+        Today `_reconcile_legacy_to_flow_machine` is the only thing that
+        ever populates FlowMachine, and it only fires on the next message —
+        so for the whole rest of THIS turn, FlowMachine is stale by
+        construction (still IDLE, or still tracking whatever flow the user
+        was in before this arm). That's fine for `dispatch_in_flow`
+        (nothing re-dispatches mid-turn), but it means FlowMachine is never
+        the single source of truth even for its own 10 owned flows — a
+        legacy-only write is a legacy-only write until the NEXT message
+        proves otherwise. This closes that gap: reuses the exact same
+        reconciliation mapping (no duplicated per-flow logic to drift out
+        of sync), just runs it immediately.
+
+        Reset first: `_reconcile_legacy_to_flow_machine` no-ops when
+        FlowMachine already thinks it's mid some OTHER flow (its own
+        `if current_flow != FLOW_IDLE: return` guard) — without resetting,
+        arming Y right after X was already reconciled from a PRIOR message
+        would leave FlowMachine stuck on stale X.
+
+        No-op when v2 is off for this user — `flow_v2` is never read by
+        anything unless `_flow_machine_v2_enabled_for` gates it, so writing
+        it for v2-off users would be a DB round-trip with zero effect. Never
+        raises: the next message's reconciliation is still a safety net if
+        this fails.
+        """
+        if not _flow_machine_v2_enabled_for(user_id):
+            return
+        try:
+            self.flow_machine.reset(user_id)
+            fresh_mem = self.memory.get_user_memory(user_id) or {}
+            self._reconcile_legacy_to_flow_machine(user_id, fresh_mem)
+        except Exception as e:
+            logger.warning(f"[FLOW_V2] eager sync after arm failed (non-fatal): {e}")
+
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
         """Store user message and bot response in conversation history."""
         self.memory.add_message(user_id, "user", user_message)
@@ -896,6 +936,12 @@ class IntentService:
         had actually just been prompted for. In production this looked like
         an invoice flow "swallowing" bank-details input, account-linking
         replies, and more, for many turns in a row.
+
+        Phase 2.2 (TODO.md): after writing the legacy patch (unchanged,
+        still the only thing every not-yet-ported reader looks at), also
+        syncs FlowMachine immediately via `_sync_flow_machine_now` instead
+        of leaving it to catch up on the next incoming message. No-op
+        (and no extra DB round-trip) when v2 is off for this user.
         """
         patch = {k: False for k in self._AWAITING_FLAGS if k != flag}
         patch[flag] = True
@@ -913,6 +959,7 @@ class IntentService:
         if extra:
             patch.update(extra)
         self.memory.update_user_memory(user_id, patch)
+        self._sync_flow_machine_now(user_id)
 
     def _arm_disambiguation(self, user_id: str, disambiguation: dict, extra: dict = None) -> None:
         """Set pending_disambiguation (a numbered "which one did you mean?"
@@ -921,12 +968,16 @@ class IntentService:
         an active awaiting_* prompt from an unrelated flow could take
         precedence over a freshly-shown disambiguation list, or vice versa,
         the same mutual-exclusivity gap _arm_awaiting was built to close.
+
+        Phase 2.2 (TODO.md): same eager FlowMachine sync as _arm_awaiting —
+        see that docstring.
         """
         patch = {k: False for k in self._AWAITING_FLAGS}
         patch["pending_disambiguation"] = disambiguation
         if extra:
             patch.update(extra)
         self.memory.update_user_memory(user_id, patch)
+        self._sync_flow_machine_now(user_id)
 
     @staticmethod
     def _fuzzy_match_client_name(client_name: str, db_clients: List[str], message: str) -> str:
