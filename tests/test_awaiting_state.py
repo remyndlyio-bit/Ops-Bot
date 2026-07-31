@@ -224,11 +224,12 @@ class TestIntentShiftGuardCommandShapeGate:
         ("show my jobs") must still go through the AI check so the intent
         shift can legitimately clear a stale awaiting state.
 
-        Uses awaiting_client_billing as the example flag (still legacy-flag-
-        based, unlike awaiting_bank_details which Phase 2.3 moved to
-        FlowMachine-only and removed from _PENDING_STATES)."""
+        Uses awaiting_invoice_poc_email as the example flag (still
+        legacy-flag-based, unlike awaiting_bank_details/awaiting_client_
+        billing/etc. which Phase 2.3 moved to FlowMachine-only and removed
+        from _PENDING_STATES)."""
         svc = _make_onboarded_svc()
         svc.gemini.is_new_query_not_response.return_value = True
-        svc.memory.get_user_memory.return_value = {"awaiting_client_billing": True}
+        svc.memory.get_user_memory.return_value = {"awaiting_invoice_poc_email": True}
         svc.process_request("u1", "show my jobs")
         svc.gemini.is_new_query_not_response.assert_called_once()

@@ -137,7 +137,8 @@ class InvoiceNeedBilling(Flow):
             f"ctx_client={context.get('client_name')!r}"
         )
         result = intent_service._handle_client_billing_response(user_id, message)
-        # _handle_client_billing_response clears the legacy flag. Mirror v2.
+        # Phase 2.3: no legacy flag left to clear — FlowMachine.reset is
+        # what actually ends this flow now (no retry loop, always resets).
         try:
             intent_service.flow_machine.reset(user_id)
         except Exception:
