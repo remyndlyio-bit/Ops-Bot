@@ -212,12 +212,33 @@ migration surfaced and fixed (`LINK_ACCOUNT`'s and `SMART_CAPTURE_CONFIRM_PENDIN
 check-after retry-loop bug) and three flagged-but-not-fixed out-of-scope bugs
 (`task_ab7501b3`, `task_1b10c22c`, `task_e16e90fb`).
 
-### 2.4 One TTL for everything
-- FlowMachine already has a TTL check (grep `TTL` in intent_service around the v2
-  block). Once state lives in one place, delete the ad-hoc staleness checks:
-  the 30-min form check in `_handle_form_step`, the 30-min `last_generated_invoice`
-  cache expiry, and the stale-clear dict in the v2 TTL block. One expiry policy,
-  defined in `services/flow_machine.py`.
+### 2.4 One TTL for everything ✅ DONE
+- Added `is_timestamp_stale(iso_str, minutes=IDLE_TTL_MINUTES)` to
+  `services/flow_machine.py` — one shared, conservative (missing/malformed
+  timestamp = stale) policy, reused by:
+  - `FlowMachine.expire_if_stale` itself, now implemented in terms of it.
+  - `_handle_form_step`'s smart-capture form staleness check — deleted the
+    hand-rolled 30-min check against the form's own `created_at`; delegates
+    to `flow_machine.expire_if_stale()` directly (the form is always
+    FlowMachine-tracked via `SMART_CAPTURE_CONFIRM_PENDING` since Phase
+    2.3), with a defensive fallback straight to `is_timestamp_stale` for
+    the should-never-happen case where FlowMachine and `form_state` have
+    desynced.
+  - The `last_generated_invoice` cache's own 30-min expiry — deleted the
+    hand-rolled check, now calls `is_timestamp_stale` against `cached_at`
+    directly (stays a standalone cache, not FlowMachine-owned state, since
+    no flow ever arms it).
+  - The `_ALL_AWAITING_CLEAR_PATCH` dict in the v2 TTL block (`_clear_flow_state`)
+    was NOT deleted — post-Phase-2.3 it's pure `pending_*` payload cleanup
+    (no boolean flags left in it at all), not a staleness check, and
+    FlowMachine's own `reset()` doesn't touch those memory keys.
+  - Two deliberate behavior changes from unifying onto the shared
+    conservative policy: the form's staleness is now IDLE-based (resets on
+    every retry, since FlowMachine's `started_at` refreshes on every
+    `set_state()`) rather than a fixed lifetime cap from the form's
+    original `created_at`; the invoice cache's missing/malformed `cached_at`
+    is now stale immediately instead of silently treated as fresh forever.
+  - Tests: `tests/test_ttl_unification.py`.
 
 ---
 

@@ -67,12 +67,19 @@ class TestFormStepEscapeHatches:
         assert result is None
         svc.memory.cancel_form.assert_called_once_with("u1")
 
-    def test_malformed_timestamp_treated_as_fresh_not_crash(self):
+    def test_malformed_timestamp_treated_as_stale_not_crash(self):
+        # Phase 2.4 (TODO.md): staleness now delegates to FlowMachine's
+        # shared is_timestamp_stale policy, which is deliberately
+        # conservative -- a missing/malformed timestamp is treated as
+        # STALE (matching expire_if_stale's own "no timestamp -> reset"
+        # philosophy), not fresh. This flipped from the old ad-hoc check's
+        # lenient default.
         svc = _make_svc()
         svc.memory.get_form_state.return_value = _form("smart_capture_confirm", created_at="not-a-date")
-        # Must not raise, and must NOT auto-cancel just because parsing failed.
+        # Must not raise, and must auto-cancel rather than trust a malformed timestamp.
         result = svc._handle_form_step("u1", "yes")
-        assert result is not None  # falls through to the confirm handler, not None
+        assert result is None
+        svc.memory.cancel_form.assert_called_once_with("u1")
 
     def test_plus_prefixed_message_cancels_old_form(self):
         svc = _make_svc()

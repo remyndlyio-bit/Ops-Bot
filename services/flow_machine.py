@@ -137,6 +137,28 @@ def _parse_iso(s: str) -> Optional[datetime]:
         return None
 
 
+def is_timestamp_stale(iso_str: Optional[str], minutes: int = IDLE_TTL_MINUTES) -> bool:
+    """TODO.md Phase 2.4: "one expiry policy, defined in services/flow_machine.py."
+    Shared by every timestamp-based staleness check in the codebase (FlowMachine's
+    own flow TTL via expire_if_stale, plus ad-hoc caches like
+    last_generated_invoice) instead of each hand-rolling its own
+    datetime.fromisoformat + timedelta comparison. A missing or unparseable
+    timestamp is treated as stale (conservative — matches expire_if_stale's
+    own "no started_at -> reset" behavior) rather than raising.
+
+    Naive (no tzinfo) and aware timestamps are both accepted: a naive `iso_str`
+    is compared against a naive "now" so pre-existing naive timestamps in the
+    codebase (e.g. last_generated_invoice's cached_at, written with a bare
+    datetime.now()) don't raise a "can't subtract offset-naive and
+    offset-aware datetime" TypeError.
+    """
+    parsed = _parse_iso(iso_str or "")
+    if parsed is None:
+        return True
+    now = datetime.now(timezone.utc) if parsed.tzinfo else datetime.now()
+    return (now - parsed) >= timedelta(minutes=minutes)
+
+
 def _empty_state() -> Dict[str, Any]:
     return {
         "flow": FLOW_IDLE,
@@ -186,18 +208,8 @@ class FlowMachine:
         state = self.get_state(user_id)
         if state["flow"] == FLOW_IDLE:
             return False
-        started = _parse_iso(state.get("started_at") or "")
-        if not started:
-            # No timestamp — be conservative and reset.
-            logger.info(f"[FLOW_V2] {user_id} flow={state['flow']} has no started_at — resetting")
-            self.reset(user_id)
-            return True
-        age = datetime.now(timezone.utc) - started
-        if age >= timedelta(minutes=IDLE_TTL_MINUTES):
-            logger.info(
-                f"[FLOW_V2] {user_id} flow={state['flow']} stale "
-                f"(age={int(age.total_seconds()/60)}m) — auto-resetting"
-            )
+        if is_timestamp_stale(state.get("started_at")):
+            logger.info(f"[FLOW_V2] {user_id} flow={state['flow']} stale — auto-resetting")
             self.reset(user_id)
             return True
         return False

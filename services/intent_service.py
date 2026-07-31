@@ -2075,22 +2075,43 @@ class IntentService:
 
     def _handle_form_step(self, user_id: str, message: str) -> Dict:
         """Handle smart capture confirmation, missing fields, or edit flow."""
-        from datetime import datetime, timedelta
         form = self.memory.get_form_state(user_id)
         if not form:
             return None
 
-        # ── Staleness check: auto-cancel forms older than 30 minutes ──────────
-        created_at_str = form.get("created_at")
-        if created_at_str:
-            try:
-                age = datetime.now() - datetime.fromisoformat(created_at_str)
-                if age > timedelta(minutes=30):
+        # ── Staleness check (TODO.md Phase 2.4: "one expiry policy, defined
+        # in services/flow_machine.py") ───────────────────────────────────
+        # This form is always FlowMachine-tracked (SMART_CAPTURE_CONFIRM_PENDING
+        # -- both fresh-entry sites write flow_machine.set_state() the same
+        # moment they call memory.start_form()), so delegate to FlowMachine's
+        # own TTL instead of a second, hand-rolled 30-minute check against
+        # the form's own created_at. Note a real semantic shift from the old
+        # check: created_at is stamped once and never refreshed on a retry
+        # re-arm, so the old policy was "cancel 30 min after the form was
+        # FIRST shown" (a lifetime cap); FlowMachine's started_at IS
+        # refreshed on every set_state() call (including retries), so this
+        # is now "cancel after 30 min of no activity" (an idle timeout) --
+        # an actively-retrying user is no longer punished for taking a while
+        # in total.
+        try:
+            if self.flow_machine.expire_if_stale(user_id):
+                self._clear_flow_state(user_id)
+                logger.info(f"[FORM] Auto-cancelled stale form for {user_id} (FlowMachine TTL)")
+                return None  # Let the message be processed normally
+            if self.flow_machine.is_idle(user_id):
+                # Desync fallback: FlowMachine thinks IDLE (so expire_if_stale
+                # above was a no-op) yet a form is still active -- shouldn't
+                # happen given both arm sites write FlowMachine directly, but
+                # don't leave a form with no staleness protection at all if
+                # it ever does. Same shared TTL policy, applied to the
+                # form's own timestamp instead.
+                from services.flow_machine import is_timestamp_stale
+                if is_timestamp_stale(form.get("created_at")):
                     self.memory.cancel_form(user_id)
-                    logger.info(f"[FORM] Auto-cancelled stale form for {user_id} (age={int(age.total_seconds()//60)} min)")
-                    return None  # Let the message be processed normally
-            except (ValueError, TypeError):
-                pass  # Malformed timestamp — treat as fresh
+                    logger.warning(f"[FORM] Auto-cancelled stale form for {user_id} (desync fallback)")
+                    return None
+        except Exception as e:
+            logger.warning(f"[FORM] TTL check failed (non-fatal): {e}")
 
         # ── Escape: new job entry (+...) should cancel the old form ───────────
         if message.strip().startswith("+") and len(message.strip()) > 2:
@@ -4593,19 +4614,21 @@ class IntentService:
             msg_lower = message.lower()
             cached_invoice = user_mem.get("last_generated_invoice")
 
-            # TTL: expire cached invoice after 30 minutes
+            # TTL: expire cached invoice after 30 minutes (TODO.md Phase 2.4:
+            # "one expiry policy, defined in services/flow_machine.py" --
+            # shares the same IDLE_TTL_MINUTES constant and staleness check
+            # FlowMachine's own expire_if_stale uses, instead of a third
+            # hand-rolled datetime.fromisoformat + timedelta comparison. Note:
+            # a missing/malformed cached_at is now treated as STALE (the
+            # conservative default is_timestamp_stale uses, matching
+            # expire_if_stale's own "no timestamp -> reset" behavior) --
+            # the old code silently kept an untimestamped cache forever.
             if cached_invoice:
-                from datetime import datetime, timedelta
-                cached_at = cached_invoice.get("cached_at", "")
-                if cached_at:
-                    try:
-                        cache_time = datetime.fromisoformat(cached_at)
-                        if datetime.now() - cache_time > timedelta(minutes=30):
-                            logger.info(f"[SEND_CHECK] Cached invoice expired (>30min), clearing")
-                            self.memory.update_user_memory(user_id, {"last_generated_invoice": None})
-                            cached_invoice = None
-                    except (ValueError, TypeError):
-                        pass
+                from services.flow_machine import is_timestamp_stale
+                if is_timestamp_stale(cached_invoice.get("cached_at")):
+                    logger.info(f"[SEND_CHECK] Cached invoice expired (>30min), clearing")
+                    self.memory.update_user_memory(user_id, {"last_generated_invoice": None})
+                    cached_invoice = None
 
             if cached_invoice and _looks_like_a_question(message):
                 # A genuine question ("what are my number of jobs this
