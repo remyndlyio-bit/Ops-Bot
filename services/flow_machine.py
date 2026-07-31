@@ -84,6 +84,14 @@ FLOW_INVOICE_NEED_MONTH                = "INVOICE_NEED_MONTH"
 # mentioned: X. Want me to do that now? (Yes / No)"). Formerly
 # awaiting_compound_response.
 FLOW_COMPOUND_RESPONSE                 = "COMPOUND_RESPONSE"
+# Bot asked "what would you like to change about X?" mid-modify (distinct
+# from DISAMBIGUATION's row-pick — this is the field+value prompt once a
+# row is already pinned). Formerly awaiting_modify_field. The explicit
+# verb-trigger entry point ("modify ...", "update ...") that starts this
+# flow for a BRAND NEW message stays legacy-only (v2-off fallback) — when
+# v2 is on, a fresh WRITE_UPDATE-shaped message is shadow-only and the
+# legacy update/query pipeline handles it directly, never through here.
+FLOW_MODIFY_FIELD                      = "MODIFY_FIELD"
 
 KNOWN_FLOWS = {
     FLOW_IDLE,
@@ -102,6 +110,7 @@ KNOWN_FLOWS = {
     FLOW_INVOICE_READINESS_POC_EMAIL,
     FLOW_INVOICE_NEED_MONTH,
     FLOW_COMPOUND_RESPONSE,
+    FLOW_MODIFY_FIELD,
 }
 
 # Idle TTL: 30 min of silence in a flow → auto-reset to IDLE.

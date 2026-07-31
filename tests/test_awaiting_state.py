@@ -67,43 +67,42 @@ class TestArmAwaitingMutualExclusivity:
         svc._arm_awaiting("u1", "awaiting_link_id")
         assert svc.memory.update_user_memory.call_count == 1
 
-    def test_every_call_site_flag_name_is_a_known_flag(self):
-        """Guards against a typo introducing a 15th flag that never gets
-        cleared by the other 14 -- re-creating exactly this bug class for a
-        newly-added awaiting_* state."""
+    def test_no_call_sites_left_and_awaiting_flags_is_empty(self):
+        """_arm_awaiting has zero callers left -- awaiting_modify_field (the
+        last boolean legacy flag) was migrated to its own FlowMachine flow.
+        Guards against a NEW awaiting_* flag being introduced without also
+        being added to _AWAITING_FLAGS (the original bug class this test
+        pinned down) -- if a call site reappears, this catches it, and
+        _AWAITING_FLAGS itself should be non-empty again at that point."""
         import re
         src = open(os.path.join(os.path.dirname(__file__), "..",
                                  "services", "intent_service.py")).read()
         armed = set(re.findall(r'_arm_awaiting\(\s*[^,]+,\s*"(awaiting_[a-z_]+)"', src))
-        assert armed, "expected at least one _arm_awaiting call site"
-        assert armed.issubset(set(_make_svc()._AWAITING_FLAGS))
+        assert armed == set(), "expected zero remaining _arm_awaiting call sites"
+        assert _make_svc()._AWAITING_FLAGS == ()
 
 
 class TestStuckFlowNoLongerSwallowsUnrelatedInput:
     """End-to-end shape of the originally reported bug: arming bank-details
-    while an invoice-email prompt is still active must let the NEXT message
-    reach the bank-details handler, not the stale invoice one."""
+    while an unrelated flow's state is still active must let the NEXT
+    message reach the bank-details handler, not the stale one.
 
-    def test_arming_bank_details_clears_stale_invoice_awaits(self):
-        # Phase 2.3: awaiting_bank_details itself is gone — FlowMachine
-        # (flow_machine.set_state) is BANK_DETAILS' source of truth now.
-        # This test still verifies the piece that matters: arming it must
-        # not leave a stale unrelated legacy flag (like
-        # awaiting_modify_field) lingering, via _arm_bank_details_v2's
-        # defensive clear of the whole _AWAITING_FLAGS set.
+    Every boolean legacy flag has been migrated to its own FlowMachine flow
+    now (awaiting_modify_field was the last one), so there's no longer a
+    boolean flag left to demonstrate the ORIGINAL bug shape against --
+    FlowMachine's own set_state() unconditionally overwrites whatever flow
+    was previously active, so the mutual-exclusivity guarantee this test
+    used to pin down at the legacy-flag layer now holds structurally,
+    by construction, at the FlowMachine layer instead."""
+
+    def test_arming_bank_details_sets_flow_machine_state(self):
         svc = _make_svc()
         svc.flow_machine = MagicMock()
-        # Simulate: an unrelated single-question prompt is stuck (already
-        # armed from an earlier, unfinished turn).
-        svc.memory.get_user_memory.return_value = {
-            "awaiting_modify_field": True,
-        }
+        svc.memory.get_user_memory.return_value = {}
         svc._prompt_bank_details_format("u1", "update my bank details")
 
         from services.flow_machine import FLOW_BANK_DETAILS
         svc.flow_machine.set_state.assert_called_once_with("u1", FLOW_BANK_DETAILS, {})
-        patch = svc.memory.update_user_memory.call_args.args[1]
-        assert patch["awaiting_modify_field"] is False
 
 
 class TestPendingDisambiguationMutualExclusivity:

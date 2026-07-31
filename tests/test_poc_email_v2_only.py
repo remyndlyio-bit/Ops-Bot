@@ -85,10 +85,12 @@ class TestArmPocEmailV2Helper:
         assert svc.memory.get_user_memory("u1")["pending_send_invoice"] == payload
 
     def test_defensively_clears_other_legacy_flags(self):
+        # _AWAITING_FLAGS is empty now -- awaiting_modify_field (the last
+        # boolean legacy flag) was migrated to its own FlowMachine flow.
+        # Just confirms arming doesn't crash with nothing to iterate.
         svc = _svc()
-        svc.memory.update_user_memory("u1", {"awaiting_modify_field": True})
         svc._arm_poc_email_v2("u1", "Nike", {"client_name": "Nike"})
-        assert svc.memory.get_user_memory("u1")["awaiting_modify_field"] is False
+        assert svc.flow_machine.current_flow("u1") == FLOW_INVOICE_NEED_POC_EMAIL
 
     def test_no_legacy_poc_email_flag_written(self):
         svc = _svc()

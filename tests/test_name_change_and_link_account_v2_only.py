@@ -91,10 +91,12 @@ class TestNameChangeArmSite:
         assert svc.flow_machine.current_flow("u1") == FLOW_IDLE
 
     def test_defensively_clears_other_legacy_flags(self):
+        # _AWAITING_FLAGS is empty now -- awaiting_modify_field (the last
+        # boolean legacy flag) was migrated to its own FlowMachine flow.
+        # Just confirms arming doesn't crash with nothing to iterate.
         svc = _svc()
-        svc.memory.update_user_memory("u1", {"awaiting_modify_field": True})
         svc._handle_name_change("u1", "change my name")
-        assert svc.memory.get_user_memory("u1")["awaiting_modify_field"] is False
+        assert svc.flow_machine.current_flow("u1") == FLOW_NAME_CHANGE
 
     def test_no_legacy_name_change_flag_written(self):
         svc = _svc()
@@ -179,10 +181,12 @@ class TestLinkAccountArmSite:
         assert svc.flow_machine.current_flow("u1") == FLOW_IDLE
 
     def test_defensively_clears_other_legacy_flags(self):
+        # _AWAITING_FLAGS is empty now -- awaiting_modify_field (the last
+        # boolean legacy flag) was migrated to its own FlowMachine flow.
+        # Just confirms arming doesn't crash with nothing to iterate.
         svc = _svc()
-        svc.memory.update_user_memory("u1", {"awaiting_modify_field": True})
         svc._handle_link_account("u1", "link my account")
-        assert svc.memory.get_user_memory("u1")["awaiting_modify_field"] is False
+        assert svc.flow_machine.current_flow("u1") == FLOW_LINK_ACCOUNT
 
 
 class TestLinkAccountFlowResponseValid:

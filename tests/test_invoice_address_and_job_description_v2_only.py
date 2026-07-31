@@ -102,10 +102,12 @@ class TestArmInvoiceAddressV2Helper:
         assert mem["pending_invoice"] == {"client_name": "Nike"}
 
     def test_defensively_clears_other_legacy_flags(self):
+        # _AWAITING_FLAGS is empty now -- awaiting_modify_field (the last
+        # boolean legacy flag) was migrated to its own FlowMachine flow.
+        # Just confirms arming doesn't crash with nothing to iterate.
         svc = _svc()
-        svc.memory.update_user_memory("u1", {"awaiting_modify_field": True})
         svc._arm_invoice_address_v2("u1", "Nike", "u1", {})
-        assert svc.memory.get_user_memory("u1")["awaiting_modify_field"] is False
+        assert svc.flow_machine.current_flow("u1") == FLOW_INVOICE_ADDRESS
 
     def test_no_legacy_flag_written(self):
         svc = _svc()

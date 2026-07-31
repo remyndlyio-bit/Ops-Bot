@@ -253,7 +253,7 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 | ~~`awaiting_job_description`~~ | `pending_jobdesc_row_id`, `pending_jobdesc_user_id` | `INVOICE_NEED_JOB_DESCRIPTION` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. `_arm_job_description_v2` replaces the last-but-one `_prompt()` caller. |
 | ~~`awaiting_invoice_month`~~ | `pending_invoice_client`, `pending_invoice_send_email` | `INVOICE_NEED_MONTH` | ✅✅ **Deleted.** Three arm sites (direct "send invoice for X" with no month, the planner-clarification redirect, and the retry branch). `_handle_invoice_month_reply` has no cancel branch of its own — CANCEL is handled entirely in `InvoiceNeedMonth.on_cancel`. Migrating this deleted the "Universal intent-shift guard" (`_PENDING_STATES` + surface-shape gate + `is_new_query_not_response` escape hatch) outright — this was its last member. |
 | ~~`awaiting_compound_response`~~ | `suggested_next_action` | `COMPOUND_RESPONSE` | ✅✅ **Deleted.** "Yes" after "You also mentioned: …" follow-up offer. Two arm sites (after smart-capture save, after deterministic-query INSERT), both via `_arm_compound_response_v2`. No retry loop; `_handle_compound_response` resets FlowMachine FIRST (not after) since every branch recurses into `process_request` or is terminal. |
-| `awaiting_modify_field` | `modify_row_id` (in flag's own `extra` dict) | *none* | ❌ Legacy-only. Mid-modify field-value prompt (distinct from `DISAMBIGUATION`'s row-pick). Also has a `_cancelled` companion (`awaiting_modify_field_cancelled`) tracking a declined confirm, itself never migrated. |
+| ~~`awaiting_modify_field`~~ | `modify_row_id` | `MODIFY_FIELD` | ✅✅ **Deleted.** The last boolean legacy flag — `_AWAITING_FLAGS` is empty now. Single arm site, genuine 3-way outcome once armed (re-prompt / hand off to `DISAMBIGUATION` via `_arm_disambiguation` / apply-and-finish). The explicit verb-trigger entry point ("modify ...") for a BRAND NEW message stays legacy-only (v2-off fallback) — a fresh WRITE_UPDATE-shaped message is shadow-only when v2 is on and never routes through `_handle_modify_intent` at all. |
 | ~~`awaiting_invoice_poc_email`~~ | `pending_poc_email_client`, `pending_poc_email_user_id`, `pending_poc_email_row_ids` | `INVOICE_READINESS_POC_EMAIL` | ✅✅ **Deleted.** Easy to confuse with the earlier-migrated `awaiting_poc_email`/`INVOICE_NEED_POC_EMAIL` — this is the PRE-generation readiness gate; that one is the SEND-time flow. Was the shared `_prompt()` helper's LAST caller — with `_arm_invoice_readiness_poc_email_v2` replacing it, `_prompt()` itself was deleted entirely. Retry loop on invalid email, same shape as `BANK_DETAILS`. |
 
 ### 2. Other `pending_*` keys (no boolean gate — read directly)
@@ -402,9 +402,7 @@ ever consulted.
 
 ### Post-2.3: COMPOUND_RESPONSE (formerly `awaiting_compound_response`)
 
-The last of the six `❌ Legacy-only` rows to get its own FlowMachine flow —
-all 12 `✅ Mirrored + owned` rows plus all 6 `❌ Legacy-only` rows are now
-FlowMachine-owned. Two arm sites (after a smart-capture job save, after a
+Two arm sites (after a smart-capture job save, after a
 deterministic-query INSERT), both via the new `_arm_compound_response_v2` —
 `suggested_next_action` itself is written by the CALLER before arming (set
 earlier during compound-intent detection), so the arm helper only
@@ -420,6 +418,35 @@ branch either recurses into `process_request`
 case) or is terminal (the "no" case) — leaving `COMPOUND_RESPONSE` active
 into a recursive `process_request` call would make `dispatch_in_flow` try
 to route that recursive call through this same flow again.
+
+### Post-2.3: MODIFY_FIELD (formerly `awaiting_modify_field`) — the last one
+
+`awaiting_modify_field` was the LAST boolean legacy flag left anywhere —
+migrating it left `_AWAITING_FLAGS` an empty tuple. All 12 originally-`✅
+Mirrored + owned` flows AND all 6 originally-`❌ Legacy-only` flows are now
+FlowMachine-owned; there is no boolean legacy conversational-state flag
+left in the codebase at all. `_arm_awaiting` and `_sync_flow_machine_now`
+are left in place (with zero callers) as the mechanism for any FUTURE flag
+that wants the same "arm now, sync eagerly" pattern before its own direct
+FlowMachine write is wired up.
+
+Single arm site (`_handle_modify_intent`'s "no field/value parsed, but a
+row is pinned" branch), and a genuine 3-way outcome once armed:
+re-prompt (still no field/value; re-arms itself), hand off to
+`DISAMBIGUATION` (a client/bill filter supplied alongside the field/value
+matched multiple rows — `_arm_disambiguation` already transitioned
+FlowMachine, so `ModifyField.handle_response` must not clobber it back to
+IDLE), or apply the update and finish (success, or a parse/write failure,
+both terminal).
+
+Deliberately did NOT touch the explicit verb-trigger entry point ("modify
+...", "update ...") that starts this flow for a BRAND NEW message — that
+stays legacy-only, firing only when v2 is off. When v2 is on, a fresh
+WRITE_UPDATE-shaped message is shadow-only (see `flow_dispatcher.dispatch_idle`'s
+own docstring) and the legacy update/query pipeline handles it directly,
+never through `_handle_modify_intent` at all — so the only thing that
+needed migrating was the CONTINUATION (the field-value reply to an
+already-pinned row).
 
 **Three pre-existing bugs surfaced during these migrations** (flagged
 separately, not fixed as part of state-ownership changes):
@@ -442,19 +469,18 @@ not introduced by this migration).
   `flow_machine.set_state()` directly, keep a legacy-flag shim for
   as-yet-unported readers, delete the shim once every reader is moved.
   **(All 12 of these are now done — see "Progress update" above.)**
-- **All 6 originally-`❌ Legacy-only` rows are now migrated too**:
+- **All 6 originally-`❌ Legacy-only` rows are now migrated too — no
+  boolean legacy flag remains in the codebase at all**:
   `awaiting_invoice_poc_email` → `INVOICE_READINESS_POC_EMAIL` (the last
   caller of the shared invoice-readiness-gate `_prompt()` helper — migrating
   it let that helper be deleted outright), `awaiting_invoice_month` →
   `INVOICE_NEED_MONTH` (the last member of the "Universal intent-shift
   guard" — migrating it let that whole mechanism be deleted outright too),
-  and `awaiting_compound_response` → `COMPOUND_RESPONSE`. `awaiting_modify_field`
-  (mid-modify field-value prompt, distinct from `DISAMBIGUATION`'s row-pick,
-  also has a never-migrated `_cancelled` companion flag) is the last
-  remaining legacy flag with no FlowMachine flow of its own.
-  `pending_value_fork` and `pending_reminder_offer` are short-lived
-  same-turn caches, not blocking gates, and may not need a Flow class at
-  all.
+  `awaiting_compound_response` → `COMPOUND_RESPONSE`, and
+  `awaiting_modify_field` → `MODIFY_FIELD` (the very last boolean legacy
+  flag — `_AWAITING_FLAGS` is an empty tuple now). `pending_value_fork` and
+  `pending_reminder_offer` are short-lived same-turn caches, not blocking
+  gates, and may not need a Flow class at all.
 - **`get_pending()` (audit reminders) stays outside FlowMachine by design** —
   cron-armed, not `process_request`-armed.
 - **`last_intent` / `uscf_context` are the two rows Phase 2.4 should retire

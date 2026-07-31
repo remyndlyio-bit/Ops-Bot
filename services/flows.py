@@ -34,6 +34,7 @@ from services.flow_machine import (
     FLOW_INVOICE_READINESS_POC_EMAIL,
     FLOW_INVOICE_NEED_MONTH,
     FLOW_COMPOUND_RESPONSE,
+    FLOW_MODIFY_FIELD,
 )
 from utils.logger import logger
 
@@ -761,6 +762,67 @@ class CompoundResponse(Flow):
                 "trigger_invoice": False, "invoice_data": {}}
 
 
+# ── MODIFY_FIELD ─────────────────────────────────────────────────────────
+
+class ModifyField(Flow):
+    """Bot asked what field/value to change about a specific, already-pinned
+    job (distinct from DISAMBIGUATION's row-pick, which happens BEFORE a row
+    is pinned). Delegates to the existing _handle_modify_intent, which has a
+    genuine 3-way outcome: re-prompt (still no field/value; re-arms itself),
+    hand off to DISAMBIGUATION (multiple rows matched a filter the user
+    supplied alongside the field/value -- _arm_disambiguation already
+    transitioned FlowMachine, so don't clobber it), or apply the update and
+    finish (success or a parse/write failure, both terminal)."""
+
+    name = FLOW_MODIFY_FIELD
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(
+            f"[FLOW_V2] ModifyField.handle_response user={user_id} "
+            f"row_id={context.get('row_id')!r}"
+        )
+        user_mem = intent_service.memory.get_user_memory(user_id) or {}
+        result = intent_service._handle_modify_intent(user_id, message, user_mem)
+        if result is None:
+            # Raced with something that already cleared the pinned row
+            # (e.g. a different code path resolved it first).
+            try:
+                intent_service.flow_machine.reset(user_id)
+            except Exception:
+                pass
+            response = "That's no longer active — go ahead and ask again."
+            intent_service._store_conversation(user_id, message, response)
+            return {"operation": "modify_stale", "response": response,
+                    "trigger_invoice": False, "invoice_data": {}}
+        op = result.get("operation")
+        if op == "modify_prompt":
+            pass  # _handle_modify_intent already re-armed via _arm_modify_field_v2
+        elif op == "modify_disambiguate":
+            pass  # already transitioned to DISAMBIGUATION via _arm_disambiguation
+        else:
+            try:
+                intent_service.flow_machine.reset(user_id)
+            except Exception:
+                pass
+        return result
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        return "\n\nStill waiting on what to change (or 'cancel' to stop)."
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        intent_service.memory.update_user_memory(user_id, {"modify_row_id": None})
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        response = "No problem, cancelled. What else can I help with?"
+        intent_service._store_conversation(user_id, message, response)
+        return {"operation": "modify_cancelled", "response": response,
+                "trigger_invoice": False, "invoice_data": {}}
+
+
 # Registry — dispatcher uses this to look up the right Flow by name.
 REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_AWAIT_SEND_CONFIRM:     InvoiceAwaitSendConfirm(),
@@ -770,6 +832,7 @@ REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_READINESS_POC_EMAIL:    InvoiceReadinessPocEmail(),
     FLOW_INVOICE_NEED_MONTH:             InvoiceNeedMonth(),
     FLOW_COMPOUND_RESPONSE:              CompoundResponse(),
+    FLOW_MODIFY_FIELD:                   ModifyField(),
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION: SmartCaptureNeedDescription(),
     FLOW_SMART_CAPTURE_CONFIRM_PENDING:  SmartCaptureConfirmPending(),
     FLOW_DISAMBIGUATION:                 Disambiguation(),

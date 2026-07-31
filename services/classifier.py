@@ -238,6 +238,15 @@ def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Di
             "    (not a yes/no answer) is NEW_FLOW, not FLOW_RESPONSE -- the bot should drop\n"
             "    this offer and just handle the new request.\n"
         ),
+        "MODIFY_FIELD": (
+            "  - The bot asked what field/value to change about a specific, already-pinned\n"
+            "    job (e.g. 'What would you like to change about Nike? Reply like: fee: 25000').\n"
+            "  - FLOW_RESPONSE: any text naming a field and a value (e.g. 'fee: 25000',\n"
+            "    'paid: yes', 'contact email: x@y.com').\n"
+            "  - CANCEL: 'cancel', 'stop', 'quit', 'exit', 'nevermind', 'nvm', 'no', 'abort', 'skip'.\n"
+            "  - SIDE_QUESTION: a genuinely unrelated question is SIDE_QUESTION, never\n"
+            "    FLOW_RESPONSE.\n"
+        ),
     }.get(current_flow, "")
     return (
         "\n\nACTIVE FLOW (the bot just asked a question and is waiting):\n"

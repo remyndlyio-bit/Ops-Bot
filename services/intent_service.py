@@ -1044,6 +1044,17 @@ class IntentService:
         patch["pending_disambiguation"] = None
         self.memory.update_user_memory(user_id, patch)
 
+    def _arm_modify_field_v2(self, user_id: str, row_id) -> None:
+        """Arm MODIFY_FIELD (FlowMachine-only, no legacy flag). Single arm
+        site — _handle_modify_intent's own "no field/value parsed, but a
+        row is pinned" branch, asking what to change about that row."""
+        from services.flow_machine import FLOW_MODIFY_FIELD
+        self.flow_machine.set_state(user_id, FLOW_MODIFY_FIELD, {"row_id": row_id})
+        patch = {k: False for k in self._AWAITING_FLAGS}
+        patch["pending_disambiguation"] = None
+        patch["modify_row_id"] = row_id
+        self.memory.update_user_memory(user_id, patch)
+
     def _arm_smart_capture_description_v2(self, user_id: str) -> None:
         """Arm SMART_CAPTURE_NEED_DESCRIPTION (Phase 2.3: FlowMachine-only,
         no legacy flag). THREE arm sites: _start_smart_capture (the flow's
@@ -1086,22 +1097,19 @@ class IntentService:
     # Every single-question "waiting for a specific kind of reply" state the
     # legacy pipeline tracks. Kept as one list so arming any one of them can
     # reliably clear all the others — see _arm_awaiting below.
-    _AWAITING_FLAGS = (
-        # awaiting_send_confirmation, awaiting_bank_details,
-        # awaiting_name_change, awaiting_link_id, awaiting_poc_email,
-        # awaiting_client_billing, awaiting_poc_name,
-        # awaiting_invoice_address, awaiting_job_description,
-        # awaiting_job_input, awaiting_invoice_poc_email,
-        # awaiting_invoice_month, and awaiting_compound_response removed —
-        # FlowMachine is now the sole source of truth for
-        # INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE,
-        # LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING,
-        # INVOICE_NEED_POC_NAME, INVOICE_ADDRESS,
-        # INVOICE_NEED_JOB_DESCRIPTION, SMART_CAPTURE_NEED_DESCRIPTION,
-        # INVOICE_READINESS_POC_EMAIL, INVOICE_NEED_MONTH, and
-        # COMPOUND_RESPONSE.
-        "awaiting_modify_field",
-    )
+    # Empty now — every flag that once lived here has been migrated to its
+    # own FlowMachine flow (INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS,
+    # NAME_CHANGE, LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING,
+    # INVOICE_NEED_POC_NAME, INVOICE_ADDRESS, INVOICE_NEED_JOB_DESCRIPTION,
+    # SMART_CAPTURE_NEED_DESCRIPTION, INVOICE_READINESS_POC_EMAIL,
+    # INVOICE_NEED_MONTH, COMPOUND_RESPONSE, and finally MODIFY_FIELD, the
+    # last one). Kept as an (empty) tuple rather than deleted outright — the
+    # `{k: False for k in self._AWAITING_FLAGS}` defensive-clear pattern in
+    # every `_arm_*_v2` helper still reads it, and `_arm_awaiting` /
+    # `_sync_flow_machine_now` (now with zero callers) are left in place as
+    # the mechanism for any FUTURE flag that wants this same pattern before
+    # its own direct FlowMachine write is wired up.
+    _AWAITING_FLAGS = ()
 
     def _arm_awaiting(self, user_id: str, flag: str, extra: dict = None) -> None:
         """Set exactly one awaiting_* conversational state, clearing every
@@ -1656,7 +1664,6 @@ class IntentService:
         ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
         last_row = ctx.get("last_row_data") or {}
 
-        awaiting = user_mem.get("awaiting_modify_field")
         # Carry forward a pinned row_id if we already asked which row to change.
         pinned_row_id = user_mem.get("modify_row_id") or last_row.get("id")
 
@@ -1678,7 +1685,7 @@ class IntentService:
                     f"What would you like to change about {_client}? "
                     "Reply like: `fee: 25000`, `paid: yes`, `contact email: x@y.com`."
                 )
-                self._arm_awaiting(user_id, "awaiting_modify_field", {"modify_row_id": pinned_row_id})
+                self._arm_modify_field_v2(user_id, pinned_row_id)
                 self._store_conversation(user_id, message, resp)
                 return {"operation": "modify_prompt", "response": resp, "trigger_invoice": False, "invoice_data": {}}
             # No context — let the normal pipeline have a go
@@ -1782,11 +1789,7 @@ class IntentService:
         )
         result = self.supabase.execute_sql(update_sql)
 
-        # Clear awaiting state regardless
-        self.memory.update_user_memory(user_id, {
-            "awaiting_modify_field": False,
-            "modify_row_id": None,
-        })
+        self.memory.update_user_memory(user_id, {"modify_row_id": None})
         if not result.get("ok"):
             resp = f"Update failed: {result.get('error', 'unknown error')}"
             self._store_conversation(user_id, message, resp)
@@ -3543,34 +3546,28 @@ class IntentService:
         # awaiting_client_billing, awaiting_poc_name,
         # awaiting_invoice_address, awaiting_job_description,
         # awaiting_job_input, awaiting_invoice_poc_email,
-        # awaiting_invoice_month, awaiting_compound_response, and
-        # pending_disambiguation removed — FlowMachine is the sole source
-        # of truth for those fourteen flows now, checked explicitly below
-        # instead of via the legacy flag list.
-        _active_subflow = any(
-            _mem.get(k) for k in (
-                "awaiting_modify_field",
-            )
+        # awaiting_invoice_month, awaiting_compound_response,
+        # awaiting_modify_field, and pending_disambiguation removed —
+        # FlowMachine is the sole source of truth for all fifteen flows
+        # now (no legacy flag list left to check at all).
+        from services.flow_machine import (
+            FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
+            FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
+            FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
+            FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
+            FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
+            FLOW_INVOICE_READINESS_POC_EMAIL, FLOW_INVOICE_NEED_MONTH,
+            FLOW_COMPOUND_RESPONSE, FLOW_MODIFY_FIELD,
         )
-        if not _active_subflow:
-            from services.flow_machine import (
-                FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
-                FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
-                FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
-                FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
-                FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
-                FLOW_INVOICE_READINESS_POC_EMAIL, FLOW_INVOICE_NEED_MONTH,
-                FLOW_COMPOUND_RESPONSE,
-            )
-            _active_subflow = self.flow_machine.current_flow(user_id) in (
-                FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
-                FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
-                FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
-                FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
-                FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
-                FLOW_INVOICE_READINESS_POC_EMAIL, FLOW_INVOICE_NEED_MONTH,
-                FLOW_COMPOUND_RESPONSE,
-            )
+        _active_subflow = self.flow_machine.current_flow(user_id) in (
+            FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
+            FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
+            FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
+            FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
+            FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
+            FLOW_INVOICE_READINESS_POC_EMAIL, FLOW_INVOICE_NEED_MONTH,
+            FLOW_COMPOUND_RESPONSE, FLOW_MODIFY_FIELD,
+        )
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
             return None
@@ -4202,14 +4199,13 @@ class IntentService:
                     # awaiting_poc_email, awaiting_client_billing,
                     # awaiting_poc_name, awaiting_invoice_address,
                     # awaiting_job_description, awaiting_job_input,
-                    # awaiting_invoice_poc_email, awaiting_invoice_month, and
+                    # awaiting_invoice_poc_email, awaiting_invoice_month,
+                    # awaiting_compound_response, awaiting_modify_field, and
                     # pending_disambiguation removed: FlowMachine's own
                     # current_flow check (the `if _v2_in_owned_flow` above
                     # this else) already routes those flows correctly —
                     # nothing left to list here for them.
-                    _idle_blockers = (
-                        "awaiting_modify_field",
-                    )
+                    _idle_blockers = ()
                     _is_idle = (
                         not any(user_mem.get(k) for k in _idle_blockers)
                         and not self.memory.get_form_state(user_id)
@@ -4301,14 +4297,16 @@ class IntentService:
             # the v2 in-flow block above. No legacy awaiting_compound_response
             # flag exists to check here.
 
-            # 0a2. Modify / update / change a job — AI-extracted update intent
-            #      Triggers: explicit modify verb in the message, OR the user is
-            #      currently in a "what field do you want to change?" follow-up.
+            # 0a2. Modify / update / change a job — AI-extracted update intent,
+            #      explicit-verb entry point only. The MODIFY_FIELD continuation
+            #      (the "what would you like to change?" follow-up) is now owned
+            #      exclusively by dispatch_in_flow / flows.py's ModifyField
+            #      (FLOW_RESPONSE / CANCEL), reached earlier via the v2 in-flow
+            #      block above. This explicit-verb trigger only fires when v2 is
+            #      off — a fresh WRITE_UPDATE-shaped message is shadow-only when
+            #      v2 is on, and the legacy update/query pipeline handles it
+            #      directly without ever routing through here.
             _msg_l = message.strip().lower()
-            _awaiting_modify = bool(user_mem.get("awaiting_modify_field"))
-
-            # When v2 is on, only allow modify if the user is in an active awaiting_modify
-            # flow (continuation). The explicit verb trigger only applies when v2 is off.
             if not _flow_machine_v2_enabled_for(user_id):
                 _MODIFY_TRIGGERS = (
                     "modify ", "modify\n", "update ", "update\n", "change ", "change\n",
@@ -4316,26 +4314,14 @@ class IntentService:
                 )
                 _MODIFY_EQUALS = ("modify", "update", "change", "edit")
                 _has_modify_verb = any(_msg_l.startswith(t) for t in _MODIFY_TRIGGERS) or _msg_l in _MODIFY_EQUALS
-            else:
-                _has_modify_verb = False
-
-            # Allow user to escape the modify state with standard cancel words.
-            # This applies regardless of v2 state (it's a flow continuation).
-            if _awaiting_modify and _msg_l in ("cancel", "stop", "quit", "exit", "nevermind", "nvm", "no", "abort", "skip"):
-                logger.info(f"[ROUTE] awaiting_modify_field cancelled: {message[:60]!r}")
-                note_route("awaiting_modify_field_cancelled")
-                self.memory.update_user_memory(user_id, {"awaiting_modify_field": False, "modify_row_id": None})
-                response = "No problem, cancelled. What else can I help with?"
-                self._store_conversation(user_id, message, response)
-                return {"operation": "modify_cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
-            if _has_modify_verb or _awaiting_modify:
-                _resp = self._handle_modify_intent(user_id, message, user_mem)
-                if _resp is not None:
-                    logger.info(f"[ROUTE] modify claimed message: {message[:60]!r}")
-                    note_route("modify")
-                    return _resp
-                # else: fall through (extraction failed AND no row context — let
-                # normal pipeline handle it; better than dead-ending here).
+                if _has_modify_verb:
+                    _resp = self._handle_modify_intent(user_id, message, user_mem)
+                    if _resp is not None:
+                        logger.info(f"[ROUTE] modify claimed message: {message[:60]!r}")
+                        note_route("modify")
+                        return _resp
+                    # else: fall through (extraction failed AND no row context — let
+                    # normal pipeline handle it; better than dead-ending here).
 
             # 0b. Check for "add job" / "+" trigger → AI Smart Capture
             # When FLOW_MACHINE_V2 is on, the classifier handles CREATE_ENTRY.

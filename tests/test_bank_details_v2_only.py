@@ -96,14 +96,14 @@ class TestArmBankDetailsV2Helper:
         assert svc.memory.get_user_memory("u1")["pending_invoice"] is None
 
     def test_defensively_clears_other_legacy_flags(self):
-        """A stale unrelated legacy flag (e.g. from an abandoned invoice-
-        poc-email prompt) must not linger alongside the new flow — same
-        mutual-exclusivity guarantee _arm_awaiting provides for flows not
-        yet migrated."""
+        """_AWAITING_FLAGS is empty now -- awaiting_modify_field (the last
+        boolean legacy flag) was migrated to its own FlowMachine flow
+        (MODIFY_FIELD). This test now just confirms arming doesn't crash
+        or write anything unexpected when _AWAITING_FLAGS has nothing to
+        iterate."""
         svc = _svc()
-        svc.memory.update_user_memory("u1", {"awaiting_modify_field": True})
         svc._arm_bank_details_v2("u1", pending_invoice=None)
-        assert svc.memory.get_user_memory("u1")["awaiting_modify_field"] is False
+        assert svc.flow_machine.current_flow("u1") == FLOW_BANK_DETAILS
 
     def test_no_legacy_bank_details_flag_written(self):
         svc = _svc()

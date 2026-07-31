@@ -81,7 +81,10 @@ class TestArmAwaitingEagerSyncIsNowANoOp:
 
     def test_legacy_patch_still_written_when_v2_off(self):
         """The core mutual-exclusivity fix (legacy flag patch) is completely
-        unaffected by v2 being on or off."""
+        unaffected by v2 being on or off. _AWAITING_FLAGS is empty now --
+        awaiting_modify_field (the last boolean legacy flag) was migrated
+        to its own FlowMachine flow -- so the only thing left in the patch
+        is the flag being armed itself."""
         svc = _make_svc()
 
         with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
@@ -90,7 +93,6 @@ class TestArmAwaitingEagerSyncIsNowANoOp:
         svc.memory.update_user_memory.assert_called_once()
         patch_arg = svc.memory.update_user_memory.call_args.args[1]
         assert patch_arg["awaiting_job_input"] is True
-        assert patch_arg["awaiting_modify_field"] is False
 
     def test_flow_machine_reset_exception_does_not_propagate(self):
         svc = _make_svc()
