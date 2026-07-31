@@ -1,19 +1,25 @@
 """
 Phase 2.2 (TODO.md): "Make FlowMachine the writer, legacy flags the mirror."
 
-Today `_reconcile_legacy_to_flow_machine` is the ONLY thing that ever
-populates FlowMachine, and it only runs once, at the top of the NEXT
-incoming message — so for the rest of the turn an arm happens in, FlowMachine
-is stale by construction. `_arm_awaiting` / `_arm_disambiguation` are the
-existing choke points (all ~25 call sites funnel through them) — this makes
+Today `_reconcile_legacy_to_flow_machine` was the ONLY thing that ever
+populated FlowMachine, and it only ran once, at the top of the NEXT incoming
+message — so for the rest of the turn an arm happened in, FlowMachine was
+stale by construction. `_arm_awaiting` / `_arm_disambiguation` were the
+existing choke points (all ~25 call sites funnel through them) — this made
 both call `_sync_flow_machine_now` right after writing the legacy patch, so
-FlowMachine reflects the just-armed flow in THE SAME TURN instead of lagging
-a full message behind.
+FlowMachine reflected the just-armed flow in THE SAME TURN instead of
+lagging a full message behind.
 
-Reuses `_reconcile_legacy_to_flow_machine`'s exact mapping (no duplicated
-per-flow logic) — just runs it immediately instead of waiting. Gated on
-`_flow_machine_v2_enabled_for` so v2-off users see zero behavior or
-performance change (no extra memory round-trip, no flow_machine writes).
+Reused `_reconcile_legacy_to_flow_machine`'s exact mapping (no duplicated
+per-flow logic) — just ran it immediately instead of waiting.
+
+Phase 2.3 update: all 12 originally-mirrored flows are now migrated off
+their legacy mirror entirely -- every arm site (including
+_arm_disambiguation, the last one) writes flow_machine.set_state() directly
+instead of going through _sync_flow_machine_now/reconcile.
+_reconcile_legacy_to_flow_machine itself now has ZERO branches left, so
+_sync_flow_machine_now (still called by _arm_awaiting, for any future
+boolean flag that might need this pattern again) is a complete no-op today.
 """
 import os
 import sys
@@ -21,7 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from unittest.mock import MagicMock, patch
 
-from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_IDLE, FLOW_DISAMBIGUATION
+from services.flow_machine import FLOW_IDLE, FLOW_DISAMBIGUATION
 
 
 def _make_svc():
@@ -36,31 +42,23 @@ def _make_svc():
     svc.supabase = MagicMock()
     svc.memory = MagicMock()
     svc.flow_machine = MagicMock()
-    # _reconcile_legacy_to_flow_machine no-ops unless FlowMachine is IDLE
-    # (its own "don't clobber an active flow" guard) — reset() is mocked
-    # too, so it won't actually flip current_flow() back to IDLE for us;
-    # the test has to say so explicitly, same as a real reset() would.
     svc.flow_machine.current_flow.return_value = FLOW_IDLE
-    # reconcile() checks form_state FIRST (highest precedence, "deepest"
-    # state) — a bare MagicMock() is truthy, which would silently win over
-    # every awaiting_* flag in these tests. None = no active form.
     svc.memory.get_form_state.return_value = None
     return svc
 
 
-class TestEagerSyncWhenV2Enabled:
-    """With FLOW_MACHINE_V2 on, arming a flag syncs FlowMachine immediately."""
+class TestArmAwaitingEagerSyncIsNowANoOp:
+    """Phase 2.3: every remaining _AWAITING_FLAGS entry
+    (awaiting_compound_response, awaiting_invoice_month,
+    awaiting_invoice_poc_email, awaiting_modify_field) has no FlowMachine
+    mapping in _reconcile_legacy_to_flow_machine -- the flags that used to
+    (bank details, name change, link account, smart-capture description,
+    etc.) are all FlowMachine-only now and arm via their own _arm_*_v2()
+    helpers instead of _arm_awaiting. So _sync_flow_machine_now still fires
+    (unconditionally, when v2 is on) but reconcile finds nothing to sync to
+    and set_state() is never called."""
 
-    def test_arm_awaiting_resets_then_reconciles(self):
-        # Phase 2.3: every remaining _AWAITING_FLAGS entry
-        # (awaiting_compound_response, awaiting_invoice_month,
-        # awaiting_invoice_poc_email, awaiting_modify_field) has no
-        # FlowMachine mapping in _reconcile_legacy_to_flow_machine — the
-        # flags that used to (bank details, name change, link account,
-        # smart-capture description, etc.) are all FlowMachine-only now and
-        # arm via their own _arm_*_v2() helpers instead of _arm_awaiting.
-        # So reset() still fires (unconditional), but reconcile finds
-        # nothing to sync to and set_state() is not called.
+    def test_arm_awaiting_resets_then_finds_nothing_to_reconcile(self):
         svc = _make_svc()
         svc.memory.get_user_memory.return_value = {"awaiting_modify_field": True}
 
@@ -71,42 +69,6 @@ class TestEagerSyncWhenV2Enabled:
         svc.memory.get_user_memory.assert_called_with("u1")
         svc.flow_machine.set_state.assert_not_called()
 
-    def test_arm_disambiguation_resets_then_reconciles(self):
-        svc = _make_svc()
-        pending = {"rows": [{"id": "a"}, {"id": "b"}], "type": "delete"}
-        svc.memory.get_user_memory.return_value = {"pending_disambiguation": pending}
-
-        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
-            svc._arm_disambiguation("u1", pending)
-
-        svc.flow_machine.reset.assert_called_once_with("u1")
-        svc.flow_machine.set_state.assert_called_once()
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_DISAMBIGUATION
-
-    def test_reset_happens_before_reconcile_sees_fresh_state(self):
-        """Reset must run BEFORE reconcile reads the flag, or reconcile's own
-        'no-op unless FlowMachine is IDLE' guard would block the sync when
-        FlowMachine was already tracking a DIFFERENT, now-abandoned flow.
-        Uses disambiguation (still reconciled from a legacy key) since none
-        of the remaining _AWAITING_FLAGS entries map to a FlowMachine flow
-        (Phase 2.3 — see test_arm_awaiting_resets_then_reconciles)."""
-        svc = _make_svc()
-        pending = {"rows": [{"id": "a"}], "type": "delete"}
-        svc.memory.get_user_memory.return_value = {"pending_disambiguation": pending}
-        call_order = []
-        svc.flow_machine.reset.side_effect = lambda uid: call_order.append("reset")
-        svc.flow_machine.set_state.side_effect = lambda *a, **k: call_order.append("set_state")
-
-        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
-            svc._arm_disambiguation("u1", pending)
-
-        assert call_order == ["reset", "set_state"]
-
-
-class TestNoSyncWhenV2Disabled:
-    """With FLOW_MACHINE_V2 off, arming a flag must not touch FlowMachine at all."""
-
     def test_arm_awaiting_skips_flow_machine_when_v2_off(self):
         svc = _make_svc()
 
@@ -116,15 +78,6 @@ class TestNoSyncWhenV2Disabled:
         svc.flow_machine.reset.assert_not_called()
         svc.flow_machine.set_state.assert_not_called()
         # No extra memory read beyond the write already performed.
-        svc.memory.get_user_memory.assert_not_called()
-
-    def test_arm_disambiguation_skips_flow_machine_when_v2_off(self):
-        svc = _make_svc()
-
-        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
-            svc._arm_disambiguation("u1", {"rows": [], "type": "delete"})
-
-        svc.flow_machine.reset.assert_not_called()
         svc.memory.get_user_memory.assert_not_called()
 
     def test_legacy_patch_still_written_when_v2_off(self):
@@ -140,10 +93,6 @@ class TestNoSyncWhenV2Disabled:
         assert patch_arg["awaiting_job_input"] is True
         assert patch_arg["awaiting_modify_field"] is False
 
-
-class TestEagerSyncExceptionSafety:
-    """A sync failure must never break the arm that triggered it."""
-
     def test_flow_machine_reset_exception_does_not_propagate(self):
         svc = _make_svc()
         svc.flow_machine.reset.side_effect = Exception("DB write failed")
@@ -155,19 +104,11 @@ class TestEagerSyncExceptionSafety:
         # The legacy patch (the actual fix this helper exists for) still landed.
         svc.memory.update_user_memory.assert_called_once()
 
-    def test_memory_read_exception_does_not_propagate(self):
-        svc = _make_svc()
-        svc.memory.get_user_memory.side_effect = Exception("connection lost")
 
-        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
-            svc._arm_disambiguation("u1", {"rows": [], "type": "delete"})
-
-        # update_user_memory (the write) was still called before the read failed.
-        svc.memory.update_user_memory.assert_called_once()
-
-
-class TestSyncFlowMachineNowDirectly:
-    """_sync_flow_machine_now in isolation."""
+class TestSyncFlowMachineNowIsNowANoOp:
+    """_sync_flow_machine_now in isolation -- with reconcile's last branch
+    (disambiguation) migrated away to a direct write, this always finds
+    nothing to sync now, regardless of what's in memory."""
 
     def test_noop_when_v2_disabled(self):
         svc = _make_svc()
@@ -175,10 +116,7 @@ class TestSyncFlowMachineNowDirectly:
             svc._sync_flow_machine_now("u1")
         svc.flow_machine.reset.assert_not_called()
 
-    def test_reconciles_using_fresh_memory_not_stale_snapshot(self):
-        """Must re-fetch memory AFTER the caller's write, not reuse a snapshot
-        from before the patch -- otherwise it would reconcile against
-        pre-arm state and set the WRONG flow (or none at all)."""
+    def test_finds_nothing_to_reconcile_even_with_legacy_keys_present(self):
         svc = _make_svc()
         pending = {"rows": [{"id": "a"}], "type": "delete"}
         svc.memory.get_user_memory.return_value = {"pending_disambiguation": pending}
@@ -187,5 +125,28 @@ class TestSyncFlowMachineNowDirectly:
             svc._sync_flow_machine_now("u1")
 
         svc.memory.get_user_memory.assert_called_once_with("u1")
+        svc.flow_machine.set_state.assert_not_called()
+
+
+class TestArmDisambiguationWritesDirectly:
+    """_arm_disambiguation (Phase 2.3) no longer goes through
+    _sync_flow_machine_now/reconcile at all -- it writes
+    flow_machine.set_state() directly. Full coverage lives in
+    tests/test_flow_disambiguation.py::TestArmDisambiguation; this is a
+    smoke test confirming it's independent of the (now-inert)
+    _sync_flow_machine_now path exercised by the rest of this file."""
+
+    def test_writes_flow_machine_state_directly_no_reset_call(self):
+        svc = _make_svc()
+        pending = {"rows": [{"id": "a"}, {"id": "b"}], "type": "delete"}
+
+        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
+            svc._arm_disambiguation("u1", pending)
+
+        # Unlike _arm_awaiting's reset-then-reconcile dance, the direct
+        # write needs no reset() first -- set_state() unconditionally
+        # overwrites whatever flow was previously active.
+        svc.flow_machine.reset.assert_not_called()
         svc.flow_machine.set_state.assert_called_once()
-        assert svc.flow_machine.set_state.call_args.args[1] == FLOW_DISAMBIGUATION
+        args = svc.flow_machine.set_state.call_args.args
+        assert args[1] == FLOW_DISAMBIGUATION

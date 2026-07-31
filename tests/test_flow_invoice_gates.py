@@ -65,22 +65,19 @@ class TestReconciliation:
         svc._reconcile_legacy_to_flow_machine("u1", {})
         svc.flow_machine.set_state.assert_not_called()
 
-    def test_disambiguation_still_reconciles_normally(self):
-        """pending_disambiguation is now the ONLY thing left with a
-        reconciliation branch at all (Phase 2.3) -- form_state's own branch
-        was deleted once both its arm sites (_show_smart_capture_
-        confirmation, _extract_and_confirm's missing-fields branch) started
-        writing flow_machine.set_state() directly. Confirms this module's
-        migration didn't touch the reconciliation mechanism itself, only
-        removed branches from it."""
+    def test_disambiguation_also_has_no_reconciliation_branch(self):
+        """Phase 2.3: DISAMBIGUATION was the 12th and last flow migrated --
+        its arm site (_arm_disambiguation) now writes
+        flow_machine.set_state() directly instead of relying on
+        reconciliation, so _reconcile_legacy_to_flow_machine has ZERO
+        branches left at all. Confirms this module's migration didn't touch
+        the reconciliation mechanism itself, only removed branches from it."""
         svc = _make_svc()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
         svc.memory.get_form_state.return_value = None
         pending = {"rows": [{"id": "a"}], "type": "delete"}
         svc._reconcile_legacy_to_flow_machine("u1", {"pending_disambiguation": pending})
-        from services.flow_machine import FLOW_DISAMBIGUATION
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_DISAMBIGUATION
+        svc.flow_machine.set_state.assert_not_called()
 
 
 class TestNoLegacyMirrorForTheseTwoFlows:

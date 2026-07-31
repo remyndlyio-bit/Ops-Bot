@@ -292,17 +292,38 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 | `answer_ledger` (`services/answer_ledger.py`) | Bot's memory of its own claims (question → scope → value), zero-LLM scope-question answering | ✅ TODO.md: "this one is fine, keep it." Already the intended replacement for `uscf_context`. |
 | `flow_v2` (`services/flow_machine.py`) | FlowMachine's own state: `{flow, context, started_at, stack}` | ✅ This IS the target architecture — everything above migrates INTO this. |
 
-### Progress update (Phase 2.3, in progress)
+### Progress update (Phase 2.3, complete)
 
-**11 of the 12 originally-`✅ Mirrored + owned` rows are now `✅✅ Deleted`**:
+**All 12 of the originally-`✅ Mirrored + owned` rows are now `✅✅ Deleted`**:
 `INVOICE_AWAIT_SEND_CONFIRM`, `BANK_DETAILS`, `NAME_CHANGE`, `LINK_ACCOUNT`,
 `INVOICE_NEED_POC_EMAIL`, `INVOICE_NEED_BILLING`, `INVOICE_NEED_POC_NAME`,
 `INVOICE_ADDRESS`, `INVOICE_NEED_JOB_DESCRIPTION`, `SMART_CAPTURE_NEED_DESCRIPTION`,
-`SMART_CAPTURE_CONFIRM_PENDING` — FlowMachine is their sole source of truth,
-no legacy flag or reconciliation branch left for any of them. The shared
-`_prompt()` helper (used by 6 of the invoice-readiness-gate checkpoints
-originally) now has exactly **one caller left**: `awaiting_invoice_poc_email`
-— still legacy, no migration needed yet.
+`SMART_CAPTURE_CONFIRM_PENDING`, `DISAMBIGUATION` — FlowMachine is their sole
+source of truth, no legacy flag or reconciliation branch left for any of
+them. `_reconcile_legacy_to_flow_machine` itself is now an empty no-op (kept
+as the mechanism for any future flow that wants the same "arm now, sync
+eagerly" pattern). The shared `_prompt()` helper (used by 6 of the
+invoice-readiness-gate checkpoints originally) now has exactly **one caller
+left**: `awaiting_invoice_poc_email` — still legacy, no migration needed yet.
+
+`DISAMBIGUATION` was the 12th and last migration. Its legacy mirror
+(`pending_disambiguation`) is payload data, not a routing-only boolean flag
+— it can't be deleted the way the other 11 flags' boolean mirrors were,
+since it carries the actual numbered row list. What *was* migrated: its one
+arm site, `_arm_disambiguation`, used to go through the same
+`_sync_flow_machine_now` → `_reconcile_legacy_to_flow_machine` eager-sync
+path `_arm_awaiting` uses; now it writes `flow_machine.set_state()`
+directly, matching every other migrated flow's arm site. With that done,
+`_reconcile_legacy_to_flow_machine`'s disambiguation branch — the very last
+branch left in that function — was deleted, leaving the function an empty
+no-op. The legacy read/dispatch block in `_process_request_impl`
+(`if user_mem.get("pending_disambiguation"): ...`) was deliberately **not**
+gated behind "v2 off" or deleted: `Disambiguation.handle_response`'s own
+docstring explains it's intentionally kept as the SIDE_QUESTION fallback
+path — when `dispatch_in_flow` returns `SHADOW_ONLY` for a scope-clarifying
+question, this legacy block's own heuristics are what let the message keep
+falling through to be answered elsewhere, instead of being misread as a
+numbered pick.
 
 `SMART_CAPTURE_CONFIRM_PENDING` was the first migration whose legacy
 "mirror" was never a boolean flag but `memory.get_form_state()` (a dict from
@@ -336,18 +357,21 @@ already makes the identical distinction, and `dispatch_in_flow`'s
 SIDE_QUESTION handling routes those messages correctly earlier in the
 cascade.
 
-**Remaining unmigrated (1 of 12)**: `DISAMBIGUATION`
-(`pending_disambiguation` — largest remaining blast radius, many read sites
-beyond the arm/reconcile pattern the other 11 followed).
+**Remaining unmigrated: none — all 12 of the originally-mirrored flows are
+now FlowMachine-only.**
 
-**Two pre-existing bugs surfaced during these migrations** (flagged
+**Three pre-existing bugs surfaced during these migrations** (flagged
 separately, not fixed as part of state-ownership changes):
 `task_ab7501b3` (main.py's poc_email arm site writes a memory shape
-`_handle_poc_email_response` never reads) and `task_1b10c22c`
+`_handle_poc_email_response` never reads), `task_1b10c22c`
 (`InvoiceNeedBilling`/`InvoiceNeedPocName`'s `on_cancel` passes the literal
 string `"skip"`, which isn't in their handlers' cancel-word set, so a
 CANCEL-classified message ends up saving "skip" as real data instead of
-aborting the invoice).
+aborting the invoice), and `task_e16e90fb` (`_handle_pending_reminder`'s
+`_active_subflow` check never accounted for `SMART_CAPTURE_CONFIRM_PENDING`
+or an active form_state at all — a pending reminder can hijack a reply
+meant for the "Save this job? (Yes/Edit)" confirmation card; pre-existing,
+not introduced by this migration).
 
 ### Reading this table for Phase 2.2–2.4
 
@@ -356,7 +380,7 @@ aborting the invoice).
   are Phase 2.2's easiest targets: flip the arm-site to call
   `flow_machine.set_state()` directly, keep a legacy-flag shim for
   as-yet-unported readers, delete the shim once every reader is moved.
-  **(11 of these 12 are now done — see "Progress update" above.)**
+  **(All 12 of these are now done — see "Progress update" above.)**
 - **6 rows are `❌ Legacy-only`** — no FlowMachine flow exists yet. Four are
   simple single-prompt gates (`awaiting_invoice_month`,
   `awaiting_compound_response`, `awaiting_modify_field`,

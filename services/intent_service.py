@@ -765,13 +765,15 @@ class IntentService:
             logger.warning(f"[FLOW_STATE] form cancel failed (non-fatal): {e}")
 
     def _reconcile_legacy_to_flow_machine(self, user_id: str, user_mem: Dict) -> None:
-        """Once per message: if FlowMachine is IDLE but a legacy awaiting_* flag
-        (or a form_state) was armed on the previous turn, sync FlowMachine to
-        match. This lets dispatch_in_flow take over without modifying every
-        legacy arm site. No-op when FlowMachine is already tracking a flow."""
-        from services.flow_machine import (
-            FLOW_IDLE, FLOW_DISAMBIGUATION,
-        )
+        """Once per message: if FlowMachine is IDLE but a legacy awaiting_*
+        flag was armed on the previous turn, sync FlowMachine to match. All
+        12 originally-mirrored flows are migrated off their legacy mirror
+        now (Phase 2.3) -- every arm site writes flow_machine.set_state()
+        directly, so this function is effectively a dead no-op today, kept
+        as the reconciliation mechanism in case a future flow needs the
+        same "arm now, sync eagerly" pattern before its own direct write is
+        wired up."""
+        from services.flow_machine import FLOW_IDLE
         # Already tracking — nothing to reconcile.
         if self.flow_machine.current_flow(user_id) != FLOW_IDLE:
             return
@@ -808,20 +810,11 @@ class IntentService:
         # flow_machine.set_state() directly via
         # _arm_smart_capture_description_v2().
 
-        # WP-3: numbered "which one did you mean?" / bulk-delete-confirm
-        # prompt. Checked LAST (mirrors the legacy precedence at the
-        # pending_disambiguation call site: an active invoice-email flow
-        # wins over a stale disambiguation, and both those branches above
-        # already `return` before reaching here, so the ordering is
-        # preserved for free — no separate precedence check needed).
-        pending = user_mem.get("pending_disambiguation")
-        if pending:
-            rows = pending.get("rows") or []
-            self.flow_machine.set_state(
-                user_id, FLOW_DISAMBIGUATION,
-                {"count": len(rows), "type": pending.get("type", "delete")},
-            )
-            return
+        # NOTE: DISAMBIGUATION has no reconciliation branch here (Phase
+        # 2.3) — its one arm site, _arm_disambiguation, writes
+        # flow_machine.set_state() directly, so FlowMachine is already
+        # correct at arm time. This was the 12th and last flow migrated off
+        # a legacy mirror.
 
         # WP-3 slice 2: originally three simple, self-contained, single-reply-
         # completes flows (mutually exclusive in practice — a user is never
@@ -1099,15 +1092,25 @@ class IntentService:
         precedence over a freshly-shown disambiguation list, or vice versa,
         the same mutual-exclusivity gap _arm_awaiting was built to close.
 
-        Phase 2.2 (TODO.md): same eager FlowMachine sync as _arm_awaiting —
-        see that docstring.
+        Phase 2.3: DISAMBIGUATION is FlowMachine-only now (no reconciliation
+        branch left to reconcile FROM), so this writes flow_machine.set_state()
+        directly instead of going through _sync_flow_machine_now/reconcile.
         """
         patch = {k: False for k in self._AWAITING_FLAGS}
         patch["pending_disambiguation"] = disambiguation
         if extra:
             patch.update(extra)
         self.memory.update_user_memory(user_id, patch)
-        self._sync_flow_machine_now(user_id)
+        if _flow_machine_v2_enabled_for(user_id):
+            try:
+                from services.flow_machine import FLOW_DISAMBIGUATION
+                rows = disambiguation.get("rows") or []
+                self.flow_machine.set_state(
+                    user_id, FLOW_DISAMBIGUATION,
+                    {"count": len(rows), "type": disambiguation.get("type", "delete")},
+                )
+            except Exception as e:
+                logger.warning(f"[FLOW_V2] eager sync after disambiguation arm failed (non-fatal): {e}")
 
     @staticmethod
     def _fuzzy_match_client_name(client_name: str, db_clients: List[str], message: str) -> str:
@@ -3487,11 +3490,12 @@ class IntentService:
         # awaiting_send_confirmation, awaiting_bank_details,
         # awaiting_name_change, awaiting_link_id, awaiting_poc_email,
         # awaiting_client_billing, awaiting_poc_name,
-        # awaiting_invoice_address, awaiting_job_description, and
-        # awaiting_job_input removed (Phase 2.3) — FlowMachine is the sole
-        # source of truth for those ten flows now, checked explicitly below
-        # instead of via the legacy flag list.
-        _active_subflow = bool(_mem.get("pending_disambiguation")) or any(
+        # awaiting_invoice_address, awaiting_job_description,
+        # awaiting_job_input, and pending_disambiguation removed (Phase
+        # 2.3) — FlowMachine is the sole source of truth for those eleven
+        # flows now, checked explicitly below instead of via the legacy
+        # flag list.
+        _active_subflow = any(
             _mem.get(k) for k in (
                 "awaiting_invoice_month",
                 "awaiting_modify_field", "awaiting_compound_response",
@@ -3504,14 +3508,14 @@ class IntentService:
                 FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
                 FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
                 FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
-                FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
+                FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
             )
             _active_subflow = self.flow_machine.current_flow(user_id) in (
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
                 FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
                 FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
                 FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
-                FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
+                FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
             )
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
@@ -4143,14 +4147,14 @@ class IntentService:
                     # awaiting_name_change, awaiting_link_id,
                     # awaiting_poc_email, awaiting_client_billing,
                     # awaiting_poc_name, awaiting_invoice_address,
-                    # awaiting_job_description, and awaiting_job_input
-                    # removed (Phase 2.3): FlowMachine's own current_flow
-                    # check (the `if _v2_in_owned_flow` above this else)
-                    # already routes those flows correctly — nothing left to
-                    # list here for them.
+                    # awaiting_job_description, awaiting_job_input, and
+                    # pending_disambiguation removed (Phase 2.3): FlowMachine's
+                    # own current_flow check (the `if _v2_in_owned_flow` above
+                    # this else) already routes those flows correctly —
+                    # nothing left to list here for them.
                     _idle_blockers = (
                         "awaiting_invoice_month",
-                        "awaiting_modify_field", "pending_disambiguation",
+                        "awaiting_modify_field",
                         "awaiting_invoice_poc_email",
                     )
                     _is_idle = (

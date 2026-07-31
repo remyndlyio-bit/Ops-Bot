@@ -76,70 +76,79 @@ class TestFlowMachineRegistration:
 
 
 class TestReconciliation:
-    """_reconcile_legacy_to_flow_machine's new branch: sync FlowMachine to
-    DISAMBIGUATION when pending_disambiguation is armed but v2 is still IDLE."""
+    """Phase 2.3: DISAMBIGUATION -- the 12th and last flow -- has no
+    reconciliation branch left at all. Its one arm site, _arm_disambiguation,
+    now writes flow_machine.set_state() directly (see TestArmDisambiguation
+    below), so _reconcile_legacy_to_flow_machine has ZERO branches left --
+    every one of the 12 originally-mirrored flows now syncs eagerly at its
+    own arm site."""
 
-    def test_reconciles_delete_type_pending(self):
+    def test_no_op_regardless_of_input(self):
         svc = _make_svc()
         user_mem = {"pending_disambiguation": DELETE_PENDING}
         svc.flow_machine = MagicMock()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
         svc.memory.get_form_state.return_value = None
         svc._reconcile_legacy_to_flow_machine("u1", user_mem)
-        svc.flow_machine.set_state.assert_called_once()
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_DISAMBIGUATION
-        assert args[2]["count"] == 2
-        assert args[2]["type"] == "delete"
-
-    def test_reconciles_modify_type_pending(self):
-        svc = _make_svc()
-        user_mem = {"pending_disambiguation": MODIFY_PENDING}
-        svc.flow_machine = MagicMock()
-        svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = None
-        svc._reconcile_legacy_to_flow_machine("u1", user_mem)
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[2]["type"] == "modify"
-
-    def test_no_pending_disambiguation_no_op(self):
-        svc = _make_svc()
-        svc.flow_machine = MagicMock()
-        svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = None
-        svc._reconcile_legacy_to_flow_machine("u1", {})
         svc.flow_machine.set_state.assert_not_called()
 
-    def test_form_state_no_longer_consulted_by_reconcile(self):
-        """Phase 2.3: form_state's own reconciliation branch was deleted --
-        both its arm sites (_show_smart_capture_confirmation and
-        _extract_and_confirm's missing-fields branch) now write
-        flow_machine.set_state() directly the same moment they call
-        memory.start_form(), so there's no turn-lag left to reconcile.
-        pending_disambiguation is the ONLY remaining reconcile branch, so a
-        truthy get_form_state() no longer has any special precedence over
-        it -- reconcile doesn't even read get_form_state() anymore. (The
-        analogous precedence for awaiting_poc_email/INVOICE_NEED_POC_EMAIL
-        was likewise moved out of reconciliation in an earlier Phase 2.3
-        pass -- see _process_request_impl's _invoice_await_active check.)"""
-        svc = _make_svc()
-        user_mem = {"pending_disambiguation": DELETE_PENDING}
-        svc.flow_machine = MagicMock()
-        svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = {"step": "confirm"}
-        svc._reconcile_legacy_to_flow_machine("u1", user_mem)
-        svc.memory.get_form_state.assert_not_called()
-        from services.flow_machine import FLOW_DISAMBIGUATION
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_DISAMBIGUATION
-
-    def test_already_tracking_a_flow_is_a_no_op(self):
+    def test_already_tracking_a_flow_is_still_a_no_op(self):
         svc = _make_svc()
         user_mem = {"pending_disambiguation": DELETE_PENDING}
         svc.flow_machine = MagicMock()
         svc.flow_machine.current_flow.return_value = "SOME_OTHER_FLOW"
         svc._reconcile_legacy_to_flow_machine("u1", user_mem)
         svc.flow_machine.set_state.assert_not_called()
+
+
+class TestArmDisambiguation:
+    """_arm_disambiguation writes flow_machine.set_state() directly (Phase
+    2.3) instead of going through _sync_flow_machine_now/reconcile -- the
+    reconcile mapping it used to rely on no longer has a branch for this
+    flow at all."""
+
+    def test_delete_type_writes_flow_machine_state(self):
+        svc = _make_svc()
+        svc.flow_machine = MagicMock()
+        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
+            svc._arm_disambiguation("u1", DELETE_PENDING)
+        svc.flow_machine.set_state.assert_called_once()
+        args = svc.flow_machine.set_state.call_args.args
+        assert args[1] == FLOW_DISAMBIGUATION
+        assert args[2]["count"] == 2
+        assert args[2]["type"] == "delete"
+
+    def test_modify_type_writes_flow_machine_state(self):
+        svc = _make_svc()
+        svc.flow_machine = MagicMock()
+        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
+            svc._arm_disambiguation("u1", MODIFY_PENDING)
+        args = svc.flow_machine.set_state.call_args.args
+        assert args[2]["type"] == "modify"
+
+    def test_skips_flow_machine_when_v2_off(self):
+        svc = _make_svc()
+        svc.flow_machine = MagicMock()
+        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
+            svc._arm_disambiguation("u1", DELETE_PENDING)
+        svc.flow_machine.set_state.assert_not_called()
+
+    def test_legacy_patch_still_written_when_v2_off(self):
+        svc = _make_svc()
+        svc.flow_machine = MagicMock()
+        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
+            svc._arm_disambiguation("u1", DELETE_PENDING)
+        svc.memory.update_user_memory.assert_called_once()
+        patch_arg = svc.memory.update_user_memory.call_args.args[1]
+        assert patch_arg["pending_disambiguation"] == DELETE_PENDING
+
+    def test_flow_machine_exception_does_not_propagate(self):
+        svc = _make_svc()
+        svc.flow_machine = MagicMock()
+        svc.flow_machine.set_state.side_effect = Exception("boom")
+        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True):
+            svc._arm_disambiguation("u1", DELETE_PENDING)  # must not raise
+        svc.memory.update_user_memory.assert_called_once()
 
 
 class TestTTLStalenessClearsDisambiguation:
