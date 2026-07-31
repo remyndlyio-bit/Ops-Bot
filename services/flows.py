@@ -32,6 +32,7 @@ from services.flow_machine import (
     FLOW_INVOICE_ADDRESS,
     FLOW_INVOICE_NEED_JOB_DESCRIPTION,
     FLOW_INVOICE_READINESS_POC_EMAIL,
+    FLOW_INVOICE_NEED_MONTH,
 )
 from utils.logger import logger
 
@@ -656,6 +657,68 @@ class InvoiceReadinessPocEmail(Flow):
         return result
 
 
+# ── INVOICE_NEED_MONTH ───────────────────────────────────────────────────
+
+class InvoiceNeedMonth(Flow):
+    """Bot asked which month an invoice request should cover (no month was
+    given in the original request). Delegates to the existing
+    _handle_invoice_month_reply, which: extracts a month name from free
+    text (re-prompting via its own operation "invoice_month_retry" if none
+    is found — no cancel handling of its own, since ANY text is read as an
+    attempted month); on success, reconstructs a synthetic message and
+    re-enters process_request to actually generate/send the invoice."""
+
+    name = FLOW_INVOICE_NEED_MONTH
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(
+            f"[FLOW_V2] InvoiceNeedMonth.handle_response user={user_id} "
+            f"ctx_client={context.get('client_name')!r}"
+        )
+        user_mem = intent_service.memory.get_user_memory(user_id) or {}
+        result = intent_service._handle_invoice_month_reply(
+            user_id, message, user_mem, user_id, [],
+        )
+        # _handle_invoice_month_reply signals "stay in the flow, let the
+        # user retry" via its returned operation name (it re-arms
+        # FlowMachine itself on that path via _arm_invoice_month_v2) --
+        # same check-after pattern as BankDetails/InvoiceReadinessPocEmail.
+        # On success it re-enters process_request via a synthetic message,
+        # which may land in ANY other flow (or none) -- reset unconditionally
+        # unless the retry path re-armed THIS SAME flow.
+        if result.get("operation") != "invoice_month_retry":
+            try:
+                intent_service.flow_machine.reset(user_id)
+            except Exception:
+                pass
+        return result
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        client = context.get("client_name")
+        if client:
+            return f"\n\nStill need the month for {client}'s invoice (or 'cancel' to stop)."
+        return "\n\nStill waiting on that month (or 'cancel' to stop)."
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        # No delegate to call -- _handle_invoice_month_reply has no cancel
+        # branch of its own (any text is read as an attempted month), so a
+        # genuine CANCEL verdict is handled entirely here.
+        intent_service.memory.update_user_memory(user_id, {
+            "pending_invoice_client": None,
+            "pending_invoice_send_email": None,
+        })
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        response = "No problem — invoice cancelled. Nothing was generated."
+        intent_service._store_conversation(user_id, message, response)
+        return {"operation": "invoice_cancelled", "response": response,
+                "trigger_invoice": False, "invoice_data": {}}
+
+
 # Registry — dispatcher uses this to look up the right Flow by name.
 REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_AWAIT_SEND_CONFIRM:     InvoiceAwaitSendConfirm(),
@@ -663,6 +726,7 @@ REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_NEED_POC_NAME:          InvoiceNeedPocName(),
     FLOW_INVOICE_NEED_POC_EMAIL:         InvoiceNeedPocEmail(),
     FLOW_INVOICE_READINESS_POC_EMAIL:    InvoiceReadinessPocEmail(),
+    FLOW_INVOICE_NEED_MONTH:             InvoiceNeedMonth(),
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION: SmartCaptureNeedDescription(),
     FLOW_SMART_CAPTURE_CONFIRM_PENDING:  SmartCaptureConfirmPending(),
     FLOW_DISAMBIGUATION:                 Disambiguation(),

@@ -251,7 +251,7 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 | ~~`awaiting_link_id`~~ | — | `LINK_ACCOUNT` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Uncovered a real pre-existing bug during migration: `LinkAccount.handle_response`'s docstring claimed "always completes in one turn," but `_process_link_id` has an invalid-ID retry path that only "worked" pre-migration via the legacy flag re-arming + reconciliation-on-next-message side door. Fixed to check the returned operation directly (`link_invalid_id`), same pattern as `BankDetails`. |
 | ~~`awaiting_invoice_address`~~ | `pending_invoice`, `pending_address_user_id` | `INVOICE_ADDRESS` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Two arm sites (standalone command + gate checkpoint), both via `_arm_invoice_address_v2`. |
 | ~~`awaiting_job_description`~~ | `pending_jobdesc_row_id`, `pending_jobdesc_user_id` | `INVOICE_NEED_JOB_DESCRIPTION` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. `_arm_job_description_v2` replaces the last-but-one `_prompt()` caller. |
-| `awaiting_invoice_month` | — (reads `pending_invoice_client` / conversation) | *none* | ❌ Legacy-only. Not in `_reconcile_*`; a user mid-this-flow reads as FlowMachine-IDLE, so `dispatch_idle` (not `dispatch_in_flow`) handles their next message. |
+| ~~`awaiting_invoice_month`~~ | `pending_invoice_client`, `pending_invoice_send_email` | `INVOICE_NEED_MONTH` | ✅✅ **Deleted.** Three arm sites (direct "send invoice for X" with no month, the planner-clarification redirect, and the retry branch). `_handle_invoice_month_reply` has no cancel branch of its own — CANCEL is handled entirely in `InvoiceNeedMonth.on_cancel`. Migrating this deleted the "Universal intent-shift guard" (`_PENDING_STATES` + surface-shape gate + `is_new_query_not_response` escape hatch) outright — this was its last member. |
 | `awaiting_compound_response` | `suggested_next_action` | *none* | ❌ Legacy-only. "Yes" after "You also mentioned: …" follow-up offer. Single-shot, would be a trivial Flow class. |
 | `awaiting_modify_field` | `modify_row_id` (in flag's own `extra` dict) | *none* | ❌ Legacy-only. Mid-modify field-value prompt (distinct from `DISAMBIGUATION`'s row-pick). Also has a `_cancelled` companion (`awaiting_modify_field_cancelled`) tracking a declined confirm, itself never migrated. |
 | ~~`awaiting_invoice_poc_email`~~ | `pending_poc_email_client`, `pending_poc_email_user_id`, `pending_poc_email_row_ids` | `INVOICE_READINESS_POC_EMAIL` | ✅✅ **Deleted.** Easy to confuse with the earlier-migrated `awaiting_poc_email`/`INVOICE_NEED_POC_EMAIL` — this is the PRE-generation readiness gate; that one is the SEND-time flow. Was the shared `_prompt()` helper's LAST caller — with `_arm_invoice_readiness_poc_email_v2` replacing it, `_prompt()` itself was deleted entirely. Retry loop on invalid email, same shape as `BANK_DETAILS`. |
@@ -375,6 +375,31 @@ one saves and resumes the invoice flow. Deliberately named distinctly from
 deliver an already-generated PDF) — this one runs BEFORE generation, asking
 for an email on the job rows themselves.
 
+### Post-2.3: INVOICE_NEED_MONTH (formerly `awaiting_invoice_month`)
+
+Next of the six `❌ Legacy-only` rows to get its own FlowMachine flow.
+THREE arm sites: the direct "send invoice for X" path with no month given,
+the planner-clarification redirect (a query that leaked an invoice ask into
+the query pipeline), and `_handle_invoice_month_reply`'s own
+unrecognised-month retry branch — added an `"invoice_month_retry"` operation
+name (replacing a bare `"ACTION_TRIGGER"`) so `InvoiceNeedMonth.handle_response`
+can tell "stay in this flow" apart from "the reconstructed synthetic message
+re-entered `process_request` and landed somewhere else entirely" (which
+needs an unconditional reset, unlike the retry case). Unlike most gates,
+the handler has no cancel branch of its own — any text is read as an
+attempted month — so CANCEL is handled entirely in `InvoiceNeedMonth.on_cancel`
+instead of delegating to it.
+
+Migrating this let the entire "Universal intent-shift guard" be deleted
+outright: `_PENDING_STATES` + a surface-shape gate + an
+`is_new_query_not_response` escape-hatch LLM call, all built to protect
+exactly the single-question legacy flags that by this point had all
+already moved to FlowMachine except `awaiting_invoice_month` — its last
+member. The identical "question-shaped → don't treat as a reply"
+distinction is made by the v2 classifier's per-flow `flow_compatible`
+guidance now, reached via `dispatch_in_flow` before this legacy block was
+ever consulted.
+
 **Three pre-existing bugs surfaced during these migrations** (flagged
 separately, not fixed as part of state-ownership changes):
 `task_ab7501b3` (main.py's poc_email arm site writes a memory shape
@@ -396,16 +421,19 @@ not introduced by this migration).
   `flow_machine.set_state()` directly, keep a legacy-flag shim for
   as-yet-unported readers, delete the shim once every reader is moved.
   **(All 12 of these are now done — see "Progress update" above.)**
-- **5 rows are `❌ Legacy-only`** — no FlowMachine flow exists yet.
-  `awaiting_invoice_poc_email` (the 6th) was migrated straight into
-  FlowMachine v2 (`INVOICE_READINESS_POC_EMAIL`) — it was the last caller
-  of the shared invoice-readiness-gate `_prompt()` helper, so migrating it
-  let that helper be deleted outright. Three simple single-prompt gates
-  remain (`awaiting_invoice_month`, `awaiting_compound_response`,
-  `awaiting_modify_field`) that fit the exact pattern WP-3 slices 2–3
-  already proved out; the other two (`pending_value_fork`,
-  `pending_reminder_offer`) are short-lived same-turn caches, not blocking
-  gates, and may not need a Flow class at all.
+- **4 rows are `❌ Legacy-only`** — no FlowMachine flow exists yet.
+  `awaiting_invoice_poc_email` and `awaiting_invoice_month` were migrated
+  straight into FlowMachine v2 (`INVOICE_READINESS_POC_EMAIL`,
+  `INVOICE_NEED_MONTH`) — the former was the last caller of the shared
+  invoice-readiness-gate `_prompt()` helper (migrating it let that helper
+  be deleted outright); the latter was the last member of the "Universal
+  intent-shift guard" (migrating it let THAT whole mechanism be deleted
+  outright too). Two simple single-prompt gates remain
+  (`awaiting_compound_response`, `awaiting_modify_field`) that fit the
+  exact pattern WP-3 slices 2–3 already proved out; the other two
+  (`pending_value_fork`, `pending_reminder_offer`) are short-lived
+  same-turn caches, not blocking gates, and may not need a Flow class at
+  all.
 - **`get_pending()` (audit reminders) stays outside FlowMachine by design** —
   cron-armed, not `process_request`-armed.
 - **`last_intent` / `uscf_context` are the two rows Phase 2.4 should retire

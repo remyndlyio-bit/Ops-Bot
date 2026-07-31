@@ -48,15 +48,14 @@ def _make_svc():
 
 
 class TestArmAwaitingEagerSyncIsNowANoOp:
-    """Phase 2.3: every remaining _AWAITING_FLAGS entry
-    (awaiting_compound_response, awaiting_invoice_month,
-    awaiting_invoice_poc_email, awaiting_modify_field) has no FlowMachine
-    mapping in _reconcile_legacy_to_flow_machine -- the flags that used to
-    (bank details, name change, link account, smart-capture description,
-    etc.) are all FlowMachine-only now and arm via their own _arm_*_v2()
-    helpers instead of _arm_awaiting. So _sync_flow_machine_now still fires
-    (unconditionally, when v2 is on) but reconcile finds nothing to sync to
-    and set_state() is never called."""
+    """Every remaining _AWAITING_FLAGS entry (awaiting_compound_response,
+    awaiting_modify_field) has no FlowMachine mapping in
+    _reconcile_legacy_to_flow_machine -- the flags that used to (bank
+    details, name change, link account, smart-capture description, invoice
+    month, etc.) are all FlowMachine-only now and arm via their own
+    _arm_*_v2() helpers instead of _arm_awaiting. So _sync_flow_machine_now
+    still fires (unconditionally, when v2 is on) but reconcile finds
+    nothing to sync to and set_state() is never called."""
 
     def test_arm_awaiting_resets_then_finds_nothing_to_reconcile(self):
         svc = _make_svc()

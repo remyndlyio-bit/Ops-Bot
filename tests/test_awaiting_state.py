@@ -89,21 +89,21 @@ class TestStuckFlowNoLongerSwallowsUnrelatedInput:
         # (flow_machine.set_state) is BANK_DETAILS' source of truth now.
         # This test still verifies the piece that matters: arming it must
         # not leave a stale unrelated legacy flag (like
-        # awaiting_invoice_month) lingering, via _arm_bank_details_v2's
+        # awaiting_modify_field) lingering, via _arm_bank_details_v2's
         # defensive clear of the whole _AWAITING_FLAGS set.
         svc = _make_svc()
         svc.flow_machine = MagicMock()
         # Simulate: an unrelated single-question prompt is stuck (already
         # armed from an earlier, unfinished turn).
         svc.memory.get_user_memory.return_value = {
-            "awaiting_invoice_month": True,
+            "awaiting_modify_field": True,
         }
         svc._prompt_bank_details_format("u1", "update my bank details")
 
         from services.flow_machine import FLOW_BANK_DETAILS
         svc.flow_machine.set_state.assert_called_once_with("u1", FLOW_BANK_DETAILS, {})
         patch = svc.memory.update_user_memory.call_args.args[1]
-        assert patch["awaiting_invoice_month"] is False
+        assert patch["awaiting_modify_field"] is False
 
 
 class TestPendingDisambiguationMutualExclusivity:
@@ -185,16 +185,20 @@ class TestIntentShiftGuardCommandShapeGate:
     record to update", and bank-details replies triggered a 41-row
     disambiguation list.
 
-    The fix gates the AI call behind a cheap surface-shape check (a "?" or
-    a command verb at the start of the message) -- mirroring the existing
-    _RESPONSE_TOKENS short-circuit right above it. A message that doesn't
-    even look command-shaped never reaches the classifier, so it can't be
-    misclassified."""
+    The original fix gated the AI call behind a cheap surface-shape check
+    (a "?" or a command verb at the start of the message). That whole
+    mechanism (the _PENDING_STATES dict + surface-shape gate +
+    is_new_query_not_response escape hatch) is now DELETED --
+    awaiting_invoice_month was its last member (every other flag it once
+    covered was already migrated to FlowMachine in earlier passes). The
+    identical "question-shaped -> don't treat as a reply" distinction is
+    made by the v2 classifier's per-flow flow_compatible guidance now
+    (services/classifier.py), reached via dispatch_in_flow before legacy
+    code is ever consulted."""
 
     def test_poc_email_reply_never_asks_the_ai_classifier(self):
         svc = _make_onboarded_svc()
         svc.memory.get_user_memory.return_value = {
-            "awaiting_invoice_poc_email": True,
             "pending_poc_email_client": "Star Studios",
             "pending_poc_email_row_ids": [1],
         }
@@ -202,37 +206,18 @@ class TestIntentShiftGuardCommandShapeGate:
         svc.process_request("u1", "rahul@starstudios.com")
         svc.gemini.is_new_query_not_response.assert_not_called()
 
-    def test_unrecognisable_reply_never_asks_the_ai_classifier(self):
-        # Rotated onto awaiting_invoice_month (Phase 2.2, post-2.3) --
-        # awaiting_invoice_poc_email is FlowMachine-only now and no longer
-        # in _PENDING_STATES, so it can't exercise this command-shape gate
-        # at all anymore.
-        svc = _make_onboarded_svc()
-        svc.memory.get_user_memory.return_value = {
-            "awaiting_invoice_month": True,
-            "pending_invoice_client": "DriveOne",
-        }
-        result = svc.process_request("u1", "not sure honestly")
-        svc.gemini.is_new_query_not_response.assert_not_called()
-        assert "couldn't detect a month" in result["response"]
-
     def test_bank_details_reply_never_asks_the_ai_classifier(self):
         svc = _make_onboarded_svc()
         svc.memory.get_user_memory.return_value = {"awaiting_bank_details": True}
         svc.process_request("u1", "Account: 12345")
         svc.gemini.is_new_query_not_response.assert_not_called()
 
-    def test_genuine_new_query_while_awaiting_still_reaches_the_ai_classifier(self):
-        """Over-correction guard: a message that DOES look command-shaped
-        ("show my jobs") must still go through the AI check so the intent
-        shift can legitimately clear a stale awaiting state.
-
-        Uses awaiting_invoice_month as the example flag -- the only one
-        left in _PENDING_STATES (every other single-question gate Phase
-        2.2/2.3 moved to FlowMachine-only, where the classifier's own
-        flow_compatible guidance makes this same distinction instead)."""
-        svc = _make_onboarded_svc()
-        svc.gemini.is_new_query_not_response.return_value = True
-        svc.memory.get_user_memory.return_value = {"awaiting_invoice_month": True}
-        svc.process_request("u1", "show my jobs")
-        svc.gemini.is_new_query_not_response.assert_called_once()
+    def test_intent_shift_guard_mechanism_is_gone(self):
+        """No boolean legacy flag has a _PENDING_STATES-style entry left at
+        all -- confirms the whole guard block (and its is_new_query_not_
+        response escape hatch) was deleted, not just emptied."""
+        import inspect
+        from services.intent_service import IntentService
+        src = inspect.getsource(IntentService._process_request_impl)
+        assert "_PENDING_STATES = {" not in src
+        assert "_COMMAND_LIKE_STARTS" not in src

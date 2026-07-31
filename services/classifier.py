@@ -218,6 +218,14 @@ def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Di
             "  - SIDE_QUESTION: a genuinely unrelated question is SIDE_QUESTION, never\n"
             "    FLOW_RESPONSE.\n"
         ),
+        "INVOICE_NEED_MONTH": (
+            "  - The bot asked WHICH MONTH an invoice request should cover (no month was\n"
+            "    given in the original request).\n"
+            "  - FLOW_RESPONSE: any text naming a month (e.g. 'March', 'last month', 'Feb 2025').\n"
+            "  - CANCEL: 'cancel', 'stop', 'abort', 'nevermind'.\n"
+            "  - SIDE_QUESTION: a genuinely unrelated question is SIDE_QUESTION, never\n"
+            "    FLOW_RESPONSE.\n"
+        ),
     }.get(current_flow, "")
     return (
         "\n\nACTIVE FLOW (the bot just asked a question and is waiting):\n"

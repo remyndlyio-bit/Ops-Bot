@@ -1010,6 +1010,23 @@ class IntentService:
         patch["pending_invoice"] = pending_invoice
         self.memory.update_user_memory(user_id, patch)
 
+    def _arm_invoice_month_v2(self, user_id: str, client_name: Optional[str],
+                               send_email: bool) -> None:
+        """Arm INVOICE_NEED_MONTH (FlowMachine-only, no legacy flag). THREE
+        arm sites — the direct "send invoice for X" path with no month
+        given, the planner-clarification redirect (a query that leaked an
+        invoice ask into the query pipeline), and
+        _handle_invoice_month_reply's own unrecognised-month retry branch."""
+        from services.flow_machine import FLOW_INVOICE_NEED_MONTH
+        self.flow_machine.set_state(
+            user_id, FLOW_INVOICE_NEED_MONTH, {"client_name": client_name},
+        )
+        patch = {k: False for k in self._AWAITING_FLAGS}
+        patch["pending_disambiguation"] = None
+        patch["pending_invoice_client"] = client_name
+        patch["pending_invoice_send_email"] = send_email
+        self.memory.update_user_memory(user_id, patch)
+
     def _arm_smart_capture_description_v2(self, user_id: str) -> None:
         """Arm SMART_CAPTURE_NEED_DESCRIPTION (Phase 2.3: FlowMachine-only,
         no legacy flag). THREE arm sites: _start_smart_capture (the flow's
@@ -1057,14 +1074,14 @@ class IntentService:
         # awaiting_name_change, awaiting_link_id, awaiting_poc_email,
         # awaiting_client_billing, awaiting_poc_name,
         # awaiting_invoice_address, awaiting_job_description,
-        # awaiting_job_input, and awaiting_invoice_poc_email removed —
-        # FlowMachine is now the sole source of truth for
-        # INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE,
-        # LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING,
-        # INVOICE_NEED_POC_NAME, INVOICE_ADDRESS,
-        # INVOICE_NEED_JOB_DESCRIPTION, SMART_CAPTURE_NEED_DESCRIPTION, and
-        # INVOICE_READINESS_POC_EMAIL.
-        "awaiting_compound_response", "awaiting_invoice_month",
+        # awaiting_job_input, awaiting_invoice_poc_email, and
+        # awaiting_invoice_month removed — FlowMachine is now the sole
+        # source of truth for INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS,
+        # NAME_CHANGE, LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL,
+        # INVOICE_NEED_BILLING, INVOICE_NEED_POC_NAME, INVOICE_ADDRESS,
+        # INVOICE_NEED_JOB_DESCRIPTION, SMART_CAPTURE_NEED_DESCRIPTION,
+        # INVOICE_READINESS_POC_EMAIL, and INVOICE_NEED_MONTH.
+        "awaiting_compound_response",
         "awaiting_modify_field",
     )
 
@@ -2507,7 +2524,6 @@ class IntentService:
         client_name = user_mem.get("pending_invoice_client", "")
         send_email = user_mem.get("pending_invoice_send_email", False)
         self.memory.update_user_memory(user_id, {
-            "awaiting_invoice_month": False,
             "pending_invoice_client": None,
             "pending_invoice_send_email": None,
         })
@@ -2531,12 +2547,9 @@ class IntentService:
         if not month_num:
             response = f"I couldn't detect a month from your reply. Please say something like: 'March' or 'March 2025'."
             self._store_conversation(user_id, message, response)
-            # Re-set awaiting state
-            self._arm_awaiting(user_id, "awaiting_invoice_month", {
-                "pending_invoice_client": client_name,
-                "pending_invoice_send_email": send_email,
-            })
-            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            # Re-arm the flow so the next reply is still read as the month.
+            self._arm_invoice_month_v2(user_id, client_name, send_email)
+            return {"operation": "invoice_month_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
         # Extract year from user reply (e.g. "April 2025", "March 2024")
         # Look for 4-digit year in the message
@@ -3512,13 +3525,12 @@ class IntentService:
         # awaiting_name_change, awaiting_link_id, awaiting_poc_email,
         # awaiting_client_billing, awaiting_poc_name,
         # awaiting_invoice_address, awaiting_job_description,
-        # awaiting_job_input, awaiting_invoice_poc_email, and
-        # pending_disambiguation removed — FlowMachine is the sole source
-        # of truth for those twelve flows now, checked explicitly below
-        # instead of via the legacy flag list.
+        # awaiting_job_input, awaiting_invoice_poc_email,
+        # awaiting_invoice_month, and pending_disambiguation removed —
+        # FlowMachine is the sole source of truth for those thirteen flows
+        # now, checked explicitly below instead of via the legacy flag list.
         _active_subflow = any(
             _mem.get(k) for k in (
-                "awaiting_invoice_month",
                 "awaiting_modify_field", "awaiting_compound_response",
             )
         )
@@ -3529,7 +3541,7 @@ class IntentService:
                 FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
                 FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
                 FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
-                FLOW_INVOICE_READINESS_POC_EMAIL,
+                FLOW_INVOICE_READINESS_POC_EMAIL, FLOW_INVOICE_NEED_MONTH,
             )
             _active_subflow = self.flow_machine.current_flow(user_id) in (
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
@@ -3537,7 +3549,7 @@ class IntentService:
                 FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
                 FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
                 FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
-                FLOW_INVOICE_READINESS_POC_EMAIL,
+                FLOW_INVOICE_READINESS_POC_EMAIL, FLOW_INVOICE_NEED_MONTH,
             )
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
@@ -4170,13 +4182,12 @@ class IntentService:
                     # awaiting_poc_email, awaiting_client_billing,
                     # awaiting_poc_name, awaiting_invoice_address,
                     # awaiting_job_description, awaiting_job_input,
-                    # awaiting_invoice_poc_email, and pending_disambiguation
-                    # removed: FlowMachine's own current_flow check (the `if
-                    # _v2_in_owned_flow` above this else) already routes
-                    # those flows correctly — nothing left to list here for
-                    # them.
+                    # awaiting_invoice_poc_email, awaiting_invoice_month, and
+                    # pending_disambiguation removed: FlowMachine's own
+                    # current_flow check (the `if _v2_in_owned_flow` above
+                    # this else) already routes those flows correctly —
+                    # nothing left to list here for them.
                     _idle_blockers = (
-                        "awaiting_invoice_month",
                         "awaiting_modify_field",
                     )
                     _is_idle = (
@@ -4373,74 +4384,24 @@ class IntentService:
             # the cascade) routes those messages correctly with a
             # resume_nudge instead of silently consuming them as job input.
 
-            # Universal intent-shift guard: if the bot is in any single-question awaiting state
-            # and the user's message looks like a brand-new query, clear the pending state and
-            # continue with the new request instead of silently treating it as a (wrong) answer.
-            # awaiting_send_confirmation, awaiting_name_change,
-            # awaiting_poc_email, awaiting_client_billing,
-            # awaiting_poc_name, and awaiting_invoice_poc_email removed —
-            # the classifier's own flow_compatible guidance for those flows
-            # (services/classifier.py's per-flow block) covers this now;
-            # this dict only needs to describe states with no v2 equivalent.
-            _PENDING_STATES = {
-                "awaiting_invoice_month": "the month name for a pending invoice (e.g. 'March')",
-            }
-            _active_pending = [k for k in _PENDING_STATES if user_mem.get(k)]
-            if _active_pending:
-                # Short-circuit: well-known response tokens are NEVER a new query.
-                # This guards against AI overreach (e.g. classifying "skip" — which is
-                # literally what we asked the user to type — as a fresh command).
-                _RESPONSE_TOKENS = {
-                    "skip", "cancel", "yes", "y", "yeah", "yep", "yup", "yes please",
-                    "no", "n", "nope", "nah", "no thanks", "not now", "later",
-                    "ok", "okay", "sure", "go ahead", "do it", "confirm", "send it",
-                    "don't send", "dont send",
-                }
-                _msg_stripped = message.strip().lower().rstrip(".!?")
-                _is_response_token = _msg_stripped in _RESPONSE_TOKENS
-                # Surface-shape gate: only bother asking the AI classifier when the
-                # message actually LOOKS like a command (a "?" or a query/command
-                # verb up front). Without this, a raw answer that happens to read
-                # oddly to the classifier -- an email address, "Account: 12345",
-                # a malformed email -- gets misclassified as a new query, the
-                # pending state is cleared, and the reply falls all the way through
-                # to the generic SQL pipeline (seen live as POC-email replies
-                # landing in "I couldn't find a matching record to update" and
-                # bank-details replies landing in a 41-row disambiguation list).
-                _COMMAND_LIKE_STARTS = (
-                    "who ", "what ", "when ", "where ", "how ", "why ", "which ",
-                    "show ", "list ", "find ", "tell ", "give ", "fetch ", "get me ",
-                    "do you ", "can you ", "are you ", "is there ",
-                    "delete ", "remove ", "update ", "modify ", "change ", "mark ",
-                    "generate invoice", "send invoice", "add ", "create ",
-                )
-                _looks_command_shaped = (
-                    "?" in message
-                    or any(_msg_stripped.startswith(s) for s in _COMMAND_LIKE_STARTS)
-                )
-                if _is_response_token:
-                    logger.info(f"[INTENT_SHIFT] '{_msg_stripped}' is a response token — keeping pending state {_active_pending}")
-                elif not _looks_command_shaped:
-                    logger.info(f"[INTENT_SHIFT] '{_msg_stripped[:50]}' doesn't look command-shaped — keeping pending state {_active_pending} without asking the AI classifier")
-                else:
-                    ctx_desc = "; ".join(_PENDING_STATES[k] for k in _active_pending)
-                    if self.gemini.is_new_query_not_response(message, ctx_desc):
-                        logger.info(f"[INTENT_SHIFT] Clearing pending states {_active_pending} — user typed a new query")
-                        _clear_patch = {k: False for k in _active_pending}
-                        _clear_patch.update({
-                            "pending_send_invoice": None,
-                            "pending_invoice_client": None,
-                            "pending_poc_email_client": None,
-                            "pending_poc_name_client": None,
-                        })
-                        self.memory.update_user_memory(user_id, _clear_patch)
-                        user_mem = self.memory.get_user_memory(user_id)  # refresh after clear
+            # NOTE: the "Universal intent-shift guard" that used to live here
+            # (a _PENDING_STATES dict + surface-shape gate + is_new_query_
+            # not_response escape hatch) is gone — awaiting_invoice_month was
+            # its last member; every other legacy flag it once covered
+            # (awaiting_send_confirmation, awaiting_name_change,
+            # awaiting_poc_email, awaiting_client_billing, awaiting_poc_name,
+            # awaiting_invoice_poc_email) was already removed in earlier
+            # passes. The identical "question-shaped -> don't treat as a
+            # reply" distinction is made by the v2 classifier's per-flow
+            # guidance now (services/classifier.py), and dispatch_in_flow's
+            # SIDE_QUESTION handling routes those messages correctly earlier
+            # in the cascade.
 
-            # 0b1.4. Check if user is providing the month for a pending invoice
-            if user_mem.get("awaiting_invoice_month"):
-                logger.info(f"[ROUTE] awaiting_invoice_month claimed message: {message[:60]!r}")
-                note_route("awaiting_invoice_month")
-                return self._handle_invoice_month_reply(user_id, message, user_mem, data_user_id, conversation_history)
+            # 0b1.4. (removed) — INVOICE_NEED_MONTH replies are now owned
+            # exclusively by dispatch_in_flow / flows.py's InvoiceNeedMonth
+            # (FLOW_RESPONSE / CANCEL), reached earlier in this function via
+            # the v2 in-flow block above. No legacy awaiting_invoice_month
+            # flag exists to check here.
 
             # 0b1.5. (removed, Phase 2.3) — POC-email replies are now owned
             # exclusively by dispatch_in_flow / flows.py's
@@ -5189,11 +5150,8 @@ class IntentService:
                             self._save_last_intent(user_id, operation=op_name, client_name=client_name,
                                                    entity="invoice",
                                                    pending_clarification="month")
-                            # Set awaiting state so the next reply routes to invoice month handler
-                            self._arm_awaiting(user_id, "awaiting_invoice_month", {
-                                "pending_invoice_client": client_name,
-                                "pending_invoice_send_email": send_email,
-                            })
+                            # Arm FlowMachine so the next reply routes to the invoice month handler
+                            self._arm_invoice_month_v2(user_id, client_name, send_email)
                             self._store_conversation(user_id, message, response)
                             return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -5637,10 +5595,7 @@ class IntentService:
                     else:
                         response = f"I see you want an invoice for {_clar_client}. Which month? For example: 'Invoice for {_clar_client} for March'."
                     self._save_last_intent(user_id, operation="invoice", client_name=_clar_client, entity="invoice", pending_clarification="month")
-                    self._arm_awaiting(user_id, "awaiting_invoice_month", {
-                        "pending_invoice_client": _clar_client,
-                        "pending_invoice_send_email": False,
-                    })
+                    self._arm_invoice_month_v2(user_id, _clar_client, False)
                     self._store_conversation(user_id, message, response)
                     return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
 

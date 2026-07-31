@@ -76,6 +76,10 @@ FLOW_INVOICE_NEED_JOB_DESCRIPTION     = "INVOICE_NEED_JOB_DESCRIPTION"
 # generation, asking for an email on the job rows themselves so reminders
 # can later reach the client.
 FLOW_INVOICE_READINESS_POC_EMAIL      = "INVOICE_READINESS_POC_EMAIL"
+# Bot asked "which month?" for an invoice request with no month specified
+# (either the direct "send invoice for X" path, or the planner-clarification
+# redirect). Formerly awaiting_invoice_month.
+FLOW_INVOICE_NEED_MONTH                = "INVOICE_NEED_MONTH"
 
 KNOWN_FLOWS = {
     FLOW_IDLE,
@@ -92,6 +96,7 @@ KNOWN_FLOWS = {
     FLOW_INVOICE_ADDRESS,
     FLOW_INVOICE_NEED_JOB_DESCRIPTION,
     FLOW_INVOICE_READINESS_POC_EMAIL,
+    FLOW_INVOICE_NEED_MONTH,
 }
 
 # Idle TTL: 30 min of silence in a flow → auto-reset to IDLE.
