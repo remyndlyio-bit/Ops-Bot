@@ -169,41 +169,48 @@ and independently revertible.
 ## Phase 2 — One conversation state object (~1 week, can overlap Phase 1)
 
 **Goal:** replace the ~10 parallel state stores with the FlowMachine as the single
-source of truth. The stores today (all in user memory unless noted):
-1. 14 `awaiting_*` booleans (`_AWAITING_FLAGS` in intent_service)
+source of truth. The stores as of Phase 2.2/2.3 kickoff (all in user memory unless noted):
+1. ~~14 `awaiting_*` booleans (`_AWAITING_FLAGS` in intent_service)~~ — **migrated.**
+   `_AWAITING_FLAGS` is an empty tuple now; every flag has its own FlowMachine flow.
 2. `pending_*` payload keys (`pending_send_invoice`, `pending_invoice`,
-   `pending_poc_email_client`, `pending_billing_client`, …)
-3. `pending_disambiguation` dict
-4. form state (`memory.get_form_state` — smart capture)
-5. audit-reminder pending list (`get_pending` in the reminder module)
-6. `last_intent` (drives `_reconstruct_message`)
-7. `uscf_context` (last rows / last SQL)
-8. `last_generated_invoice` cache
+   `pending_poc_email_client`, `pending_billing_client`, …) — kept as FlowMachine
+   *context* payload, not deleted (they're data, not routing flags).
+3. ~~`pending_disambiguation` dict~~ — **migrated** to `DISAMBIGUATION` (payload stays).
+4. form state (`memory.get_form_state` — smart capture) — **migrated** to
+   `SMART_CAPTURE_CONFIRM_PENDING`; both arm sites write FlowMachine directly now.
+5. audit-reminder pending list (`get_pending` in the reminder module) — stays outside
+   FlowMachine by design (cron-armed, not `process_request`-armed).
+6. `last_intent` (drives `_reconstruct_message`) — Phase 2.4 candidate for outright
+   retirement (overlaps the classifier's `resolved_query`), not ported.
+7. `uscf_context` (last rows / last SQL) — Phase 2.4 candidate for outright retirement
+   (overlaps `answer_ledger`), not ported.
+8. `last_generated_invoice` cache — untouched, Phase 2.4's TTL-unification territory.
 9. `answer_ledger` (WP-1 — this one is fine, keep it)
-10. FlowMachine v2 state (`services/flow_machine.py`)
+10. FlowMachine v2 state (`services/flow_machine.py`) — now the sole source of truth
+    for every conversational-state flow; see `services/FLOW_MACHINE_V2.md`.
 
-### 2.1 Write the state inventory doc
-- Before touching code: make a table in `services/FLOW_MACHINE_V2.md` mapping every
-  legacy store → the FlowMachine flow + context keys that replace it. Get it reviewed.
-  (Half of the migration bugs will come from a `pending_*` key someone forgot.)
+### 2.1 Write the state inventory doc ✅ DONE
+- Table lives in `services/FLOW_MACHINE_V2.md`, mapping every legacy store → the
+  FlowMachine flow + context keys that replace it.
 
-### 2.2 Make FlowMachine the writer, legacy flags the mirror
-- Today it's backwards: legacy code writes `awaiting_*` flags and
-  `_reconcile_legacy_to_flow_machine()` copies them INTO the FlowMachine each turn.
-- Flip one flow at a time: change the arm-site to call
-  `flow_machine.set_state(user_id, FLOW_X, context)` directly, and have a small shim
-  write the legacy flag FROM the FlowMachine state (so unported readers keep working).
-  Start with the invoice-email flow (most bug-prone historically).
-- The existing `_arm_awaiting` helper is the perfect choke point: reimplement its body
-  to write FlowMachine-first, mirror flags second. Same for `_arm_disambiguation`.
+### 2.2 Make FlowMachine the writer, legacy flags the mirror ✅ DONE
+### 2.3 Port readers, then delete the mirror ✅ DONE
 
-### 2.3 Port readers, then delete the mirror
-- Grep for each `user_mem.get("awaiting_` read; replace with
-  `flow_machine.current_flow(user_id) == FLOW_X` + context reads.
-- When a flag has zero readers left, delete it from the mirror AND from
-  `_AWAITING_FLAGS`. The static-analysis tests in `tests/test_awaiting_state.py` will
-  need updating as flags disappear — that's expected; update them to assert the flag no
-  longer exists anywhere instead.
+All 12 originally-mirrored flows (`INVOICE_AWAIT_SEND_CONFIRM`, `BANK_DETAILS`,
+`NAME_CHANGE`, `LINK_ACCOUNT`, `INVOICE_NEED_POC_EMAIL`, `INVOICE_NEED_BILLING`,
+`INVOICE_NEED_POC_NAME`, `INVOICE_ADDRESS`, `INVOICE_NEED_JOB_DESCRIPTION`,
+`SMART_CAPTURE_NEED_DESCRIPTION`, `SMART_CAPTURE_CONFIRM_PENDING`, `DISAMBIGUATION`)
+AND all 6 originally-legacy-only flows (`INVOICE_READINESS_POC_EMAIL`,
+`INVOICE_NEED_MONTH`, `COMPOUND_RESPONSE`, `MODIFY_FIELD`, plus the two
+short-lived same-turn caches `pending_value_fork`/`pending_reminder_offer`
+left as-is by design — not blocking gates, no Flow class needed) are now
+FlowMachine-owned. `_AWAITING_FLAGS` is an empty tuple — no boolean legacy
+conversational-state flag remains anywhere in the codebase. See
+`services/FLOW_MACHINE_V2.md`'s "Progress update" and "Post-2.3" sections for
+the full per-flow writeup, including two real pre-existing bugs the
+migration surfaced and fixed (`LINK_ACCOUNT`'s and `SMART_CAPTURE_CONFIRM_PENDING`'s
+check-after retry-loop bug) and three flagged-but-not-fixed out-of-scope bugs
+(`task_ab7501b3`, `task_1b10c22c`, `task_e16e90fb`).
 
 ### 2.4 One TTL for everything
 - FlowMachine already has a TTL check (grep `TTL` in intent_service around the v2
