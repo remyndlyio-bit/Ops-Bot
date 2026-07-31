@@ -201,16 +201,29 @@ def send_invoice_email(
 
     if not poc_email:
         logger.warning("Invoice generated but client email (poc_email) is missing.")
-        # Store state so user can provide POC email
+        # Store state so user can provide POC email.
+        # Phase 2.3: FlowMachine is the sole source of truth for
+        # INVOICE_NEED_POC_EMAIL (no legacy awaiting_poc_email flag left).
+        # NOTE (pre-existing gap, tracked separately): this site writes
+        # poc_email_client/poc_email_pdf_path/poc_email_month/poc_email_year
+        # instead of pending_send_invoice, which is the ONLY thing
+        # _handle_poc_email_response actually reads — a reply to THIS
+        # specific prompt likely resolves client_name empty. Preserving
+        # that exact pre-existing shape/behavior here; not fixing it as
+        # part of this state-ownership migration.
         try:
             if user_id_str and hasattr(intent_service, 'memory'):
                 intent_service.memory.update_user_memory(user_id_str, {
-                    "awaiting_poc_email": True,
                     "poc_email_client": client_name,
                     "poc_email_pdf_path": file_path,
                     "poc_email_month": month,
                     "poc_email_year": year,
                 })
+                from services.flow_machine import FLOW_INVOICE_NEED_POC_EMAIL
+                intent_service.flow_machine.set_state(
+                    user_id_str, FLOW_INVOICE_NEED_POC_EMAIL,
+                    {"client_name": client_name},
+                )
         except Exception as mem_err:
             logger.warning(f"Failed to store POC email state: {mem_err}")
 

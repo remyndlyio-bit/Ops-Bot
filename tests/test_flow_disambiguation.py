@@ -110,24 +110,33 @@ class TestReconciliation:
         svc._reconcile_legacy_to_flow_machine("u1", {})
         svc.flow_machine.set_state.assert_not_called()
 
-    def test_active_invoice_email_flow_wins_over_disambiguation(self):
+    def test_active_still_legacy_flow_wins_over_disambiguation(self):
         """Mirrors the legacy precedence at the pending_disambiguation call
-        site: an active invoice-email flow takes priority over a
+        site: an active still-legacy flow takes priority over a
         (potentially stale) disambiguation. Ordering in the reconcile
-        if-chain gives this for free -- this test locks that down."""
+        if-chain gives this for free -- this test locks that down.
+
+        Uses awaiting_client_billing as the example (checked before
+        disambiguation in reconcile's own order). The equivalent precedence
+        for awaiting_poc_email specifically moved out of reconciliation
+        entirely in Phase 2.3 -- INVOICE_NEED_POC_EMAIL is FlowMachine-only
+        now (no reconcile branch), and its own invoice-email-flow-beats-
+        stale-disambiguation guarantee lives in _process_request_impl's
+        _invoice_await_active check instead (services/intent_service.py,
+        checks flow_machine.current_flow directly)."""
         svc = _make_svc()
         user_mem = {
-            "awaiting_poc_email": True,
-            "pending_send_invoice": {"client_name": "Nike"},
+            "awaiting_client_billing": True,
+            "pending_billing_client": "Nike",
             "pending_disambiguation": DELETE_PENDING,
         }
         svc.flow_machine = MagicMock()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
         svc.memory.get_form_state.return_value = None
         svc._reconcile_legacy_to_flow_machine("u1", user_mem)
-        from services.flow_machine import FLOW_INVOICE_NEED_POC_EMAIL
+        from services.flow_machine import FLOW_INVOICE_NEED_BILLING
         args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_INVOICE_NEED_POC_EMAIL
+        assert args[1] == FLOW_INVOICE_NEED_BILLING
 
     def test_already_tracking_a_flow_is_a_no_op(self):
         svc = _make_svc()

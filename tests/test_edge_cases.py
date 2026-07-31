@@ -1123,10 +1123,13 @@ class TestReminderDoesNotHijack:
 
     PENDING = [{"id": "j1", "client_name": "Nike", "bill_no": "INV-1", "fees": 25000}]
 
-    def _run(self, message, mem):
+    def _run(self, message, mem, flow_machine_flow=None):
         import services.intent_service as isv
+        from services.flow_machine import FLOW_IDLE
         svc = _make_svc()
         svc.memory.get_user_memory.return_value = mem
+        svc.flow_machine = MagicMock()
+        svc.flow_machine.current_flow.return_value = flow_machine_flow or FLOW_IDLE
         with patch("services.intent_service.get_pending", return_value=self.PENDING), \
              patch("services.intent_service.clear_pending"):
             return svc._handle_pending_reminder("u1", message)
@@ -1156,8 +1159,13 @@ class TestReminderDoesNotHijack:
         assert self._run("1", {"awaiting_job_input": True}) is None
 
     def test_skip_yields_during_subflow(self):
-        """'skip'/'cancel' mid-flow must not be stolen to clear reminders."""
-        assert self._run("skip", {"awaiting_poc_email": True}) is None
+        """'skip'/'cancel' mid-flow must not be stolen to clear reminders.
+
+        awaiting_poc_email removed (Phase 2.3) — INVOICE_NEED_POC_EMAIL is
+        FlowMachine-only now, simulated via flow_machine.current_flow
+        instead of the legacy dict."""
+        from services.flow_machine import FLOW_INVOICE_NEED_POC_EMAIL
+        assert self._run("skip", {}, flow_machine_flow=FLOW_INVOICE_NEED_POC_EMAIL) is None
 
     def test_skip_clears_when_idle(self):
         """When no sub-flow is active, 'skip' clears the reminders as before."""

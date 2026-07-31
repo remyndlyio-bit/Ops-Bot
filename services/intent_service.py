@@ -82,7 +82,11 @@ _ALL_AWAITING_CLEAR_PATCH = {
     "pending_poc_email_client":   None,
     "pending_poc_email_user_id":  None,
     "pending_poc_email_row_ids":  None,
-    "awaiting_poc_email":         False,
+    # awaiting_poc_email removed (Phase 2.3) — FlowMachine is now the sole
+    # source of truth for INVOICE_NEED_POC_EMAIL. poc_email_client stays —
+    # it's payload for main.py's own arm site (see task_ab7501b3 for the
+    # pre-existing gap where that site's payload shape isn't actually read
+    # by _handle_poc_email_response).
     "poc_email_client":           None,
     "awaiting_job_input":         False,
     "pending_disambiguation":     None,
@@ -767,7 +771,7 @@ class IntentService:
         from services.flow_machine import (
             FLOW_IDLE,
             FLOW_INVOICE_NEED_BILLING,
-            FLOW_INVOICE_NEED_POC_NAME, FLOW_INVOICE_NEED_POC_EMAIL,
+            FLOW_INVOICE_NEED_POC_NAME,
             FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
             FLOW_DISAMBIGUATION,
             FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
@@ -806,16 +810,11 @@ class IntentService:
             )
             return
 
-        if user_mem.get("awaiting_poc_email"):
-            pend = user_mem.get("pending_send_invoice") or {}
-            self.flow_machine.set_state(
-                user_id, FLOW_INVOICE_NEED_POC_EMAIL,
-                {
-                    "client_name": (user_mem.get("poc_email_client")
-                                    or pend.get("client_name")),
-                },
-            )
-            return
+        # NOTE: INVOICE_NEED_POC_EMAIL has no reconciliation branch here
+        # (Phase 2.3) — all its arm sites (three inside
+        # _process_request_impl via _arm_poc_email_v2, plus main.py's own
+        # site) write flow_machine.set_state() directly, so FlowMachine is
+        # already correct at arm time.
 
         if user_mem.get("awaiting_job_input"):
             self.flow_machine.set_state(
@@ -922,6 +921,32 @@ class IntentService:
         patch["pending_invoice"] = pending_invoice
         self.memory.update_user_memory(user_id, patch)
 
+    def _arm_poc_email_v2(self, user_id: str, client_name: Optional[str],
+                           pending_send_invoice: dict) -> None:
+        """Arm INVOICE_NEED_POC_EMAIL (Phase 2.3: FlowMachine-only, no
+        legacy flag). Called from all three of this flow's arm sites inside
+        _process_request_impl (all three write pending_send_invoice —
+        main.py's process_and_send_invoice uses a different, separate key
+        shape for its own equivalent prompt, tracked as a known pre-existing
+        gap, see task_ab7501b3).
+
+        client_name feeds FlowMachine's context — used only for the
+        resume_nudge's display text; _handle_poc_email_response itself
+        reads pending_send_invoice from memory directly, not from
+        FlowMachine's context, so this is display-only, not functional.
+
+        Still clears every OTHER legacy awaiting_* flag defensively — same
+        mutual-exclusivity guarantee _arm_awaiting provides for flows not
+        yet migrated."""
+        from services.flow_machine import FLOW_INVOICE_NEED_POC_EMAIL
+        self.flow_machine.set_state(
+            user_id, FLOW_INVOICE_NEED_POC_EMAIL, {"client_name": client_name},
+        )
+        patch = {k: False for k in self._AWAITING_FLAGS}
+        patch["pending_disambiguation"] = None
+        patch["pending_send_invoice"] = pending_send_invoice
+        self.memory.update_user_memory(user_id, patch)
+
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
         """Store user message and bot response in conversation history."""
         self.memory.add_message(user_id, "user", user_message)
@@ -951,12 +976,12 @@ class IntentService:
     # reliably clear all the others — see _arm_awaiting below.
     _AWAITING_FLAGS = (
         # awaiting_send_confirmation, awaiting_bank_details,
-        # awaiting_name_change, and awaiting_link_id removed (Phase 2.3) —
-        # FlowMachine is now the sole source of truth for
-        # INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE, and
-        # LINK_ACCOUNT.
+        # awaiting_name_change, awaiting_link_id, and awaiting_poc_email
+        # removed (Phase 2.3) — FlowMachine is now the sole source of truth
+        # for INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE,
+        # LINK_ACCOUNT, and INVOICE_NEED_POC_EMAIL.
         "awaiting_job_input", "awaiting_compound_response", "awaiting_invoice_month",
-        "awaiting_poc_email", "awaiting_invoice_address", "awaiting_client_billing",
+        "awaiting_invoice_address", "awaiting_client_billing",
         "awaiting_poc_name", "awaiting_invoice_poc_email", "awaiting_job_description",
         "awaiting_modify_field",
     )
@@ -2538,13 +2563,17 @@ class IntentService:
             return {"operation": "send_declined", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
     def _handle_poc_email_response(self, user_id: str, message: str) -> Dict:
-        """Handle user providing a client POC email after invoice generation."""
+        """Handle user providing a client POC email after invoice generation.
+
+        Phase 2.3: no legacy awaiting_poc_email flag exists to clear or
+        re-arm anymore — flows.py's InvoiceNeedPocEmail decides whether to
+        stay in the flow purely from the returned operation name
+        ("poc_email_retry"), not a memory re-read; no re-arm needed on
+        retry either since FlowMachine's current_flow was never reset for
+        this turn."""
         import re
         user_mem = self.memory.get_user_memory(user_id)
         pending = user_mem.get("pending_send_invoice", {})
-
-        # Clear awaiting state
-        self.memory.update_user_memory(user_id, {"awaiting_poc_email": False})
 
         # Allow cancel
         if message.strip().lower() in ("cancel", "skip", "no", "nevermind"):
@@ -2557,7 +2586,6 @@ class IntentService:
         email = message.strip()
         if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
             # Not a valid email - re-prompt
-            self._arm_awaiting(user_id, "awaiting_poc_email")
             response = "That doesn't look like a valid email. Please send the client's email address (e.g. client@agency.com) or type 'skip'."
             self._store_conversation(user_id, message, response)
             return {"operation": "poc_email_retry", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -3369,12 +3397,13 @@ class IntentService:
         # all, which the user can send once the sub-flow is done.)
         _mem = self.memory.get_user_memory(user_id)
         # awaiting_send_confirmation, awaiting_bank_details,
-        # awaiting_name_change, and awaiting_link_id removed (Phase 2.3) —
-        # FlowMachine is the sole source of truth for those four flows now,
-        # checked explicitly below instead of via the legacy flag list.
+        # awaiting_name_change, awaiting_link_id, and awaiting_poc_email
+        # removed (Phase 2.3) — FlowMachine is the sole source of truth for
+        # those five flows now, checked explicitly below instead of via the
+        # legacy flag list.
         _active_subflow = bool(_mem.get("pending_disambiguation")) or any(
             _mem.get(k) for k in (
-                "awaiting_job_input", "awaiting_poc_email", "awaiting_invoice_month",
+                "awaiting_job_input", "awaiting_invoice_month",
                 "awaiting_client_billing", "awaiting_poc_name",
                 "awaiting_modify_field", "awaiting_compound_response",
                 "awaiting_invoice_address", "awaiting_job_description",
@@ -3384,11 +3413,11 @@ class IntentService:
         if not _active_subflow:
             from services.flow_machine import (
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
-                FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
+                FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
             )
             _active_subflow = self.flow_machine.current_flow(user_id) in (
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
-                FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT,
+                FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
             )
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
@@ -4017,13 +4046,13 @@ class IntentService:
                     # IDLE path — also gated on no legacy awaiting flag set so
                     # mid-migration flows still use legacy handlers.
                     # awaiting_send_confirmation, awaiting_bank_details,
-                    # awaiting_name_change, and awaiting_link_id removed
-                    # (Phase 2.3): FlowMachine's own current_flow check (the
-                    # `if _v2_in_owned_flow` above this else) already routes
-                    # those flows correctly — nothing left to list here for
-                    # them.
+                    # awaiting_name_change, awaiting_link_id, and
+                    # awaiting_poc_email removed (Phase 2.3): FlowMachine's
+                    # own current_flow check (the `if _v2_in_owned_flow`
+                    # above this else) already routes those flows
+                    # correctly — nothing left to list here for them.
                     _idle_blockers = (
-                        "awaiting_job_input", "awaiting_invoice_month", "awaiting_poc_email",
+                        "awaiting_job_input", "awaiting_invoice_month",
                         "awaiting_client_billing",
                         "awaiting_poc_name",
                         "awaiting_modify_field", "pending_disambiguation",
@@ -4093,12 +4122,15 @@ class IntentService:
             # confirmation) takes precedence over a STALE disambiguation. Otherwise a
             # reply meant for the email prompt (an address, "yes"/"no") gets swallowed
             # by a leftover delete/select disambiguation. Drop the stale state here.
-            # awaiting_send_confirmation removed (Phase 2.3) — checked via
-            # FlowMachine's current_flow instead of a legacy flag.
-            from services.flow_machine import FLOW_INVOICE_AWAIT_SEND_CONFIRM as _FLOW_SEND_CONFIRM
-            _invoice_await_active = (
-                user_mem.get("awaiting_poc_email")
-                or self.flow_machine.current_flow(user_id) == _FLOW_SEND_CONFIRM
+            # awaiting_send_confirmation and awaiting_poc_email removed
+            # (Phase 2.3) — checked via FlowMachine's current_flow instead
+            # of legacy flags.
+            from services.flow_machine import (
+                FLOW_INVOICE_AWAIT_SEND_CONFIRM as _FLOW_SEND_CONFIRM,
+                FLOW_INVOICE_NEED_POC_EMAIL as _FLOW_POC_EMAIL,
+            )
+            _invoice_await_active = self.flow_machine.current_flow(user_id) in (
+                _FLOW_SEND_CONFIRM, _FLOW_POC_EMAIL,
             )
             if _invoice_await_active and user_mem.get("pending_disambiguation"):
                 logger.info("[DISAMBIG] Invoice-email flow active — clearing stale disambiguation so the email reply is handled correctly")
@@ -4245,14 +4277,13 @@ class IntentService:
             # Universal intent-shift guard: if the bot is in any single-question awaiting state
             # and the user's message looks like a brand-new query, clear the pending state and
             # continue with the new request instead of silently treating it as a (wrong) answer.
-            # awaiting_send_confirmation and awaiting_name_change removed
-            # (Phase 2.3) — the classifier's own flow_compatible guidance
-            # for those flows (services/classifier.py's per-flow block)
-            # covers this now; this dict only needs to describe states with
-            # no v2 equivalent.
+            # awaiting_send_confirmation, awaiting_name_change, and
+            # awaiting_poc_email removed (Phase 2.3) — the classifier's own
+            # flow_compatible guidance for those flows (services/
+            # classifier.py's per-flow block) covers this now; this dict
+            # only needs to describe states with no v2 equivalent.
             _PENDING_STATES = {
                 "awaiting_invoice_month": "the month name for a pending invoice (e.g. 'March')",
-                "awaiting_poc_email":     "a client POC email address",
                 "awaiting_client_billing":   "client billing details (name, address, GST)",
                 "awaiting_poc_name":         "a POC name to address the invoice to",
                 "awaiting_invoice_poc_email": "the client's email address for the invoice",
@@ -4314,11 +4345,11 @@ class IntentService:
                 note_route("awaiting_invoice_month")
                 return self._handle_invoice_month_reply(user_id, message, user_mem, data_user_id, conversation_history)
 
-            # 0b1.5. Check if user is providing a client POC email
-            if user_mem.get("awaiting_poc_email"):
-                logger.info(f"[ROUTE] awaiting_poc_email claimed message: {message[:60]!r}")
-                note_route("awaiting_poc_email")
-                return self._handle_poc_email_response(user_id, message)
+            # 0b1.5. (removed, Phase 2.3) — POC-email replies are now owned
+            # exclusively by dispatch_in_flow / flows.py's
+            # InvoiceNeedPocEmail (FLOW_RESPONSE / CANCEL), reached earlier
+            # in this function via the v2 in-flow block above. No legacy
+            # awaiting_poc_email flag exists to check here.
 
             # 0b1.6. (removed, Phase 2.3) — invoice-send confirmation is now
             # owned exclusively by dispatch_in_flow / flows.py's
@@ -4588,13 +4619,11 @@ class IntentService:
                         f"Please provide the client's email so I can send it:\n"
                         f"Example: client@agency.com"
                     )
-                    self._arm_awaiting(user_id, "awaiting_poc_email", {
-                        "pending_send_invoice": {
-                            "client_name": cached_client,
-                            "month": cached_month,
-                            "year": cached_year,
-                            "row_ids": cached_row_ids,
-                        },
+                    self._arm_poc_email_v2(user_id, cached_client, {
+                        "client_name": cached_client,
+                        "month": cached_month,
+                        "year": cached_year,
+                        "row_ids": cached_row_ids,
                     })
                     self._store_conversation(user_id, message, response)
                     return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -5254,15 +5283,13 @@ class IntentService:
                                 f"Please provide the client's email so I can send it:\n"
                                 f"Example: client@agency.com"
                             )
-                            self._arm_awaiting(user_id, "awaiting_poc_email", {
-                                "pending_send_invoice": {
-                                    "client_name": display_client,
-                                    "month": month_display,
-                                    "year": year_val,
-                                    "row_ids": row_ids,
-                                    "poc_name": _inv_poc_name,
-                                    "invoicer_name": _inv_invoicer_name,
-                                },
+                            self._arm_poc_email_v2(user_id, display_client, {
+                                "client_name": display_client,
+                                "month": month_display,
+                                "year": year_val,
+                                "row_ids": row_ids,
+                                "poc_name": _inv_poc_name,
+                                "invoicer_name": _inv_invoicer_name,
                             })
                             self._store_conversation(user_id, message, response)
                             return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -5300,15 +5327,13 @@ class IntentService:
                         # Just acknowledge so the user has feedback while it's prepared.
                         response = _ack
                     else:
-                        self._arm_awaiting(user_id, "awaiting_poc_email", {
-                            "pending_send_invoice": {
-                                "client_name": display_client,
-                                "month": month_display,
-                                "year": year_val,
-                                "row_ids": _row_ids,
-                                "poc_name": _inv_poc_name,
-                                "invoicer_name": _inv_invoicer_name,
-                            },
+                        self._arm_poc_email_v2(user_id, display_client, {
+                            "client_name": display_client,
+                            "month": month_display,
+                            "year": year_val,
+                            "row_ids": _row_ids,
+                            "poc_name": _inv_poc_name,
+                            "invoicer_name": _inv_invoicer_name,
                         })
                         response = (
                             f"{_ack}\n\n"

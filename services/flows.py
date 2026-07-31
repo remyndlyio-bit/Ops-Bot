@@ -206,15 +206,15 @@ class InvoiceNeedPocEmail(Flow):
             f"ctx_client={context.get('client_name')!r}"
         )
         result = intent_service._handle_poc_email_response(user_id, message)
-        # NOTE: _handle_poc_email_response may RE-ARM awaiting_poc_email when
-        # the email format is invalid. In that case the legacy flag is still
-        # True, so we keep FlowMachine in this same state too (don't reset).
-        try:
-            user_mem_after = intent_service.memory.get_user_memory(user_id) or {}
-            if not user_mem_after.get("awaiting_poc_email"):
+        # Phase 2.3: no legacy awaiting_poc_email flag exists anymore —
+        # _handle_poc_email_response signals "stay in the flow, let the
+        # user retry" via its returned operation ("poc_email_retry")
+        # instead, same pattern as BankDetails / LinkAccount.
+        if result.get("operation") != "poc_email_retry":
+            try:
                 intent_service.flow_machine.reset(user_id)
-        except Exception:
-            pass
+            except Exception:
+                pass
         return result
 
     def resume_nudge(self, context):
