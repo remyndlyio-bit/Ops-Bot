@@ -226,6 +226,18 @@ def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Di
             "  - SIDE_QUESTION: a genuinely unrelated question is SIDE_QUESTION, never\n"
             "    FLOW_RESPONSE.\n"
         ),
+        "COMPOUND_RESPONSE": (
+            "  - The bot just asked 'You also mentioned: X. Want me to do that now? (Yes / No)'\n"
+            "    after saving a job that had a second, compound action mentioned in the same\n"
+            "    message (e.g. 'add a job for Nike AND send the invoice').\n"
+            "  - FLOW_RESPONSE: 'yes'/'yep'/'sure'/'ok' (optionally with a qualifier after it,\n"
+            "    e.g. 'yes, include bill numbers') or 'no'/'nope'/'skip'/'not now'/'later'.\n"
+            "  - CANCEL: treat the same as a 'no' answer -- there's nothing else pending to\n"
+            "    cancel once this is declined.\n"
+            "  - NEW_FLOW: a message that reads as a completely different, unrelated request\n"
+            "    (not a yes/no answer) is NEW_FLOW, not FLOW_RESPONSE -- the bot should drop\n"
+            "    this offer and just handle the new request.\n"
+        ),
     }.get(current_flow, "")
     return (
         "\n\nACTIVE FLOW (the bot just asked a question and is waiting):\n"

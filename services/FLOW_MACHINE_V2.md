@@ -252,7 +252,7 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 | ~~`awaiting_invoice_address`~~ | `pending_invoice`, `pending_address_user_id` | `INVOICE_ADDRESS` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Two arm sites (standalone command + gate checkpoint), both via `_arm_invoice_address_v2`. |
 | ~~`awaiting_job_description`~~ | `pending_jobdesc_row_id`, `pending_jobdesc_user_id` | `INVOICE_NEED_JOB_DESCRIPTION` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. `_arm_job_description_v2` replaces the last-but-one `_prompt()` caller. |
 | ~~`awaiting_invoice_month`~~ | `pending_invoice_client`, `pending_invoice_send_email` | `INVOICE_NEED_MONTH` | ✅✅ **Deleted.** Three arm sites (direct "send invoice for X" with no month, the planner-clarification redirect, and the retry branch). `_handle_invoice_month_reply` has no cancel branch of its own — CANCEL is handled entirely in `InvoiceNeedMonth.on_cancel`. Migrating this deleted the "Universal intent-shift guard" (`_PENDING_STATES` + surface-shape gate + `is_new_query_not_response` escape hatch) outright — this was its last member. |
-| `awaiting_compound_response` | `suggested_next_action` | *none* | ❌ Legacy-only. "Yes" after "You also mentioned: …" follow-up offer. Single-shot, would be a trivial Flow class. |
+| ~~`awaiting_compound_response`~~ | `suggested_next_action` | `COMPOUND_RESPONSE` | ✅✅ **Deleted.** "Yes" after "You also mentioned: …" follow-up offer. Two arm sites (after smart-capture save, after deterministic-query INSERT), both via `_arm_compound_response_v2`. No retry loop; `_handle_compound_response` resets FlowMachine FIRST (not after) since every branch recurses into `process_request` or is terminal. |
 | `awaiting_modify_field` | `modify_row_id` (in flag's own `extra` dict) | *none* | ❌ Legacy-only. Mid-modify field-value prompt (distinct from `DISAMBIGUATION`'s row-pick). Also has a `_cancelled` companion (`awaiting_modify_field_cancelled`) tracking a declined confirm, itself never migrated. |
 | ~~`awaiting_invoice_poc_email`~~ | `pending_poc_email_client`, `pending_poc_email_user_id`, `pending_poc_email_row_ids` | `INVOICE_READINESS_POC_EMAIL` | ✅✅ **Deleted.** Easy to confuse with the earlier-migrated `awaiting_poc_email`/`INVOICE_NEED_POC_EMAIL` — this is the PRE-generation readiness gate; that one is the SEND-time flow. Was the shared `_prompt()` helper's LAST caller — with `_arm_invoice_readiness_poc_email_v2` replacing it, `_prompt()` itself was deleted entirely. Retry loop on invalid email, same shape as `BANK_DETAILS`. |
 
@@ -400,6 +400,27 @@ distinction is made by the v2 classifier's per-flow `flow_compatible`
 guidance now, reached via `dispatch_in_flow` before this legacy block was
 ever consulted.
 
+### Post-2.3: COMPOUND_RESPONSE (formerly `awaiting_compound_response`)
+
+The last of the six `❌ Legacy-only` rows to get its own FlowMachine flow —
+all 12 `✅ Mirrored + owned` rows plus all 6 `❌ Legacy-only` rows are now
+FlowMachine-owned. Two arm sites (after a smart-capture job save, after a
+deterministic-query INSERT), both via the new `_arm_compound_response_v2` —
+`suggested_next_action` itself is written by the CALLER before arming (set
+earlier during compound-intent detection), so the arm helper only
+transitions FlowMachine and clears other legacy flags defensively.
+
+The inline legacy dispatch block was extracted into `_handle_compound_response`
+(called by `CompoundResponse.handle_response`), and the legacy dispatch
+site inside `_process_request_impl` was deleted outright — v2 is
+unconditionally the router for this flow now. Notably,
+`_handle_compound_response` resets FlowMachine **first**, not after: every
+branch either recurses into `process_request`
+(the "yes" case, and the "anything else, fall through as a new message"
+case) or is terminal (the "no" case) — leaving `COMPOUND_RESPONSE` active
+into a recursive `process_request` call would make `dispatch_in_flow` try
+to route that recursive call through this same flow again.
+
 **Three pre-existing bugs surfaced during these migrations** (flagged
 separately, not fixed as part of state-ownership changes):
 `task_ab7501b3` (main.py's poc_email arm site writes a memory shape
@@ -421,17 +442,17 @@ not introduced by this migration).
   `flow_machine.set_state()` directly, keep a legacy-flag shim for
   as-yet-unported readers, delete the shim once every reader is moved.
   **(All 12 of these are now done — see "Progress update" above.)**
-- **4 rows are `❌ Legacy-only`** — no FlowMachine flow exists yet.
-  `awaiting_invoice_poc_email` and `awaiting_invoice_month` were migrated
-  straight into FlowMachine v2 (`INVOICE_READINESS_POC_EMAIL`,
-  `INVOICE_NEED_MONTH`) — the former was the last caller of the shared
-  invoice-readiness-gate `_prompt()` helper (migrating it let that helper
-  be deleted outright); the latter was the last member of the "Universal
-  intent-shift guard" (migrating it let THAT whole mechanism be deleted
-  outright too). Two simple single-prompt gates remain
-  (`awaiting_compound_response`, `awaiting_modify_field`) that fit the
-  exact pattern WP-3 slices 2–3 already proved out; the other two
-  (`pending_value_fork`, `pending_reminder_offer`) are short-lived
+- **All 6 originally-`❌ Legacy-only` rows are now migrated too**:
+  `awaiting_invoice_poc_email` → `INVOICE_READINESS_POC_EMAIL` (the last
+  caller of the shared invoice-readiness-gate `_prompt()` helper — migrating
+  it let that helper be deleted outright), `awaiting_invoice_month` →
+  `INVOICE_NEED_MONTH` (the last member of the "Universal intent-shift
+  guard" — migrating it let that whole mechanism be deleted outright too),
+  and `awaiting_compound_response` → `COMPOUND_RESPONSE`. `awaiting_modify_field`
+  (mid-modify field-value prompt, distinct from `DISAMBIGUATION`'s row-pick,
+  also has a never-migrated `_cancelled` companion flag) is the last
+  remaining legacy flag with no FlowMachine flow of its own.
+  `pending_value_fork` and `pending_reminder_offer` are short-lived
   same-turn caches, not blocking gates, and may not need a Flow class at
   all.
 - **`get_pending()` (audit reminders) stays outside FlowMachine by design** —

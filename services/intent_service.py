@@ -1027,6 +1027,23 @@ class IntentService:
         patch["pending_invoice_send_email"] = send_email
         self.memory.update_user_memory(user_id, patch)
 
+    def _arm_compound_response_v2(self, user_id: str, suggested_next_action: str) -> None:
+        """Arm COMPOUND_RESPONSE (FlowMachine-only, no legacy flag). TWO
+        arm sites — after a smart-capture job save and after a
+        deterministic-query INSERT, both offering to run a compound
+        follow-up action the user mentioned in the same message (e.g. "add
+        a job for Nike AND send the invoice"). suggested_next_action itself
+        is written by the CALLER before this runs (it's set earlier, during
+        compound-intent detection) — this only arms the flow and clears
+        every other legacy flag defensively."""
+        from services.flow_machine import FLOW_COMPOUND_RESPONSE
+        self.flow_machine.set_state(
+            user_id, FLOW_COMPOUND_RESPONSE, {"suggested_next_action": suggested_next_action},
+        )
+        patch = {k: False for k in self._AWAITING_FLAGS}
+        patch["pending_disambiguation"] = None
+        self.memory.update_user_memory(user_id, patch)
+
     def _arm_smart_capture_description_v2(self, user_id: str) -> None:
         """Arm SMART_CAPTURE_NEED_DESCRIPTION (Phase 2.3: FlowMachine-only,
         no legacy flag). THREE arm sites: _start_smart_capture (the flow's
@@ -1074,14 +1091,15 @@ class IntentService:
         # awaiting_name_change, awaiting_link_id, awaiting_poc_email,
         # awaiting_client_billing, awaiting_poc_name,
         # awaiting_invoice_address, awaiting_job_description,
-        # awaiting_job_input, awaiting_invoice_poc_email, and
-        # awaiting_invoice_month removed — FlowMachine is now the sole
-        # source of truth for INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS,
-        # NAME_CHANGE, LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL,
-        # INVOICE_NEED_BILLING, INVOICE_NEED_POC_NAME, INVOICE_ADDRESS,
+        # awaiting_job_input, awaiting_invoice_poc_email,
+        # awaiting_invoice_month, and awaiting_compound_response removed —
+        # FlowMachine is now the sole source of truth for
+        # INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE,
+        # LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING,
+        # INVOICE_NEED_POC_NAME, INVOICE_ADDRESS,
         # INVOICE_NEED_JOB_DESCRIPTION, SMART_CAPTURE_NEED_DESCRIPTION,
-        # INVOICE_READINESS_POC_EMAIL, and INVOICE_NEED_MONTH.
-        "awaiting_compound_response",
+        # INVOICE_READINESS_POC_EMAIL, INVOICE_NEED_MONTH, and
+        # COMPOUND_RESPONSE.
         "awaiting_modify_field",
     )
 
@@ -2319,8 +2337,7 @@ class IntentService:
             user_mem = self.memory.get_user_memory(user_id)
             suggested_next = user_mem.get("suggested_next_action")
             if suggested_next:
-                # Keep suggested_next_action in memory so the handler can use it
-                self._arm_awaiting(user_id, "awaiting_compound_response")
+                self._arm_compound_response_v2(user_id, suggested_next)
                 response += f"\n\nYou also mentioned: \"{suggested_next}\"\nWant me to do that now? (Yes / No)"
                 logger.info(f"[COMPOUND] Suggesting next action after job save: '{suggested_next}'")
 
@@ -3526,12 +3543,13 @@ class IntentService:
         # awaiting_client_billing, awaiting_poc_name,
         # awaiting_invoice_address, awaiting_job_description,
         # awaiting_job_input, awaiting_invoice_poc_email,
-        # awaiting_invoice_month, and pending_disambiguation removed —
-        # FlowMachine is the sole source of truth for those thirteen flows
-        # now, checked explicitly below instead of via the legacy flag list.
+        # awaiting_invoice_month, awaiting_compound_response, and
+        # pending_disambiguation removed — FlowMachine is the sole source
+        # of truth for those fourteen flows now, checked explicitly below
+        # instead of via the legacy flag list.
         _active_subflow = any(
             _mem.get(k) for k in (
-                "awaiting_modify_field", "awaiting_compound_response",
+                "awaiting_modify_field",
             )
         )
         if not _active_subflow:
@@ -3542,6 +3560,7 @@ class IntentService:
                 FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
                 FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
                 FLOW_INVOICE_READINESS_POC_EMAIL, FLOW_INVOICE_NEED_MONTH,
+                FLOW_COMPOUND_RESPONSE,
             )
             _active_subflow = self.flow_machine.current_flow(user_id) in (
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
@@ -3550,6 +3569,7 @@ class IntentService:
                 FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
                 FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_DISAMBIGUATION,
                 FLOW_INVOICE_READINESS_POC_EMAIL, FLOW_INVOICE_NEED_MONTH,
+                FLOW_COMPOUND_RESPONSE,
             )
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
@@ -4275,40 +4295,11 @@ class IntentService:
                     return _disambig_result
                 # None means the handler detected a new query and cleared state — fall through
 
-            # Handle compound intent follow-up ("Yes" after "You also mentioned: ...")
-            if user_mem.get("awaiting_compound_response"):
-                pending_action = user_mem.get("suggested_next_action", "")
-                # Always clear the state first (interruption-safe)
-                self.memory.update_user_memory(user_id, {
-                    "awaiting_compound_response": False,
-                    "suggested_next_action": None,
-                })
-                msg_lower_check = message.strip().lower().rstrip("., !")
-                _YES_EXACT = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "do it", "yes please"}
-                _YES_PREFIXES = ("yes,", "yes ", "yeah,", "yeah ", "sure,", "sure ", "ok,", "ok ", "okay,", "okay ")
-                _is_yes = msg_lower_check in _YES_EXACT or msg_lower_check.startswith(_YES_PREFIXES)
-                if _is_yes and pending_action:
-                    # Preserve any qualifier the user added after "yes" (e.g.
-                    # "yes along with bill numbers") so the pending action runs
-                    # WITH that extra context, not in isolation.
-                    remainder = ""
-                    if msg_lower_check not in _YES_EXACT:
-                        for _p in _YES_PREFIXES:
-                            if msg_lower_check.startswith(_p):
-                                remainder = message.strip()[len(_p):].strip(" ,.!")
-                                break
-                    merged = f"{pending_action} {remainder}".strip() if remainder else pending_action
-                    logger.info(f"[COMPOUND] User confirmed next action: '{merged}' (pending='{pending_action}', qualifier='{remainder}')")
-                    logger.info(f"[ROUTE] awaiting_compound_response claimed message: {message[:60]!r}")
-                    note_route("awaiting_compound_response")
-                    return self.process_request(user_id=user_id, message=merged)
-                elif msg_lower_check in {"no", "nah", "nope", "skip", "not now", "later"}:
-                    logger.info(f"[ROUTE] awaiting_compound_response declined: {message[:60]!r}")
-                    note_route("awaiting_compound_response_declined")
-                    response = "👍 No problem. Let me know if you need anything else."
-                    self._store_conversation(user_id, message, response)
-                    return {"operation": "compound_declined", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                # else: user said something unrelated — fall through to normal processing
+            # 0a1b. (removed) — COMPOUND_RESPONSE replies are now owned
+            # exclusively by dispatch_in_flow / flows.py's CompoundResponse
+            # (FLOW_RESPONSE / CANCEL), reached earlier in this function via
+            # the v2 in-flow block above. No legacy awaiting_compound_response
+            # flag exists to check here.
 
             # 0a2. Modify / update / change a job — AI-extracted update intent
             #      Triggers: explicit modify verb in the message, OR the user is
@@ -6042,7 +6033,7 @@ class IntentService:
                 insert_mem = self.memory.get_user_memory(user_id)
                 suggested_next = insert_mem.get("suggested_next_action")
                 if suggested_next:
-                    self._arm_awaiting(user_id, "awaiting_compound_response")
+                    self._arm_compound_response_v2(user_id, suggested_next)
                     response += f"\n\nYou also mentioned: \"{suggested_next}\"\nWant me to do that now? (Yes / No)"
                     logger.info(f"[COMPOUND] Suggesting next action after insert: '{suggested_next}'")
             else:
@@ -6763,6 +6754,51 @@ class IntentService:
         response = f"Done — deleted: {detail}.\n\nLet me know if you need anything else."
         self._store_conversation(user_id, message, response)
         return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+    def _handle_compound_response(self, user_id: str, message: str) -> Dict:
+        """Handle the reply to a compound-intent follow-up ("You also
+        mentioned: X. Want me to do that now? (Yes / No)"). No retry loop:
+        'yes' (+ optional qualifier) re-enters process_request with the
+        merged action; a decline word ends cleanly; anything else falls
+        through and is treated as a brand-new message. FlowMachine is
+        reset FIRST (not after) since every branch either recurses into
+        process_request or is a terminal decline — leaving COMPOUND_RESPONSE
+        active into a recursive call would make dispatch_in_flow try to
+        route it through this same flow again."""
+        try:
+            self.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        user_mem = self.memory.get_user_memory(user_id)
+        pending_action = user_mem.get("suggested_next_action", "")
+        self.memory.update_user_memory(user_id, {"suggested_next_action": None})
+
+        msg_lower_check = message.strip().lower().rstrip("., !")
+        _YES_EXACT = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go ahead", "do it", "yes please"}
+        _YES_PREFIXES = ("yes,", "yes ", "yeah,", "yeah ", "sure,", "sure ", "ok,", "ok ", "okay,", "okay ")
+        _is_yes = msg_lower_check in _YES_EXACT or msg_lower_check.startswith(_YES_PREFIXES)
+        if _is_yes and pending_action:
+            # Preserve any qualifier the user added after "yes" (e.g.
+            # "yes along with bill numbers") so the pending action runs
+            # WITH that extra context, not in isolation.
+            remainder = ""
+            if msg_lower_check not in _YES_EXACT:
+                for _p in _YES_PREFIXES:
+                    if msg_lower_check.startswith(_p):
+                        remainder = message.strip()[len(_p):].strip(" ,.!")
+                        break
+            merged = f"{pending_action} {remainder}".strip() if remainder else pending_action
+            logger.info(f"[COMPOUND] User confirmed next action: '{merged}' (pending='{pending_action}', qualifier='{remainder}')")
+            return self.process_request(user_id=user_id, message=merged)
+        elif msg_lower_check in {"no", "nah", "nope", "skip", "not now", "later"}:
+            logger.info(f"[ROUTE] compound_response declined: {message[:60]!r}")
+            response = "👍 No problem. Let me know if you need anything else."
+            self._store_conversation(user_id, message, response)
+            return {"operation": "compound_declined", "response": response, "trigger_invoice": False, "invoice_data": {}}
+        else:
+            # Unrelated reply — the flow is already cleared above, so treat
+            # this as a brand-new message under normal rules.
+            return self.process_request(user_id=user_id, message=message)
 
     def _handle_disambiguation_reply(self, user_id: str, message: str, pending: Dict) -> Dict:
         """User is replying to pick one row (by number) or all rows ('all'/'yes') from a disambiguation list."""

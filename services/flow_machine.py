@@ -80,6 +80,10 @@ FLOW_INVOICE_READINESS_POC_EMAIL      = "INVOICE_READINESS_POC_EMAIL"
 # (either the direct "send invoice for X" path, or the planner-clarification
 # redirect). Formerly awaiting_invoice_month.
 FLOW_INVOICE_NEED_MONTH                = "INVOICE_NEED_MONTH"
+# Bot suggested a follow-up action after a job save/insert ("You also
+# mentioned: X. Want me to do that now? (Yes / No)"). Formerly
+# awaiting_compound_response.
+FLOW_COMPOUND_RESPONSE                 = "COMPOUND_RESPONSE"
 
 KNOWN_FLOWS = {
     FLOW_IDLE,
@@ -97,6 +101,7 @@ KNOWN_FLOWS = {
     FLOW_INVOICE_NEED_JOB_DESCRIPTION,
     FLOW_INVOICE_READINESS_POC_EMAIL,
     FLOW_INVOICE_NEED_MONTH,
+    FLOW_COMPOUND_RESPONSE,
 }
 
 # Idle TTL: 30 min of silence in a flow → auto-reset to IDLE.

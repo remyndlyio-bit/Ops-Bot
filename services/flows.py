@@ -33,6 +33,7 @@ from services.flow_machine import (
     FLOW_INVOICE_NEED_JOB_DESCRIPTION,
     FLOW_INVOICE_READINESS_POC_EMAIL,
     FLOW_INVOICE_NEED_MONTH,
+    FLOW_COMPOUND_RESPONSE,
 )
 from utils.logger import logger
 
@@ -719,6 +720,47 @@ class InvoiceNeedMonth(Flow):
                 "trigger_invoice": False, "invoice_data": {}}
 
 
+# ── COMPOUND_RESPONSE ────────────────────────────────────────────────────
+
+class CompoundResponse(Flow):
+    """Bot suggested a follow-up action after a job save/insert ("You also
+    mentioned: X. Want me to do that now? (Yes / No)"). Delegates to the
+    existing _handle_compound_response, which: resets FlowMachine FIRST
+    (every branch either recurses into process_request or is terminal, so
+    leaving this flow active into a recursive call would make
+    dispatch_in_flow try to route it through this same flow again); 'yes'
+    (+ optional qualifier) re-enters process_request with the merged
+    action; a decline word ends cleanly; anything else falls through and is
+    treated as a brand-new message. No retry loop."""
+
+    name = FLOW_COMPOUND_RESPONSE
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(f"[FLOW_V2] CompoundResponse.handle_response user={user_id}")
+        # _handle_compound_response resets FlowMachine itself (see its own
+        # docstring) -- nothing left to do here.
+        return intent_service._handle_compound_response(user_id, message)
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        action = context.get("suggested_next_action")
+        if action:
+            return f"\n\nStill waiting: want me to also \"{action}\"? (Yes / No)"
+        return "\n\nStill waiting on that Yes/No."
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        intent_service.memory.update_user_memory(user_id, {"suggested_next_action": None})
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        response = "👍 No problem. Let me know if you need anything else."
+        intent_service._store_conversation(user_id, message, response)
+        return {"operation": "compound_declined", "response": response,
+                "trigger_invoice": False, "invoice_data": {}}
+
+
 # Registry — dispatcher uses this to look up the right Flow by name.
 REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_AWAIT_SEND_CONFIRM:     InvoiceAwaitSendConfirm(),
@@ -727,6 +769,7 @@ REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_NEED_POC_EMAIL:         InvoiceNeedPocEmail(),
     FLOW_INVOICE_READINESS_POC_EMAIL:    InvoiceReadinessPocEmail(),
     FLOW_INVOICE_NEED_MONTH:             InvoiceNeedMonth(),
+    FLOW_COMPOUND_RESPONSE:              CompoundResponse(),
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION: SmartCaptureNeedDescription(),
     FLOW_SMART_CAPTURE_CONFIRM_PENDING:  SmartCaptureConfirmPending(),
     FLOW_DISAMBIGUATION:                 Disambiguation(),

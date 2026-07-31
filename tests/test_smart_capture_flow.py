@@ -353,14 +353,21 @@ class TestSaveSmartCaptureJob:
         assert "Star Studios" in result["response"]
 
     def test_compound_intent_suggestion_surfaced_after_save(self):
+        # COMPOUND_RESPONSE is FlowMachine-only now -- _arm_compound_response_v2
+        # writes flow_machine.set_state() directly instead of a legacy
+        # awaiting_compound_response flag. flow_machine binds to the memory
+        # instance present at IntentService construction time, which is a
+        # different mock than svc.memory (reassigned after construction by
+        # _make_svc), so writes must be read from svc.flow_machine._mem.
+        from services.flow_machine import FLOW_COMPOUND_RESPONSE, _MEM_KEY
         svc = _make_svc()
         svc.supabase.insert_job_entry.return_value = {"ok": True, "rows": [{"id": 1}]}
         svc.memory.get_user_memory.return_value = {"suggested_next_action": "send the invoice"}
         result = svc._save_smart_capture_job("u1", {"brand_name": "Nike", "fees": 25000})
         assert "send the invoice" in result["response"]
-        awaiting = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
-                    if "awaiting_compound_response" in c.args[1]]
-        assert awaiting and awaiting[-1]["awaiting_compound_response"] is True
+        fm_writes = [c.args[1][_MEM_KEY] for c in svc.flow_machine._mem.update_user_memory.call_args_list
+                     if _MEM_KEY in c.args[1]]
+        assert fm_writes and fm_writes[-1]["flow"] == FLOW_COMPOUND_RESPONSE
 
 
 class TestCompoundIntentEntryPoint:
