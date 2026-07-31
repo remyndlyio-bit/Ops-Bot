@@ -770,22 +770,18 @@ class IntentService:
         match. This lets dispatch_in_flow take over without modifying every
         legacy arm site. No-op when FlowMachine is already tracking a flow."""
         from services.flow_machine import (
-            FLOW_IDLE,
-            FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
-            FLOW_DISAMBIGUATION,
+            FLOW_IDLE, FLOW_DISAMBIGUATION,
         )
         # Already tracking — nothing to reconcile.
         if self.flow_machine.current_flow(user_id) != FLOW_IDLE:
             return
 
-        # Order matters: form_state (smart-capture confirm) is the "deepest"
-        # state, so it wins if multiple flags happen to be set.
-        if self.memory.get_form_state(user_id):
-            self.flow_machine.set_state(
-                user_id, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
-                {"source": "reconcile_form_state"},
-            )
-            return
+        # NOTE: SMART_CAPTURE_CONFIRM_PENDING has no reconciliation branch
+        # here (Phase 2.3) — both its arm sites (_show_smart_capture_
+        # confirmation and _extract_and_confirm's missing-fields branch)
+        # write flow_machine.set_state() directly at the same moment they
+        # call memory.start_form(), so FlowMachine is already correct at
+        # arm time; there's no turn-lag left to reconcile.
 
         # NOTE: INVOICE_AWAIT_SEND_CONFIRM has no reconciliation branch here
         # (Phase 2.3) — its two arm sites (main.py's process_and_send_invoice,
@@ -2337,6 +2333,8 @@ class IntentService:
             "step": 0,
         }
         self.memory.start_form(user_id, [], form_override=form_data)
+        from services.flow_machine import FLOW_SMART_CAPTURE_CONFIRM_PENDING
+        self.flow_machine.set_state(user_id, FLOW_SMART_CAPTURE_CONFIRM_PENDING, {"source": "smart_capture"})
         # Store the extracted details as user message for context
         summary = ", ".join(f"{k}: {v}" for k, v in extracted.items() if v is not None)
         self._store_conversation(user_id, f"Job details: {summary}", response)
@@ -2466,6 +2464,8 @@ class IntentService:
                 "step": 0,
             }
             self.memory.start_form(user_id, [], form_override=form_data)
+            from services.flow_machine import FLOW_SMART_CAPTURE_CONFIRM_PENDING
+            self.flow_machine.set_state(user_id, FLOW_SMART_CAPTURE_CONFIRM_PENDING, {"source": "smart_capture_missing"})
             self._store_conversation(user_id, content, response)
             return {"operation": "smart_capture_missing", "response": response, "trigger_invoice": False, "invoice_data": {}}
 

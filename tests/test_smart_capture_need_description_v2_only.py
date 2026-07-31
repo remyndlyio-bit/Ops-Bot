@@ -126,20 +126,19 @@ class TestArmSiteStartSmartCapture:
         assert "awaiting_job_input" not in svc.memory.get_user_memory("u1")
 
     def test_inline_content_bypasses_the_flow_entirely(self):
-        """_show_smart_capture_confirmation itself never touches FlowMachine
-        -- it's only synced to SMART_CAPTURE_CONFIRM_PENDING via
-        SmartCaptureNeedDescription.handle_response (the dispatch_in_flow
-        path) or via _reconcile_legacy_to_flow_machine's form_state branch
-        on the NEXT message. Calling _start_smart_capture directly (as this
-        legacy cascade entry point does) leaves FlowMachine untouched --
-        the form_state write is what carries the state forward."""
+        """_show_smart_capture_confirmation writes flow_machine.set_state()
+        directly (Phase 2.3) at the same moment it calls memory.start_form()
+        -- so even calling _start_smart_capture directly (as this legacy
+        cascade entry point does, bypassing dispatch_in_flow entirely)
+        leaves FlowMachine correctly synced to SMART_CAPTURE_CONFIRM_PENDING,
+        with no turn-lag."""
         svc = _svc()
         svc.gemini.extract_job_fields.return_value = dict(VALUES)
         result = svc._start_smart_capture(
             "u1", "add a job: Bridgestone, 10 Feb, master film, The Good Take, 25k",
         )
         assert result["operation"] == "smart_capture_confirm"
-        assert svc.flow_machine.current_flow("u1") == FLOW_IDLE
+        assert svc.flow_machine.current_flow("u1") == FLOW_SMART_CAPTURE_CONFIRM_PENDING
         assert svc.memory.get_form_state("u1")["form_type"] == "smart_capture_confirm"
 
 

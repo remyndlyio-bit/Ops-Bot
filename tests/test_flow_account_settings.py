@@ -60,35 +60,21 @@ class TestReconciliation:
         svc._reconcile_legacy_to_flow_machine("u1", {})
         svc.flow_machine.set_state.assert_not_called()
 
-    def test_form_state_still_reconciles_normally(self):
-        """The one remaining boolean-mirror-free branch (form_state ->
-        SMART_CAPTURE_CONFIRM_PENDING) still reconciles the normal way —
-        this module's migrations didn't touch the mechanism itself, only
-        removed branches from it. (Earlier examples used by this test --
-        awaiting_client_billing, awaiting_poc_name, awaiting_invoice_address,
-        awaiting_job_input -- were all migrated in later Phase 2.3 passes
-        than this file's original writing; there are no boolean legacy
-        flags left to reconcile FROM at all now, only form_state and
-        pending_disambiguation.)"""
-        svc = _make_svc()
-        svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = {"step": "confirm"}
-        from services.flow_machine import FLOW_SMART_CAPTURE_CONFIRM_PENDING
-        svc._reconcile_legacy_to_flow_machine("u1", {})
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_SMART_CAPTURE_CONFIRM_PENDING
-
-    def test_disambiguation_checked_before_later_flags(self):
-        """If a stale disambiguation and a still-legacy flag checked AFTER
-        it in reconciliation's own order both happen to be set,
-        disambiguation wins."""
+    def test_disambiguation_still_reconciles_normally(self):
+        """pending_disambiguation is now the ONLY thing left with a
+        reconciliation branch at all (Phase 2.3) — form_state gained direct
+        arm-site writes (_show_smart_capture_confirmation and
+        _extract_and_confirm's missing-fields branch both call
+        flow_machine.set_state() the same moment they call
+        memory.start_form()), so its reconcile branch was deleted too. This
+        module's migrations didn't touch the mechanism itself, only removed
+        branches from it -- down from originally 12 flag/form checks to
+        just this one."""
         svc = _make_svc()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
         svc.memory.get_form_state.return_value = None
-        svc._reconcile_legacy_to_flow_machine("u1", {
-            "pending_disambiguation": {"rows": [], "type": "delete"},
-            "awaiting_invoice_address": True,
-        })
+        pending = {"rows": [{"id": "a"}], "type": "delete"}
+        svc._reconcile_legacy_to_flow_machine("u1", {"pending_disambiguation": pending})
         from services.flow_machine import FLOW_DISAMBIGUATION
         args = svc.flow_machine.set_state.call_args.args
         assert args[1] == FLOW_DISAMBIGUATION

@@ -244,24 +244,18 @@ class SmartCaptureNeedDescription(Flow):
 
     def handle_response(self, intent_service, user_id, message, context):
         logger.info(f"[FLOW_V2] SmartCaptureNeedDescription.handle_response user={user_id}")
-        # _extract_and_confirm itself transitions to the confirm form state
-        # (via memory.start_form), so we let it run and DON'T reset v2 — the
-        # next message arrives in SMART_CAPTURE_CONFIRM_PENDING.
+        # _extract_and_confirm's own success/missing-fields branches write
+        # flow_machine.set_state(SMART_CAPTURE_CONFIRM_PENDING) directly
+        # (Phase 2.3), and its "nothing extracted" retry branch re-arms this
+        # same flow via _arm_smart_capture_description_v2 -- so the only
+        # case left to handle here is the (should-not-normally-happen)
+        # fallback: neither a form started nor a re-prompt, i.e. some other
+        # outcome altogether -- reset defensively rather than get stuck.
         result = intent_service._extract_and_confirm(user_id, message)
-        # If extraction came back empty, _extract_and_confirm RE-PROMPTS for
-        # job input (operation "smart_capture_prompt") — stay in this flow.
-        # Otherwise transition to the confirm state via flow_machine.
         try:
-            from services.flow_machine import FLOW_SMART_CAPTURE_CONFIRM_PENDING
-            if intent_service.memory.get_form_state(user_id):
-                # Form started → confirm pending.
-                intent_service.flow_machine.set_state(
-                    user_id, FLOW_SMART_CAPTURE_CONFIRM_PENDING, {"source": "smart_capture"}
-                )
-            elif result.get("operation") != "smart_capture_prompt":
-                # No form, not re-prompting → done somehow → reset.
+            if (not intent_service.memory.get_form_state(user_id)
+                    and result.get("operation") != "smart_capture_prompt"):
                 intent_service.flow_machine.reset(user_id)
-            # else: still awaiting more job input, stay in this flow.
         except Exception as e:
             logger.warning(f"[FLOW_V2] post-extract transition failed: {e}")
         return result

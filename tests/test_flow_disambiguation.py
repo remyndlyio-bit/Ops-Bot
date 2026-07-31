@@ -110,32 +110,28 @@ class TestReconciliation:
         svc._reconcile_legacy_to_flow_machine("u1", {})
         svc.flow_machine.set_state.assert_not_called()
 
-    def test_active_form_state_wins_over_disambiguation(self):
-        """Mirrors the legacy precedence at the pending_disambiguation call
-        site: an active form_state (smart-capture confirm) takes priority
-        over a (potentially stale) disambiguation. Ordering in the reconcile
-        if-chain gives this for free -- this test locks that down.
-
-        Uses form_state as the example (checked before disambiguation in
-        reconcile's own order — the only thing still checked before it,
-        after Phase 2.3's migrations moved every boolean legacy flag,
-        including awaiting_job_input, out of reconciliation entirely). The
-        equivalent precedence for awaiting_poc_email specifically moved out
-        of reconciliation entirely in Phase 2.3 -- INVOICE_NEED_POC_EMAIL
-        is FlowMachine-only now (no reconcile branch), and its own
-        invoice-email-flow-beats-stale-disambiguation guarantee lives in
-        _process_request_impl's _invoice_await_active check instead
-        (services/intent_service.py, checks flow_machine.current_flow
-        directly)."""
+    def test_form_state_no_longer_consulted_by_reconcile(self):
+        """Phase 2.3: form_state's own reconciliation branch was deleted --
+        both its arm sites (_show_smart_capture_confirmation and
+        _extract_and_confirm's missing-fields branch) now write
+        flow_machine.set_state() directly the same moment they call
+        memory.start_form(), so there's no turn-lag left to reconcile.
+        pending_disambiguation is the ONLY remaining reconcile branch, so a
+        truthy get_form_state() no longer has any special precedence over
+        it -- reconcile doesn't even read get_form_state() anymore. (The
+        analogous precedence for awaiting_poc_email/INVOICE_NEED_POC_EMAIL
+        was likewise moved out of reconciliation in an earlier Phase 2.3
+        pass -- see _process_request_impl's _invoice_await_active check.)"""
         svc = _make_svc()
         user_mem = {"pending_disambiguation": DELETE_PENDING}
         svc.flow_machine = MagicMock()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
         svc.memory.get_form_state.return_value = {"step": "confirm"}
         svc._reconcile_legacy_to_flow_machine("u1", user_mem)
-        from services.flow_machine import FLOW_SMART_CAPTURE_CONFIRM_PENDING
+        svc.memory.get_form_state.assert_not_called()
+        from services.flow_machine import FLOW_DISAMBIGUATION
         args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_SMART_CAPTURE_CONFIRM_PENDING
+        assert args[1] == FLOW_DISAMBIGUATION
 
     def test_already_tracking_a_flow_is_a_no_op(self):
         svc = _make_svc()
