@@ -31,6 +31,7 @@ from services.flow_machine import (
     FLOW_LINK_ACCOUNT,
     FLOW_INVOICE_ADDRESS,
     FLOW_INVOICE_NEED_JOB_DESCRIPTION,
+    FLOW_INVOICE_READINESS_POC_EMAIL,
 )
 from utils.logger import logger
 
@@ -606,12 +607,62 @@ class InvoiceNeedJobDescription(Flow):
         return result
 
 
+# ── INVOICE_READINESS_POC_EMAIL ─────────────────────────────────────────
+
+class InvoiceReadinessPocEmail(Flow):
+    """Bot asked what email a client's invoice/reminders should go to,
+    BEFORE generation — distinct from FLOW_INVOICE_NEED_POC_EMAIL, the
+    SEND-time flow (asks for the address to deliver an already-generated
+    PDF). Delegates to the existing _handle_invoice_poc_email_response,
+    which: accepts 'cancel'/'stop'/'abort'/'nevermind'; re-prompts on an
+    invalid email (retry loop, like BANK_DETAILS); saves and resumes the
+    invoice flow on success."""
+
+    name = FLOW_INVOICE_READINESS_POC_EMAIL
+
+    def handle_response(self, intent_service, user_id: str, message: str,
+                        context: Dict[str, Any]) -> Dict[str, Any]:
+        logger.info(
+            f"[FLOW_V2] InvoiceReadinessPocEmail.handle_response user={user_id} "
+            f"ctx_client={context.get('client_name')!r}"
+        )
+        result = intent_service._handle_invoice_poc_email_response(user_id, message)
+        # Phase 2.2 (post-2.3): no legacy awaiting_invoice_poc_email flag
+        # exists to check-after anymore. The handler signals "stay in the
+        # flow, let the user retry" via its returned operation name
+        # instead (it re-arms FlowMachine itself on that path via
+        # _arm_invoice_readiness_poc_email_v2, so simply NOT resetting here
+        # is what keeps the flow active) — same pattern as BankDetails.
+        if result.get("operation") != "invoice_poc_email_retry":
+            try:
+                intent_service.flow_machine.reset(user_id)
+            except Exception:
+                pass
+        return result
+
+    def resume_nudge(self, context: Dict[str, Any]) -> str:
+        client = context.get("client_name")
+        if client:
+            return f"\n\nStill need an email for {client}'s invoice (or 'cancel' to stop)."
+        return "\n\nStill waiting on that email address (or 'cancel' to stop)."
+
+    def on_cancel(self, intent_service, user_id: str, message: str,
+                  context: Dict[str, Any]) -> Dict[str, Any]:
+        result = intent_service._handle_invoice_poc_email_response(user_id, "cancel")
+        try:
+            intent_service.flow_machine.reset(user_id)
+        except Exception:
+            pass
+        return result
+
+
 # Registry — dispatcher uses this to look up the right Flow by name.
 REGISTRY: Dict[str, Flow] = {
     FLOW_INVOICE_AWAIT_SEND_CONFIRM:     InvoiceAwaitSendConfirm(),
     FLOW_INVOICE_NEED_BILLING:           InvoiceNeedBilling(),
     FLOW_INVOICE_NEED_POC_NAME:          InvoiceNeedPocName(),
     FLOW_INVOICE_NEED_POC_EMAIL:         InvoiceNeedPocEmail(),
+    FLOW_INVOICE_READINESS_POC_EMAIL:    InvoiceReadinessPocEmail(),
     FLOW_SMART_CAPTURE_NEED_DESCRIPTION: SmartCaptureNeedDescription(),
     FLOW_SMART_CAPTURE_CONFIRM_PENDING:  SmartCaptureConfirmPending(),
     FLOW_DISAMBIGUATION:                 Disambiguation(),

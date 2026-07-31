@@ -89,22 +89,21 @@ class TestStuckFlowNoLongerSwallowsUnrelatedInput:
         # (flow_machine.set_state) is BANK_DETAILS' source of truth now.
         # This test still verifies the piece that matters: arming it must
         # not leave a stale unrelated legacy flag (like
-        # awaiting_invoice_poc_email) lingering, via _arm_bank_details_v2's
+        # awaiting_invoice_month) lingering, via _arm_bank_details_v2's
         # defensive clear of the whole _AWAITING_FLAGS set.
         svc = _make_svc()
         svc.flow_machine = MagicMock()
-        # Simulate: an invoice-email flow is stuck (already armed from an
-        # earlier, unfinished turn).
+        # Simulate: an unrelated single-question prompt is stuck (already
+        # armed from an earlier, unfinished turn).
         svc.memory.get_user_memory.return_value = {
-            "awaiting_invoice_poc_email": True,
-            "pending_poc_email_client": "Nike",
+            "awaiting_invoice_month": True,
         }
         svc._prompt_bank_details_format("u1", "update my bank details")
 
         from services.flow_machine import FLOW_BANK_DETAILS
         svc.flow_machine.set_state.assert_called_once_with("u1", FLOW_BANK_DETAILS, {})
         patch = svc.memory.update_user_memory.call_args.args[1]
-        assert patch["awaiting_invoice_poc_email"] is False
+        assert patch["awaiting_invoice_month"] is False
 
 
 class TestPendingDisambiguationMutualExclusivity:
@@ -203,15 +202,19 @@ class TestIntentShiftGuardCommandShapeGate:
         svc.process_request("u1", "rahul@starstudios.com")
         svc.gemini.is_new_query_not_response.assert_not_called()
 
-    def test_malformed_email_reply_never_asks_the_ai_classifier(self):
+    def test_unrecognisable_reply_never_asks_the_ai_classifier(self):
+        # Rotated onto awaiting_invoice_month (Phase 2.2, post-2.3) --
+        # awaiting_invoice_poc_email is FlowMachine-only now and no longer
+        # in _PENDING_STATES, so it can't exercise this command-shape gate
+        # at all anymore.
         svc = _make_onboarded_svc()
         svc.memory.get_user_memory.return_value = {
-            "awaiting_invoice_poc_email": True,
-            "pending_poc_email_client": "DriveOne",
+            "awaiting_invoice_month": True,
+            "pending_invoice_client": "DriveOne",
         }
-        result = svc.process_request("u1", "rahul at starstudios dot com")
+        result = svc.process_request("u1", "not sure honestly")
         svc.gemini.is_new_query_not_response.assert_not_called()
-        assert result["operation"] == "invoice_poc_email_retry"
+        assert "couldn't detect a month" in result["response"]
 
     def test_bank_details_reply_never_asks_the_ai_classifier(self):
         svc = _make_onboarded_svc()
@@ -224,12 +227,12 @@ class TestIntentShiftGuardCommandShapeGate:
         ("show my jobs") must still go through the AI check so the intent
         shift can legitimately clear a stale awaiting state.
 
-        Uses awaiting_invoice_poc_email as the example flag (still
-        legacy-flag-based, unlike awaiting_bank_details/awaiting_client_
-        billing/etc. which Phase 2.3 moved to FlowMachine-only and removed
-        from _PENDING_STATES)."""
+        Uses awaiting_invoice_month as the example flag -- the only one
+        left in _PENDING_STATES (every other single-question gate Phase
+        2.2/2.3 moved to FlowMachine-only, where the classifier's own
+        flow_compatible guidance makes this same distinction instead)."""
         svc = _make_onboarded_svc()
         svc.gemini.is_new_query_not_response.return_value = True
-        svc.memory.get_user_memory.return_value = {"awaiting_invoice_poc_email": True}
+        svc.memory.get_user_memory.return_value = {"awaiting_invoice_month": True}
         svc.process_request("u1", "show my jobs")
         svc.gemini.is_new_query_not_response.assert_called_once()

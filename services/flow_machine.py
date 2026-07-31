@@ -68,6 +68,14 @@ FLOW_LINK_ACCOUNT                     = "LINK_ACCOUNT"
 # job's description missing at invoice time).
 FLOW_INVOICE_ADDRESS                  = "INVOICE_ADDRESS"
 FLOW_INVOICE_NEED_JOB_DESCRIPTION     = "INVOICE_NEED_JOB_DESCRIPTION"
+# Phase 2.2 (post-2.3) — the invoice-readiness gate's LAST checkpoint,
+# formerly the sole remaining caller of the legacy shared _prompt() helper
+# (awaiting_invoice_poc_email). Deliberately named distinctly from
+# FLOW_INVOICE_NEED_POC_EMAIL, which is the SEND-time flow (asks for the
+# email to deliver an already-generated PDF to) — this one runs BEFORE
+# generation, asking for an email on the job rows themselves so reminders
+# can later reach the client.
+FLOW_INVOICE_READINESS_POC_EMAIL      = "INVOICE_READINESS_POC_EMAIL"
 
 KNOWN_FLOWS = {
     FLOW_IDLE,
@@ -83,6 +91,7 @@ KNOWN_FLOWS = {
     FLOW_LINK_ACCOUNT,
     FLOW_INVOICE_ADDRESS,
     FLOW_INVOICE_NEED_JOB_DESCRIPTION,
+    FLOW_INVOICE_READINESS_POC_EMAIL,
 }
 
 # Idle TTL: 30 min of silence in a flow → auto-reset to IDLE.

@@ -210,6 +210,14 @@ def _flow_compat_block(current_flow: Optional[str], current_context: Optional[Di
             "  - SIDE_QUESTION: a genuinely unrelated question — including one about a PRIOR\n"
             "    answer's scope — is SIDE_QUESTION, never FLOW_RESPONSE.\n"
         ),
+        "INVOICE_READINESS_POC_EMAIL": (
+            "  - The bot asked what EMAIL the invoice/reminders for a client should go to,\n"
+            "    BEFORE generating the invoice (distinct from the SEND-time email prompt).\n"
+            "  - FLOW_RESPONSE: any email-looking string (contains '@' and a domain).\n"
+            "  - CANCEL: 'cancel', 'stop', 'abort', 'nevermind'.\n"
+            "  - SIDE_QUESTION: a genuinely unrelated question is SIDE_QUESTION, never\n"
+            "    FLOW_RESPONSE.\n"
+        ),
     }.get(current_flow, "")
     return (
         "\n\nACTIVE FLOW (the bot just asked a question and is waiting):\n"

@@ -92,9 +92,9 @@ class TestNameChangeArmSite:
 
     def test_defensively_clears_other_legacy_flags(self):
         svc = _svc()
-        svc.memory.update_user_memory("u1", {"awaiting_invoice_poc_email": True})
+        svc.memory.update_user_memory("u1", {"awaiting_invoice_month": True})
         svc._handle_name_change("u1", "change my name")
-        assert svc.memory.get_user_memory("u1")["awaiting_invoice_poc_email"] is False
+        assert svc.memory.get_user_memory("u1")["awaiting_invoice_month"] is False
 
     def test_no_legacy_name_change_flag_written(self):
         svc = _svc()
@@ -180,9 +180,9 @@ class TestLinkAccountArmSite:
 
     def test_defensively_clears_other_legacy_flags(self):
         svc = _svc()
-        svc.memory.update_user_memory("u1", {"awaiting_invoice_poc_email": True})
+        svc.memory.update_user_memory("u1", {"awaiting_invoice_month": True})
         svc._handle_link_account("u1", "link my account")
-        assert svc.memory.get_user_memory("u1")["awaiting_invoice_poc_email"] is False
+        assert svc.memory.get_user_memory("u1")["awaiting_invoice_month"] is False
 
 
 class TestLinkAccountFlowResponseValid:

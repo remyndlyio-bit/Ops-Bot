@@ -209,17 +209,18 @@ class TestClearFlowStateHelper:
         awaiting_send_confirmation, awaiting_bank_details,
         awaiting_name_change, awaiting_link_id, awaiting_poc_email,
         awaiting_client_billing, awaiting_poc_name, awaiting_invoice_address,
-        awaiting_job_description, and awaiting_job_input are deliberately
-        excluded (Phase 2.3): FlowMachine is now the sole source of truth
-        for INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE,
-        LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING,
-        INVOICE_NEED_POC_NAME, INVOICE_ADDRESS, INVOICE_NEED_JOB_DESCRIPTION,
-        and SMART_CAPTURE_NEED_DESCRIPTION, so there's no legacy flag left
-        to clear for any of them.
+        awaiting_job_description, awaiting_job_input, and
+        awaiting_invoice_poc_email are deliberately excluded: FlowMachine is
+        now the sole source of truth for INVOICE_AWAIT_SEND_CONFIRM,
+        BANK_DETAILS, NAME_CHANGE, LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL,
+        INVOICE_NEED_BILLING, INVOICE_NEED_POC_NAME, INVOICE_ADDRESS,
+        INVOICE_NEED_JOB_DESCRIPTION, SMART_CAPTURE_NEED_DESCRIPTION, and
+        INVOICE_READINESS_POC_EMAIL, so there's no legacy flag left to
+        clear for any of them.
         """
         from services.intent_service import _ALL_AWAITING_CLEAR_PATCH
         expected_flags = {
-            "awaiting_invoice_poc_email", "pending_disambiguation",
+            "pending_disambiguation",
         }
         for flag in expected_flags:
             assert flag in _ALL_AWAITING_CLEAR_PATCH, f"missing {flag}"
@@ -227,6 +228,7 @@ class TestClearFlowStateHelper:
                         "awaiting_name_change", "awaiting_link_id",
                         "awaiting_poc_email", "awaiting_client_billing",
                         "awaiting_poc_name", "awaiting_invoice_address",
-                        "awaiting_job_description", "awaiting_job_input"):
+                        "awaiting_job_description", "awaiting_job_input",
+                        "awaiting_invoice_poc_email"):
             assert removed not in _ALL_AWAITING_CLEAR_PATCH, \
                 f"{removed} should be removed — FlowMachine owns this flow exclusively now"

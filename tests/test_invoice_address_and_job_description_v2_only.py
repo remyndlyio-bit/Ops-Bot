@@ -15,10 +15,12 @@ how BANK_DETAILS had two arm sites for the analogous reason.
 INVOICE_NEED_JOB_DESCRIPTION has a single arm site (checkpoint 3).
 
 With this pair migrated, _prompt() (the shared invoice-readiness-gate
-helper) has exactly ONE caller left: the still-legacy
-awaiting_invoice_poc_email checkpoint. Every other checkpoint that used to
-share it (billing, poc_name, poc_email, bank_details, address, job
-description) now bypasses it via its own dedicated _arm_*_v2 helper.
+helper) had exactly ONE caller left: the awaiting_invoice_poc_email
+checkpoint, itself migrated in a later pass (see
+tests/test_invoice_readiness_poc_email_v2_only.py) — _prompt() itself is
+now deleted. Every checkpoint (billing, poc_name, poc_email, bank_details,
+address, job description, readiness poc_email) bypasses it via its own
+dedicated _arm_*_v2 helper.
 
 Both flows have no retry loop -- any non-cancel reply is accepted verbatim
 (the address text, or the job description text) -- matching NAME_CHANGE/
@@ -101,9 +103,9 @@ class TestArmInvoiceAddressV2Helper:
 
     def test_defensively_clears_other_legacy_flags(self):
         svc = _svc()
-        svc.memory.update_user_memory("u1", {"awaiting_invoice_poc_email": True})
+        svc.memory.update_user_memory("u1", {"awaiting_invoice_month": True})
         svc._arm_invoice_address_v2("u1", "Nike", "u1", {})
-        assert svc.memory.get_user_memory("u1")["awaiting_invoice_poc_email"] is False
+        assert svc.memory.get_user_memory("u1")["awaiting_invoice_month"] is False
 
     def test_no_legacy_flag_written(self):
         svc = _svc()

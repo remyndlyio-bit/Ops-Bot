@@ -101,9 +101,9 @@ class TestArmBankDetailsV2Helper:
         mutual-exclusivity guarantee _arm_awaiting provides for flows not
         yet migrated."""
         svc = _svc()
-        svc.memory.update_user_memory("u1", {"awaiting_invoice_poc_email": True})
+        svc.memory.update_user_memory("u1", {"awaiting_invoice_month": True})
         svc._arm_bank_details_v2("u1", pending_invoice=None)
-        assert svc.memory.get_user_memory("u1")["awaiting_invoice_poc_email"] is False
+        assert svc.memory.get_user_memory("u1")["awaiting_invoice_month"] is False
 
     def test_no_legacy_bank_details_flag_written(self):
         svc = _svc()

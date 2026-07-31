@@ -254,7 +254,7 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 | `awaiting_invoice_month` | — (reads `pending_invoice_client` / conversation) | *none* | ❌ Legacy-only. Not in `_reconcile_*`; a user mid-this-flow reads as FlowMachine-IDLE, so `dispatch_idle` (not `dispatch_in_flow`) handles their next message. |
 | `awaiting_compound_response` | `suggested_next_action` | *none* | ❌ Legacy-only. "Yes" after "You also mentioned: …" follow-up offer. Single-shot, would be a trivial Flow class. |
 | `awaiting_modify_field` | `modify_row_id` (in flag's own `extra` dict) | *none* | ❌ Legacy-only. Mid-modify field-value prompt (distinct from `DISAMBIGUATION`'s row-pick). Also has a `_cancelled` companion (`awaiting_modify_field_cancelled`) tracking a declined confirm, itself never migrated. |
-| `awaiting_invoice_poc_email` | `pending_poc_email_client`, `pending_poc_email_user_id`, `pending_poc_email_row_ids` | *none* | ❌ Legacy-only, and easy to confuse with the migrated `awaiting_poc_email` — this is the PRE-generation readiness gate; `awaiting_poc_email` is the SEND-time flow. Two different prompts, same shape. |
+| ~~`awaiting_invoice_poc_email`~~ | `pending_poc_email_client`, `pending_poc_email_user_id`, `pending_poc_email_row_ids` | `INVOICE_READINESS_POC_EMAIL` | ✅✅ **Deleted.** Easy to confuse with the earlier-migrated `awaiting_poc_email`/`INVOICE_NEED_POC_EMAIL` — this is the PRE-generation readiness gate; that one is the SEND-time flow. Was the shared `_prompt()` helper's LAST caller — with `_arm_invoice_readiness_poc_email_v2` replacing it, `_prompt()` itself was deleted entirely. Retry loop on invalid email, same shape as `BANK_DETAILS`. |
 
 ### 2. Other `pending_*` keys (no boolean gate — read directly)
 
@@ -360,6 +360,21 @@ cascade.
 **Remaining unmigrated: none — all 12 of the originally-mirrored flows are
 now FlowMachine-only.**
 
+### Post-2.3: INVOICE_READINESS_POC_EMAIL (formerly `awaiting_invoice_poc_email`)
+
+With Phase 2.3 complete, `awaiting_invoice_poc_email` — one of the six
+`❌ Legacy-only` rows, not one of the original 12 — got its own FlowMachine
+flow too, since it was specifically the LAST caller of the shared invoice-
+readiness-gate `_prompt()` helper. Migrating it let `_prompt()` be deleted
+outright (every other checkpoint had already moved to its own `_arm_*_v2`
+helper). Same retry-loop shape as `BANK_DETAILS`: an invalid email re-arms
+and re-asks (via the new `_arm_invoice_readiness_poc_email_v2`, called from
+both the gate's own checkpoint and the handler's own retry branch); a valid
+one saves and resumes the invoice flow. Deliberately named distinctly from
+`INVOICE_NEED_POC_EMAIL` (the SEND-time flow, asks for the address to
+deliver an already-generated PDF) — this one runs BEFORE generation, asking
+for an email on the job rows themselves.
+
 **Three pre-existing bugs surfaced during these migrations** (flagged
 separately, not fixed as part of state-ownership changes):
 `task_ab7501b3` (main.py's poc_email arm site writes a memory shape
@@ -381,10 +396,13 @@ not introduced by this migration).
   `flow_machine.set_state()` directly, keep a legacy-flag shim for
   as-yet-unported readers, delete the shim once every reader is moved.
   **(All 12 of these are now done — see "Progress update" above.)**
-- **6 rows are `❌ Legacy-only`** — no FlowMachine flow exists yet. Four are
-  simple single-prompt gates (`awaiting_invoice_month`,
-  `awaiting_compound_response`, `awaiting_modify_field`,
-  `awaiting_invoice_poc_email`) that fit the exact pattern WP-3 slices 2–3
+- **5 rows are `❌ Legacy-only`** — no FlowMachine flow exists yet.
+  `awaiting_invoice_poc_email` (the 6th) was migrated straight into
+  FlowMachine v2 (`INVOICE_READINESS_POC_EMAIL`) — it was the last caller
+  of the shared invoice-readiness-gate `_prompt()` helper, so migrating it
+  let that helper be deleted outright. Three simple single-prompt gates
+  remain (`awaiting_invoice_month`, `awaiting_compound_response`,
+  `awaiting_modify_field`) that fit the exact pattern WP-3 slices 2–3
   already proved out; the other two (`pending_value_fork`,
   `pending_reminder_offer`) are short-lived same-turn caches, not blocking
   gates, and may not need a Flow class at all.

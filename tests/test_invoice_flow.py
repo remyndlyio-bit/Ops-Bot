@@ -642,14 +642,23 @@ class TestInvoicePocEmailHandler:
         assert "ILIKE" in sql.upper() and "spotify" in sql.lower()
 
     def test_malformed_email_rearms_and_does_not_write(self):
+        # Phase 2.2 (post-2.3): the re-arm is FlowMachine-only now
+        # (_arm_invoice_readiness_poc_email_v2 writes flow_machine.set_state()
+        # directly instead of a legacy awaiting_invoice_poc_email flag) --
+        # but its context payload (pending_poc_email_*) still lands via
+        # svc.memory.update_user_memory, so that part of the assertion holds.
+        from services.flow_machine import FLOW_INVOICE_READINESS_POC_EMAIL, _MEM_KEY
         svc = self._svc()
         result = svc._handle_invoice_poc_email_response("u1", "karan@notanemail")
         assert result["operation"] == "invoice_poc_email_retry"
         assert self._updates(svc) == []
         rearmed = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
-                   if c.args[1].get("awaiting_invoice_poc_email")]
+                   if c.args[1].get("pending_poc_email_row_ids")]
         assert rearmed, "must re-arm so the next message is still read as the email"
         assert rearmed[-1]["pending_poc_email_row_ids"] == ["r1", "r2"], "context must survive the retry"
+        fm_writes = [c.args[1][_MEM_KEY] for c in svc.flow_machine._mem.update_user_memory.call_args_list
+                     if _MEM_KEY in c.args[1]]
+        assert fm_writes and fm_writes[-1]["flow"] == FLOW_INVOICE_READINESS_POC_EMAIL
 
     @pytest.mark.parametrize("msg", ["cancel", "stop", "abort", "nevermind"])
     def test_cancel_aborts_invoice_without_writing(self, msg):
@@ -665,12 +674,17 @@ class TestInvoicePocEmailHandler:
         svc._handle_invoice_poc_email_response("u1", "a@b.com")
         assert "o''brien" in self._updates(svc)[0].lower()
 
-    def test_clears_awaiting_state_on_success(self):
+    def test_clears_pending_poc_email_payload_on_success(self):
+        # No legacy awaiting_invoice_poc_email flag exists to clear anymore
+        # -- FlowMachine's own reset (done by the InvoiceReadinessPocEmail
+        # Flow wrapper, not this handler itself) is what ends the flow.
+        # This handler's own responsibility is just clearing its payload
+        # keys so a stale client/row-id set can't leak into a later turn.
         svc = self._svc()
         svc._handle_invoice_poc_email_response("u1", "karan@gmail.com")
         cleared = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
-                   if "awaiting_invoice_poc_email" in c.args[1]]
-        assert cleared and cleared[0]["awaiting_invoice_poc_email"] is False
+                   if "pending_poc_email_client" in c.args[1]]
+        assert cleared and cleared[0]["pending_poc_email_client"] is None
 
 
 class TestAddressUpdateCommand:
