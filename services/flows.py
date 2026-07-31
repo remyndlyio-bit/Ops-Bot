@@ -534,12 +534,11 @@ class LinkAccount(Flow):
 class InvoiceAddress(Flow):
     """Bot asked for the user's own business address for the invoice header
     — either the mandatory readiness-gate prompt mid invoice-generation, or
-    a standalone 'update my address' ask (_handle_address_update sets the
-    SAME awaiting flag for both entry points). Delegates to the existing
-    _handle_invoice_address_response, which already: accepts 'cancel'/
-    'stop'/'abort'/'nevermind'; resumes the invoice flow if one was pending;
-    otherwise just confirms the standalone update. Always completes in one
-    turn — no retry loop."""
+    a standalone 'update my address' ask (both call _arm_invoice_address_v2,
+    Phase 2.3). Delegates to the existing _handle_invoice_address_response,
+    which already: accepts 'cancel'/'stop'/'abort'/'nevermind'; resumes the
+    invoice flow if one was pending; otherwise just confirms the standalone
+    update. Always completes in one turn — no retry loop."""
 
     name = FLOW_INVOICE_ADDRESS
 

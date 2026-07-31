@@ -61,19 +61,19 @@ class TestReconciliation:
         svc.flow_machine.set_state.assert_not_called()
 
     def test_still_legacy_flag_reconciles_normally(self):
-        """A flow NOT yet migrated (awaiting_invoice_address) still
-        reconciles the normal way — this module's migrations didn't touch
-        the mechanism itself, only removed branches from it (awaiting_
-        client_billing and awaiting_poc_name, this module's own flows,
-        were migrated in a later Phase 2.3 pass than this file's original
-        writing)."""
+        """A flow NOT yet migrated (awaiting_job_input) still reconciles
+        the normal way — this module's migrations didn't touch the
+        mechanism itself, only removed branches from it. (Earlier examples
+        used by this test -- awaiting_client_billing, awaiting_poc_name,
+        awaiting_invoice_address -- were all migrated in later Phase 2.3
+        passes than this file's original writing.)"""
         svc = _make_svc()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
         svc.memory.get_form_state.return_value = None
-        from services.flow_machine import FLOW_INVOICE_ADDRESS
-        svc._reconcile_legacy_to_flow_machine("u1", {"awaiting_invoice_address": True})
+        from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+        svc._reconcile_legacy_to_flow_machine("u1", {"awaiting_job_input": True})
         args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_INVOICE_ADDRESS
+        assert args[1] == FLOW_SMART_CAPTURE_NEED_DESCRIPTION
 
     def test_disambiguation_checked_before_later_flags(self):
         """If a stale disambiguation and a still-legacy flag checked AFTER

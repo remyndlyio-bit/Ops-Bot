@@ -208,24 +208,25 @@ class TestClearFlowStateHelper:
 
         awaiting_send_confirmation, awaiting_bank_details,
         awaiting_name_change, awaiting_link_id, awaiting_poc_email,
-        awaiting_client_billing, and awaiting_poc_name are deliberately
-        excluded (Phase 2.3): FlowMachine is now the sole source of truth
-        for INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE,
-        LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING, and
-        INVOICE_NEED_POC_NAME, so there's no legacy flag left to clear for
-        any of them.
+        awaiting_client_billing, awaiting_poc_name, awaiting_invoice_address,
+        and awaiting_job_description are deliberately excluded (Phase 2.3):
+        FlowMachine is now the sole source of truth for
+        INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE, LINK_ACCOUNT,
+        INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING, INVOICE_NEED_POC_NAME,
+        INVOICE_ADDRESS, and INVOICE_NEED_JOB_DESCRIPTION, so there's no
+        legacy flag left to clear for any of them.
         """
         from services.intent_service import _ALL_AWAITING_CLEAR_PATCH
         expected_flags = {
             "awaiting_invoice_poc_email",
             "awaiting_job_input", "pending_disambiguation",
-            "awaiting_invoice_address", "awaiting_job_description",
         }
         for flag in expected_flags:
             assert flag in _ALL_AWAITING_CLEAR_PATCH, f"missing {flag}"
         for removed in ("awaiting_send_confirmation", "awaiting_bank_details",
                         "awaiting_name_change", "awaiting_link_id",
                         "awaiting_poc_email", "awaiting_client_billing",
-                        "awaiting_poc_name"):
+                        "awaiting_poc_name", "awaiting_invoice_address",
+                        "awaiting_job_description"):
             assert removed not in _ALL_AWAITING_CLEAR_PATCH, \
                 f"{removed} should be removed — FlowMachine owns this flow exclusively now"

@@ -91,12 +91,12 @@ _ALL_AWAITING_CLEAR_PATCH = {
     "poc_email_client":           None,
     "awaiting_job_input":         False,
     "pending_disambiguation":     None,
-    # awaiting_bank_details, awaiting_name_change, and awaiting_link_id
-    # removed (Phase 2.3) — FlowMachine is now the sole source of truth for
-    # BANK_DETAILS, NAME_CHANGE, and LINK_ACCOUNT.
-    "awaiting_invoice_address":   False,
+    # awaiting_bank_details, awaiting_name_change, awaiting_link_id,
+    # awaiting_invoice_address, and awaiting_job_description removed
+    # (Phase 2.3) — FlowMachine is now the sole source of truth for
+    # BANK_DETAILS, NAME_CHANGE, LINK_ACCOUNT, INVOICE_ADDRESS, and
+    # INVOICE_NEED_JOB_DESCRIPTION.
     "pending_address_user_id":    None,
-    "awaiting_job_description":   False,
     "pending_jobdesc_row_id":     None,
     "pending_jobdesc_user_id":    None,
 }
@@ -773,7 +773,6 @@ class IntentService:
             FLOW_IDLE,
             FLOW_SMART_CAPTURE_NEED_DESCRIPTION, FLOW_SMART_CAPTURE_CONFIRM_PENDING,
             FLOW_DISAMBIGUATION,
-            FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
         )
         # Already tracking — nothing to reconcile.
         if self.flow_machine.current_flow(user_id) != FLOW_IDLE:
@@ -836,20 +835,11 @@ class IntentService:
         # to reconcile FROM for any of them.
 
         # WP-3 slice 3: the last two invoice-readiness-gate prompts.
-        if user_mem.get("awaiting_invoice_address"):
-            pend = user_mem.get("pending_invoice") or {}
-            self.flow_machine.set_state(
-                user_id, FLOW_INVOICE_ADDRESS,
-                {"client_name": pend.get("client_name")},
-            )
-            return
-
-        if user_mem.get("awaiting_job_description"):
-            self.flow_machine.set_state(
-                user_id, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
-                {"row_id": user_mem.get("pending_jobdesc_row_id")},
-            )
-            return
+        # Neither has a branch here anymore (Phase 2.3) — INVOICE_ADDRESS
+        # and INVOICE_NEED_JOB_DESCRIPTION both write flow_machine.set_state()
+        # directly at their arm sites now (_arm_invoice_address_v2,
+        # _arm_job_description_v2), so there's no legacy flag left to
+        # reconcile FROM for either.
 
     def _sync_flow_machine_now(self, user_id: str) -> None:
         """Phase 2.2 (TODO.md): make FlowMachine reflect a just-armed legacy
@@ -973,6 +963,40 @@ class IntentService:
         patch["pending_invoice"] = pending_invoice
         self.memory.update_user_memory(user_id, patch)
 
+    def _arm_invoice_address_v2(self, user_id: str, client_name: Optional[str],
+                                 data_user_id: str, pending_invoice: Optional[dict]) -> None:
+        """Arm INVOICE_ADDRESS (Phase 2.3: FlowMachine-only, no legacy
+        flag). Called from BOTH of its arm sites — the standalone "update
+        my address" command (_handle_address_update, pending_invoice=None)
+        and the invoice-readiness gate's own checkpoint 5
+        (_invoice_readiness_check, which used to go through _prompt() —
+        bypassed here the same way the other gate checkpoints are)."""
+        from services.flow_machine import FLOW_INVOICE_ADDRESS
+        self.flow_machine.set_state(
+            user_id, FLOW_INVOICE_ADDRESS, {"client_name": client_name},
+        )
+        patch = {k: False for k in self._AWAITING_FLAGS}
+        patch["pending_disambiguation"] = None
+        patch["pending_address_user_id"] = data_user_id
+        patch["pending_invoice"] = pending_invoice
+        self.memory.update_user_memory(user_id, patch)
+
+    def _arm_job_description_v2(self, user_id: str, row_id, data_user_id: str,
+                                 pending_invoice: dict) -> None:
+        """Arm INVOICE_NEED_JOB_DESCRIPTION (Phase 2.3: FlowMachine-only,
+        no legacy flag). Single arm site — the gate's checkpoint 3
+        (_invoice_readiness_check), replacing its _prompt() call."""
+        from services.flow_machine import FLOW_INVOICE_NEED_JOB_DESCRIPTION
+        self.flow_machine.set_state(
+            user_id, FLOW_INVOICE_NEED_JOB_DESCRIPTION, {"row_id": row_id},
+        )
+        patch = {k: False for k in self._AWAITING_FLAGS}
+        patch["pending_disambiguation"] = None
+        patch["pending_jobdesc_row_id"] = row_id
+        patch["pending_jobdesc_user_id"] = data_user_id
+        patch["pending_invoice"] = pending_invoice
+        self.memory.update_user_memory(user_id, patch)
+
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
         """Store user message and bot response in conversation history."""
         self.memory.add_message(user_id, "user", user_message)
@@ -1003,14 +1027,15 @@ class IntentService:
     _AWAITING_FLAGS = (
         # awaiting_send_confirmation, awaiting_bank_details,
         # awaiting_name_change, awaiting_link_id, awaiting_poc_email,
-        # awaiting_client_billing, and awaiting_poc_name removed (Phase
-        # 2.3) — FlowMachine is now the sole source of truth for
+        # awaiting_client_billing, awaiting_poc_name,
+        # awaiting_invoice_address, and awaiting_job_description removed
+        # (Phase 2.3) — FlowMachine is now the sole source of truth for
         # INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE,
-        # LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING, and
-        # INVOICE_NEED_POC_NAME.
+        # LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING,
+        # INVOICE_NEED_POC_NAME, INVOICE_ADDRESS, and
+        # INVOICE_NEED_JOB_DESCRIPTION.
         "awaiting_job_input", "awaiting_compound_response", "awaiting_invoice_month",
-        "awaiting_invoice_address",
-        "awaiting_invoice_poc_email", "awaiting_job_description",
+        "awaiting_invoice_poc_email",
         "awaiting_modify_field",
     )
 
@@ -2785,10 +2810,7 @@ class IntentService:
             self._store_conversation(user_id, message, response)
             return {"operation": "address_updated", "response": response, "trigger_invoice": False, "invoice_data": {}}
         # No inline address → prompt for it (standalone update, no pending invoice).
-        self._arm_awaiting(user_id, "awaiting_invoice_address", {
-            "pending_address_user_id": data_user_id,
-            "pending_invoice": None,
-        })
+        self._arm_invoice_address_v2(user_id, None, data_user_id, None)
         response = ("Sure — what's your business address for the invoice header?\n\n"
                     "(multiple lines are fine — send the full new address)")
         self._store_conversation(user_id, message, response)
@@ -2796,12 +2818,15 @@ class IntentService:
 
     def _handle_invoice_address_response(self, user_id: str, message: str) -> Dict:
         """Store the invoicer's business address (mandatory) in profile preferences,
-        then re-enter the invoice flow. 'cancel' aborts the invoice."""
+        then re-enter the invoice flow. 'cancel' aborts the invoice.
+
+        Phase 2.3: no legacy awaiting_invoice_address flag left to clear —
+        FlowMachine reset happens in the caller, flows.py's InvoiceAddress,
+        which always resets, no retry loop."""
         user_mem = self.memory.get_user_memory(user_id)
         pending_invoice = user_mem.get("pending_invoice", {})
         addr_uid = user_mem.get("pending_address_user_id") or user_id
         self.memory.update_user_memory(user_id, {
-            "awaiting_invoice_address": False,
             "pending_address_user_id": None,
         })
 
@@ -2907,18 +2932,22 @@ class IntentService:
                 "payment for you later.\n\n(or 'cancel' to stop)"
             )
 
-        # 3. Job description — every line item needs one
+        # 3. Job description — every line item needs one.
+        # Phase 2.3: awaiting_job_description's legacy flag is gone, so this
+        # checkpoint can't go through _prompt() anymore — _arm_job_description_v2
+        # is the equivalent.
         _missing = [r for r in rows if not _present(r.get("job_description_details"))]
         if _missing:
             _r = _missing[0]
             _d = str(_r.get("job_date") or "")[:10]
             _when = f" dated {_d}" if _d else ""
-            return _prompt(
-                {"awaiting_job_description": True, "pending_jobdesc_row_id": _r.get("id"),
-                 "pending_jobdesc_user_id": data_user_id},
+            self._arm_job_description_v2(user_id, _r.get("id"), data_user_id, invoice_data)
+            _text = (
                 f"One job{_when} for {display_client} has no description.\n\n"
                 "What was the work? (e.g. '2 master films, English VO' — or 'cancel' to stop)"
             )
+            self._store_conversation(user_id, "", _text)
+            return {"operation": "ACTION_TRIGGER", "response": _text, "trigger_invoice": False, "invoice_data": {}}
 
         # 4. Bank account number — the client can't pay without it.
         # Phase 2.3: BANK_DETAILS' legacy flag is gone, so this checkpoint
@@ -2950,12 +2979,16 @@ class IntentService:
                     _prefs = json.loads(_prefs)
                 except (json.JSONDecodeError, TypeError):
                     _prefs = {}
+        # Phase 2.3: awaiting_invoice_address's legacy flag is gone —
+        # _arm_invoice_address_v2 replaces this _prompt() call.
         if not (_prefs.get("invoice_address") or "").strip():
-            return _prompt(
-                {"awaiting_invoice_address": True, "pending_address_user_id": data_user_id},
+            self._arm_invoice_address_v2(user_id, display_client, data_user_id, invoice_data)
+            _text = (
                 "Last thing — what's your business address for the invoice header? "
                 "It'll sit under your name.\n\n(multiple lines are fine — or 'cancel' to stop)"
             )
+            self._store_conversation(user_id, "", _text)
+            return {"operation": "ACTION_TRIGGER", "response": _text, "trigger_invoice": False, "invoice_data": {}}
 
         return None  # everything mandatory is present → proceed
 
@@ -2982,13 +3015,16 @@ class IntentService:
 
     def _handle_job_description_response(self, user_id: str, message: str) -> Dict:
         """Save the supplied description to the pending job row, then re-enter the
-        invoice flow (which prompts for the next missing field or generates)."""
+        invoice flow (which prompts for the next missing field or generates).
+
+        Phase 2.3: no legacy awaiting_job_description flag left to clear —
+        FlowMachine reset happens in the caller, flows.py's
+        InvoiceNeedJobDescription, which always resets, no retry loop."""
         user_mem = self.memory.get_user_memory(user_id)
         pending_invoice = user_mem.get("pending_invoice", {})
         row_id = user_mem.get("pending_jobdesc_row_id")
         uid = user_mem.get("pending_jobdesc_user_id", user_id)
         self.memory.update_user_memory(user_id, {
-            "awaiting_job_description": False,
             "pending_jobdesc_row_id": None,
             "pending_jobdesc_user_id": None,
         })
@@ -3435,15 +3471,15 @@ class IntentService:
         _mem = self.memory.get_user_memory(user_id)
         # awaiting_send_confirmation, awaiting_bank_details,
         # awaiting_name_change, awaiting_link_id, awaiting_poc_email,
-        # awaiting_client_billing, and awaiting_poc_name removed (Phase
-        # 2.3) — FlowMachine is the sole source of truth for those seven
-        # flows now, checked explicitly below instead of via the legacy
-        # flag list.
+        # awaiting_client_billing, awaiting_poc_name,
+        # awaiting_invoice_address, and awaiting_job_description removed
+        # (Phase 2.3) — FlowMachine is the sole source of truth for those
+        # nine flows now, checked explicitly below instead of via the
+        # legacy flag list.
         _active_subflow = bool(_mem.get("pending_disambiguation")) or any(
             _mem.get(k) for k in (
                 "awaiting_job_input", "awaiting_invoice_month",
                 "awaiting_modify_field", "awaiting_compound_response",
-                "awaiting_invoice_address", "awaiting_job_description",
                 "awaiting_invoice_poc_email",
             )
         )
@@ -3452,11 +3488,13 @@ class IntentService:
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
                 FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
                 FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
+                FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
             )
             _active_subflow = self.flow_machine.current_flow(user_id) in (
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
                 FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
                 FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
+                FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
             )
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
@@ -4086,15 +4124,16 @@ class IntentService:
                     # mid-migration flows still use legacy handlers.
                     # awaiting_send_confirmation, awaiting_bank_details,
                     # awaiting_name_change, awaiting_link_id,
-                    # awaiting_poc_email, awaiting_client_billing, and
-                    # awaiting_poc_name removed (Phase 2.3): FlowMachine's
-                    # own current_flow check (the `if _v2_in_owned_flow`
-                    # above this else) already routes those flows
-                    # correctly — nothing left to list here for them.
+                    # awaiting_poc_email, awaiting_client_billing,
+                    # awaiting_poc_name, awaiting_invoice_address, and
+                    # awaiting_job_description removed (Phase 2.3):
+                    # FlowMachine's own current_flow check (the `if
+                    # _v2_in_owned_flow` above this else) already routes
+                    # those flows correctly — nothing left to list here for
+                    # them.
                     _idle_blockers = (
                         "awaiting_job_input", "awaiting_invoice_month",
                         "awaiting_modify_field", "pending_disambiguation",
-                        "awaiting_invoice_address", "awaiting_job_description",
                         "awaiting_invoice_poc_email",
                     )
                     _is_idle = (
@@ -4408,17 +4447,13 @@ class IntentService:
                 note_route("awaiting_invoice_poc_email")
                 return self._handle_invoice_poc_email_response(user_id, message)
 
-            # 0b1.9. Check if user is providing their business address for the invoice (#2)
-            if user_mem.get("awaiting_invoice_address"):
-                logger.info(f"[ROUTE] awaiting_invoice_address claimed message: {message[:60]!r}")
-                note_route("awaiting_invoice_address")
-                return self._handle_invoice_address_response(user_id, message)
-
-            # 0b1.10. Check if user is providing a missing job description (#3)
-            if user_mem.get("awaiting_job_description"):
-                logger.info(f"[ROUTE] awaiting_job_description claimed message: {message[:60]!r}")
-                note_route("awaiting_job_description")
-                return self._handle_job_description_response(user_id, message)
+            # 0b1.9 / 0b1.10. (removed, Phase 2.3) — business-address and
+            # job-description replies are now owned exclusively by
+            # dispatch_in_flow / flows.py's InvoiceAddress and
+            # InvoiceNeedJobDescription (FLOW_RESPONSE / CANCEL), reached
+            # earlier in this function via the v2 in-flow block above. No
+            # legacy awaiting_invoice_address / awaiting_job_description
+            # flags exist to check here.
 
             # 0b2. (removed, Phase 2.3) — bank-details response is now owned
             # exclusively by dispatch_in_flow / flows.py's BankDetails

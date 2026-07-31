@@ -53,41 +53,11 @@ class TestFlowMachineRegistration:
 
 
 class TestReconciliation:
-    def test_reconciles_invoice_address_with_client_context(self):
-        svc = _make_svc()
-        svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = None
-        svc._reconcile_legacy_to_flow_machine("u1", {
-            "awaiting_invoice_address": True,
-            "pending_invoice": {"client_name": "Nike"},
-        })
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_INVOICE_ADDRESS
-        assert args[2]["client_name"] == "Nike"
-
-    def test_reconciles_standalone_address_update_no_pending_invoice(self):
-        """_handle_address_update (a standalone 'update my address' command,
-        not mid invoice-generation) sets the SAME flag with no pending_invoice."""
-        svc = _make_svc()
-        svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = None
-        svc._reconcile_legacy_to_flow_machine("u1", {"awaiting_invoice_address": True})
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_INVOICE_ADDRESS
-        assert args[2]["client_name"] is None
-
-    def test_reconciles_job_description_with_row_context(self):
-        svc = _make_svc()
-        svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = None
-        svc._reconcile_legacy_to_flow_machine("u1", {
-            "awaiting_job_description": True,
-            "pending_jobdesc_row_id": "row-42",
-        })
-        args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_INVOICE_NEED_JOB_DESCRIPTION
-        assert args[2]["row_id"] == "row-42"
-
+    # Phase 2.3: awaiting_invoice_address and awaiting_job_description are
+    # both FlowMachine-only now — no reconciliation branch left for either
+    # (their arm sites, _arm_invoice_address_v2 / _arm_job_description_v2,
+    # write flow_machine.set_state() directly). Arm-site behavior itself is
+    # covered by tests/test_invoice_address_and_job_description_v2_only.py.
     def test_no_flags_no_op(self):
         svc = _make_svc()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
@@ -95,19 +65,37 @@ class TestReconciliation:
         svc._reconcile_legacy_to_flow_machine("u1", {})
         svc.flow_machine.set_state.assert_not_called()
 
+    def test_still_legacy_flag_reconciles_normally(self):
+        """A flow NOT yet migrated (awaiting_job_input) still reconciles
+        the normal way -- confirms this module's migration didn't touch
+        the reconciliation mechanism itself."""
+        svc = _make_svc()
+        svc.flow_machine.current_flow.return_value = FLOW_IDLE
+        svc.memory.get_form_state.return_value = None
+        from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+        svc._reconcile_legacy_to_flow_machine("u1", {"awaiting_job_input": True})
+        args = svc.flow_machine.set_state.call_args.args
+        assert args[1] == FLOW_SMART_CAPTURE_NEED_DESCRIPTION
 
-class TestTTLStalenessClears:
-    @pytest.mark.parametrize("flag", [
-        "awaiting_invoice_address", "pending_address_user_id",
-        "awaiting_job_description", "pending_jobdesc_row_id", "pending_jobdesc_user_id",
-    ])
-    def test_stale_clear_includes_flag(self, flag):
-        # _stale_clear was factored out into the shared _ALL_AWAITING_CLEAR_PATCH
-        # module constant (services/intent_service.py) — used by both the TTL
-        # site and dispatch_in_flow's NEW_FLOW branch via
-        # IntentService._clear_flow_state.
+
+class TestNoLegacyMirrorForTheseTwoFlows:
+    """Phase 2.3: awaiting_invoice_address and awaiting_job_description are
+    both gone -- neither exists in _ALL_AWAITING_CLEAR_PATCH (the TTL/
+    NEW_FLOW clear patch) or _AWAITING_FLAGS anymore. Their pending_* payload
+    keys stay (still read by the handlers regardless of entry point)."""
+
+    def test_awaiting_flags_removed_but_payload_keys_stay(self):
         from services.intent_service import _ALL_AWAITING_CLEAR_PATCH
-        assert flag in _ALL_AWAITING_CLEAR_PATCH
+        assert "awaiting_invoice_address" not in _ALL_AWAITING_CLEAR_PATCH
+        assert "awaiting_job_description" not in _ALL_AWAITING_CLEAR_PATCH
+        for payload_key in ("pending_address_user_id", "pending_jobdesc_row_id",
+                            "pending_jobdesc_user_id"):
+            assert payload_key in _ALL_AWAITING_CLEAR_PATCH, f"missing {payload_key}"
+
+    def test_none_in_awaiting_flags(self):
+        svc = _make_svc()
+        assert "awaiting_invoice_address" not in svc._AWAITING_FLAGS
+        assert "awaiting_job_description" not in svc._AWAITING_FLAGS
 
 
 class TestInvoiceAddressFlow:

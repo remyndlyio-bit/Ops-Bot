@@ -698,11 +698,17 @@ class TestAddressUpdateCommand:
         assert svc.supabase.upsert_user_profile.call_args[0][2]["preferences"]["invoice_address"] == "12 MG Road, Mumbai"
 
     def test_bare_command_prompts(self):
+        """Phase 2.3: no legacy awaiting_invoice_address flag exists —
+        FlowMachine (flow_machine.set_state) is INVOICE_ADDRESS' source of
+        truth. pending_invoice is still cleared via the legacy patch."""
         svc = self._svc()
+        svc.flow_machine = MagicMock()
         r = svc._handle_address_update("u1", "update my address", "u1")
         assert r["trigger_invoice"] is False and "address" in r["response"].lower()
+        from services.flow_machine import FLOW_INVOICE_ADDRESS
+        svc.flow_machine.set_state.assert_called_once_with("u1", FLOW_INVOICE_ADDRESS, {"client_name": None})
         patch = svc.memory.update_user_memory.call_args[0][1]
-        assert patch.get("awaiting_invoice_address") is True and patch.get("pending_invoice") is None
+        assert patch.get("pending_invoice") is None
 
     def test_persist_helper_preserves_other_prefs(self):
         svc = self._svc()

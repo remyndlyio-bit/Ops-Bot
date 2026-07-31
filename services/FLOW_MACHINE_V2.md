@@ -249,8 +249,8 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 | ~~`awaiting_bank_details`~~ | — (`pending_invoice` shared with other checkpoints) | `BANK_DETAILS` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Second flow migrated; more involved than send-confirm due to a shared `_prompt()` helper (5 other checkpoints) and a check-after retry pattern, both worked around without touching the other checkpoints. |
 | ~~`awaiting_name_change`~~ | — | `NAME_CHANGE` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Simplest migration in this batch: single arm site, no retry loop. |
 | ~~`awaiting_link_id`~~ | — | `LINK_ACCOUNT` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Uncovered a real pre-existing bug during migration: `LinkAccount.handle_response`'s docstring claimed "always completes in one turn," but `_process_link_id` has an invalid-ID retry path that only "worked" pre-migration via the legacy flag re-arming + reconciliation-on-next-message side door. Fixed to check the returned operation directly (`link_invalid_id`), same pattern as `BankDetails`. |
-| `awaiting_invoice_address` | `pending_invoice`, `pending_address_user_id` | `INVOICE_ADDRESS` | ✅ Mirrored + owned (WP-3.3) |
-| `awaiting_job_description` | `pending_jobdesc_row_id`, `pending_jobdesc_user_id` | `INVOICE_NEED_JOB_DESCRIPTION` | ✅ Mirrored + owned (WP-3.3) |
+| ~~`awaiting_invoice_address`~~ | `pending_invoice`, `pending_address_user_id` | `INVOICE_ADDRESS` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. Two arm sites (standalone command + gate checkpoint), both via `_arm_invoice_address_v2`. |
+| ~~`awaiting_job_description`~~ | `pending_jobdesc_row_id`, `pending_jobdesc_user_id` | `INVOICE_NEED_JOB_DESCRIPTION` | ✅✅ **Deleted** (Phase 2.3) — FlowMachine is the sole source of truth. `_arm_job_description_v2` replaces the last-but-one `_prompt()` caller. |
 | `awaiting_invoice_month` | — (reads `pending_invoice_client` / conversation) | *none* | ❌ Legacy-only. Not in `_reconcile_*`; a user mid-this-flow reads as FlowMachine-IDLE, so `dispatch_idle` (not `dispatch_in_flow`) handles their next message. |
 | `awaiting_compound_response` | `suggested_next_action` | *none* | ❌ Legacy-only. "Yes" after "You also mentioned: …" follow-up offer. Single-shot, would be a trivial Flow class. |
 | `awaiting_modify_field` | `modify_row_id` (in flag's own `extra` dict) | *none* | ❌ Legacy-only. Mid-modify field-value prompt (distinct from `DISAMBIGUATION`'s row-pick). Also has a `_cancelled` companion (`awaiting_modify_field_cancelled`) tracking a declined confirm, itself never migrated. |
@@ -292,6 +292,32 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 | `answer_ledger` (`services/answer_ledger.py`) | Bot's memory of its own claims (question → scope → value), zero-LLM scope-question answering | ✅ TODO.md: "this one is fine, keep it." Already the intended replacement for `uscf_context`. |
 | `flow_v2` (`services/flow_machine.py`) | FlowMachine's own state: `{flow, context, started_at, stack}` | ✅ This IS the target architecture — everything above migrates INTO this. |
 
+### Progress update (Phase 2.3, in progress)
+
+**9 of the 12 originally-`✅ Mirrored + owned` rows are now `✅✅ Deleted`**:
+`INVOICE_AWAIT_SEND_CONFIRM`, `BANK_DETAILS`, `NAME_CHANGE`, `LINK_ACCOUNT`,
+`INVOICE_NEED_POC_EMAIL`, `INVOICE_NEED_BILLING`, `INVOICE_NEED_POC_NAME`,
+`INVOICE_ADDRESS`, `INVOICE_NEED_JOB_DESCRIPTION` — FlowMachine is their sole
+source of truth, no legacy flag or reconciliation branch left for any of
+them. The shared `_prompt()` helper (used by 6 of the invoice-readiness-gate
+checkpoints originally) now has exactly **one caller left**:
+`awaiting_invoice_poc_email` — still legacy, no migration needed yet.
+
+**Remaining unmigrated (3 of 12)**: `SMART_CAPTURE_NEED_DESCRIPTION`
+(`awaiting_job_input`), `SMART_CAPTURE_CONFIRM_PENDING` (form_state — a
+different write mechanism via `memory.start_form()`), and `DISAMBIGUATION`
+(`pending_disambiguation` — largest remaining blast radius, many read
+sites beyond the arm/reconcile pattern the other 9 followed).
+
+**Two pre-existing bugs surfaced during these migrations** (flagged
+separately, not fixed as part of state-ownership changes):
+`task_ab7501b3` (main.py's poc_email arm site writes a memory shape
+`_handle_poc_email_response` never reads) and `task_1b10c22c`
+(`InvoiceNeedBilling`/`InvoiceNeedPocName`'s `on_cancel` passes the literal
+string `"skip"`, which isn't in their handlers' cancel-word set, so a
+CANCEL-classified message ends up saving "skip" as real data instead of
+aborting the invoice).
+
 ### Reading this table for Phase 2.2–2.4
 
 - **12 rows are `✅ Mirrored + owned`** — FlowMachine already tracks these
@@ -299,6 +325,7 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
   are Phase 2.2's easiest targets: flip the arm-site to call
   `flow_machine.set_state()` directly, keep a legacy-flag shim for
   as-yet-unported readers, delete the shim once every reader is moved.
+  **(9 of these 12 are now done — see "Progress update" above.)**
 - **6 rows are `❌ Legacy-only`** — no FlowMachine flow exists yet. Four are
   simple single-prompt gates (`awaiting_invoice_month`,
   `awaiting_compound_response`, `awaiting_modify_field`,
