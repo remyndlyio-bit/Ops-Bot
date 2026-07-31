@@ -249,18 +249,17 @@ class SmartCaptureNeedDescription(Flow):
         # next message arrives in SMART_CAPTURE_CONFIRM_PENDING.
         result = intent_service._extract_and_confirm(user_id, message)
         # If extraction came back empty, _extract_and_confirm RE-PROMPTS for
-        # job input. Stay in this flow. Otherwise transition to the confirm
-        # state via flow_machine (parallel writer).
+        # job input (operation "smart_capture_prompt") — stay in this flow.
+        # Otherwise transition to the confirm state via flow_machine.
         try:
             from services.flow_machine import FLOW_SMART_CAPTURE_CONFIRM_PENDING
-            user_mem_after = intent_service.memory.get_user_memory(user_id) or {}
             if intent_service.memory.get_form_state(user_id):
                 # Form started → confirm pending.
                 intent_service.flow_machine.set_state(
                     user_id, FLOW_SMART_CAPTURE_CONFIRM_PENDING, {"source": "smart_capture"}
                 )
-            elif not user_mem_after.get("awaiting_job_input"):
-                # No form, no awaiting → done somehow → reset.
+            elif result.get("operation") != "smart_capture_prompt":
+                # No form, not re-prompting → done somehow → reset.
                 intent_service.flow_machine.reset(user_id)
             # else: still awaiting more job input, stay in this flow.
         except Exception as e:
@@ -271,7 +270,6 @@ class SmartCaptureNeedDescription(Flow):
         return "\n\nStill waiting on the job description — send it in one message, or 'cancel' to drop the form."
 
     def on_cancel(self, intent_service, user_id, message, context):
-        intent_service.memory.update_user_memory(user_id, {"awaiting_job_input": False})
         try:
             intent_service.flow_machine.reset(user_id)
         except Exception:
@@ -296,10 +294,15 @@ class SmartCaptureConfirmPending(Flow):
     def handle_response(self, intent_service, user_id, message, context):
         logger.info(f"[FLOW_V2] SmartCaptureConfirmPending.handle_response user={user_id}")
         result = intent_service._handle_form_step(user_id, message)
-        # _handle_form_step may complete the form (form_state cleared) or
-        # stay in confirm (still awaiting). Sync v2 to whichever.
+        # _handle_form_step may complete the form (form_state cleared), stay
+        # in confirm (still awaiting), or route to "Edit" — which cancels
+        # the form AND transitions v2 to SMART_CAPTURE_NEED_DESCRIPTION via
+        # _arm_smart_capture_description_v2 (see _handle_smart_capture_confirm).
+        # Don't let this handler's own form_state check clobber that.
         try:
-            if not intent_service.memory.get_form_state(user_id):
+            if result.get("operation") == "smart_capture_edit":
+                pass  # already transitioned back to SMART_CAPTURE_NEED_DESCRIPTION
+            elif not intent_service.memory.get_form_state(user_id):
                 intent_service.flow_machine.reset(user_id)
             # else: still in confirm, leave v2 state as-is.
         except Exception:

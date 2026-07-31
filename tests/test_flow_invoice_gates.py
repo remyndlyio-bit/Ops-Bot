@@ -65,17 +65,20 @@ class TestReconciliation:
         svc._reconcile_legacy_to_flow_machine("u1", {})
         svc.flow_machine.set_state.assert_not_called()
 
-    def test_still_legacy_flag_reconciles_normally(self):
-        """A flow NOT yet migrated (awaiting_job_input) still reconciles
-        the normal way -- confirms this module's migration didn't touch
-        the reconciliation mechanism itself."""
+    def test_form_state_still_reconciles_normally(self):
+        """The one remaining boolean-mirror-free branch (form_state ->
+        SMART_CAPTURE_CONFIRM_PENDING) still reconciles the normal way --
+        confirms this module's migration didn't touch the reconciliation
+        mechanism itself. (awaiting_job_input, this test's earlier example,
+        was migrated in a later Phase 2.3 pass -- no boolean legacy flags
+        are left to reconcile FROM at all now.)"""
         svc = _make_svc()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = None
-        from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION
-        svc._reconcile_legacy_to_flow_machine("u1", {"awaiting_job_input": True})
+        svc.memory.get_form_state.return_value = {"step": "confirm"}
+        from services.flow_machine import FLOW_SMART_CAPTURE_CONFIRM_PENDING
+        svc._reconcile_legacy_to_flow_machine("u1", {})
         args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+        assert args[1] == FLOW_SMART_CAPTURE_CONFIRM_PENDING
 
 
 class TestNoLegacyMirrorForTheseTwoFlows:

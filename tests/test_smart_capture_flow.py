@@ -241,14 +241,23 @@ class TestSmartCaptureConfirm:
 
     @pytest.mark.parametrize("msg", ["edit", "change", "modify", "fix"])
     def test_edit_replies_prompt_for_correction_without_saving(self, msg):
+        # Phase 2.3: the "Edit" branch no longer writes a legacy
+        # awaiting_job_input flag — it transitions FlowMachine directly to
+        # SMART_CAPTURE_NEED_DESCRIPTION via _arm_smart_capture_description_v2.
         svc = _make_svc()
         form = _form("smart_capture_confirm", values=dict(self.VALUES))
         result = svc._handle_smart_capture_confirm("u1", msg, form)
         assert result["operation"] == "smart_capture_edit"
         svc.supabase.insert_job_entry.assert_not_called()
-        awaiting = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
-                    if "awaiting_job_input" in c.args[1]]
-        assert awaiting and awaiting[-1]["awaiting_job_input"] is True
+        # flow_machine binds to the memory instance present at IntentService
+        # construction time (services/intent_service.py's __init__), which
+        # is a different mock object than svc.memory (reassigned after
+        # construction by _make_svc) -- so writes must be read from
+        # svc.flow_machine._mem, not svc.memory.
+        from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION, _MEM_KEY
+        fm_writes = [c.args[1][_MEM_KEY] for c in svc.flow_machine._mem.update_user_memory.call_args_list
+                     if _MEM_KEY in c.args[1]]
+        assert fm_writes and fm_writes[-1]["flow"] == FLOW_SMART_CAPTURE_NEED_DESCRIPTION
 
     def test_unrecognised_reply_reprompts_first_time(self):
         svc = _make_svc()

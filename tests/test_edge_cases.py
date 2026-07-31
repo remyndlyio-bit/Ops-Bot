@@ -1137,9 +1137,10 @@ class TestReminderDoesNotHijack:
     def test_job_description_with_numbers_not_hijacked(self):
         """The exact production case: a job description containing dates/fees must
         fall through (return None), not be read as a reminder selection."""
+        from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION
         res = self._run(
             "Client content lab, brand Pepsi, date 5 may 2025, 2 master films, fees 20k",
-            {"awaiting_job_input": True},
+            {}, flow_machine_flow=FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
         )
         assert res is None, f"Reminder hijacked the job description: {res}"
 
@@ -1156,7 +1157,8 @@ class TestReminderDoesNotHijack:
 
     def test_standalone_number_yields_during_add_job(self):
         """Mid-add-job, even a bare '1' belongs to the job flow, not the reminder."""
-        assert self._run("1", {"awaiting_job_input": True}) is None
+        from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+        assert self._run("1", {}, flow_machine_flow=FLOW_SMART_CAPTURE_NEED_DESCRIPTION) is None
 
     def test_skip_yields_during_subflow(self):
         """'skip'/'cancel' mid-flow must not be stolen to clear reminders.

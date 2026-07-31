@@ -294,20 +294,35 @@ already mirrored into FlowMachine via `_reconcile_legacy_to_flow_machine`;
 
 ### Progress update (Phase 2.3, in progress)
 
-**9 of the 12 originally-`✅ Mirrored + owned` rows are now `✅✅ Deleted`**:
+**10 of the 12 originally-`✅ Mirrored + owned` rows are now `✅✅ Deleted`**:
 `INVOICE_AWAIT_SEND_CONFIRM`, `BANK_DETAILS`, `NAME_CHANGE`, `LINK_ACCOUNT`,
 `INVOICE_NEED_POC_EMAIL`, `INVOICE_NEED_BILLING`, `INVOICE_NEED_POC_NAME`,
-`INVOICE_ADDRESS`, `INVOICE_NEED_JOB_DESCRIPTION` — FlowMachine is their sole
-source of truth, no legacy flag or reconciliation branch left for any of
-them. The shared `_prompt()` helper (used by 6 of the invoice-readiness-gate
-checkpoints originally) now has exactly **one caller left**:
-`awaiting_invoice_poc_email` — still legacy, no migration needed yet.
+`INVOICE_ADDRESS`, `INVOICE_NEED_JOB_DESCRIPTION`, `SMART_CAPTURE_NEED_DESCRIPTION`
+— FlowMachine is their sole source of truth, no legacy flag or reconciliation
+branch left for any of them. The shared `_prompt()` helper (used by 6 of the
+invoice-readiness-gate checkpoints originally) now has exactly **one caller
+left**: `awaiting_invoice_poc_email` — still legacy, no migration needed yet.
 
-**Remaining unmigrated (3 of 12)**: `SMART_CAPTURE_NEED_DESCRIPTION`
-(`awaiting_job_input`), `SMART_CAPTURE_CONFIRM_PENDING` (form_state — a
-different write mechanism via `memory.start_form()`), and `DISAMBIGUATION`
-(`pending_disambiguation` — largest remaining blast radius, many read
-sites beyond the arm/reconcile pattern the other 9 followed).
+`SMART_CAPTURE_NEED_DESCRIPTION` (formerly `awaiting_job_input`) was the most
+involved of the ten: three arm sites (`_start_smart_capture`,
+`_extract_and_confirm`'s retry branch, `_handle_smart_capture_confirm`'s
+"Edit" branch), a genuine 3-way transition in
+`SmartCaptureNeedDescription.handle_response` (stay / advance to confirm-
+pending / reset), and a real bug fixed in a *different* flow class —
+`SmartCaptureConfirmPending.handle_response`'s blanket
+`if not form_state: reset()` would have clobbered the Edit transition back to
+`SMART_CAPTURE_NEED_DESCRIPTION` (form_state IS gone right after
+`cancel_form()`), the same class of bug `LINK_ACCOUNT` had. The legacy
+dispatch block's `is_new_query_not_response` escape-hatch LLM call was
+deleted outright (not ported) — the v2 classifier's per-flow guidance
+already makes the identical distinction, and `dispatch_in_flow`'s
+SIDE_QUESTION handling routes those messages correctly earlier in the
+cascade.
+
+**Remaining unmigrated (2 of 12)**: `SMART_CAPTURE_CONFIRM_PENDING`
+(form_state — a different write mechanism via `memory.start_form()`), and
+`DISAMBIGUATION` (`pending_disambiguation` — largest remaining blast radius,
+many read sites beyond the arm/reconcile pattern the other 10 followed).
 
 **Two pre-existing bugs surfaced during these migrations** (flagged
 separately, not fixed as part of state-ownership changes):
@@ -325,7 +340,7 @@ aborting the invoice).
   are Phase 2.2's easiest targets: flip the arm-site to call
   `flow_machine.set_state()` directly, keep a legacy-flag shim for
   as-yet-unported readers, delete the shim once every reader is moved.
-  **(9 of these 12 are now done — see "Progress update" above.)**
+  **(10 of these 12 are now done — see "Progress update" above.)**
 - **6 rows are `❌ Legacy-only`** — no FlowMachine flow exists yet. Four are
   simple single-prompt gates (`awaiting_invoice_month`,
   `awaiting_compound_response`, `awaiting_modify_field`,

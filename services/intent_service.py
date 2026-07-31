@@ -89,13 +89,13 @@ _ALL_AWAITING_CLEAR_PATCH = {
     # pre-existing gap where that site's payload shape isn't actually read
     # by _handle_poc_email_response).
     "poc_email_client":           None,
-    "awaiting_job_input":         False,
     "pending_disambiguation":     None,
     # awaiting_bank_details, awaiting_name_change, awaiting_link_id,
-    # awaiting_invoice_address, and awaiting_job_description removed
-    # (Phase 2.3) — FlowMachine is now the sole source of truth for
-    # BANK_DETAILS, NAME_CHANGE, LINK_ACCOUNT, INVOICE_ADDRESS, and
-    # INVOICE_NEED_JOB_DESCRIPTION.
+    # awaiting_invoice_address, awaiting_job_description, and
+    # awaiting_job_input removed (Phase 2.3) — FlowMachine is now the sole
+    # source of truth for BANK_DETAILS, NAME_CHANGE, LINK_ACCOUNT,
+    # INVOICE_ADDRESS, INVOICE_NEED_JOB_DESCRIPTION, and
+    # SMART_CAPTURE_NEED_DESCRIPTION.
     "pending_address_user_id":    None,
     "pending_jobdesc_row_id":     None,
     "pending_jobdesc_user_id":    None,
@@ -805,11 +805,12 @@ class IntentService:
         # site) write flow_machine.set_state() directly, so FlowMachine is
         # already correct at arm time.
 
-        if user_mem.get("awaiting_job_input"):
-            self.flow_machine.set_state(
-                user_id, FLOW_SMART_CAPTURE_NEED_DESCRIPTION, {},
-            )
-            return
+        # NOTE: SMART_CAPTURE_NEED_DESCRIPTION has no reconciliation branch
+        # here (Phase 2.3) — all its arm sites (_start_smart_capture,
+        # _extract_and_confirm's retry branch, and
+        # _handle_smart_capture_confirm's "Edit" branch) write
+        # flow_machine.set_state() directly via
+        # _arm_smart_capture_description_v2().
 
         # WP-3: numbered "which one did you mean?" / bulk-delete-confirm
         # prompt. Checked LAST (mirrors the legacy precedence at the
@@ -997,6 +998,21 @@ class IntentService:
         patch["pending_invoice"] = pending_invoice
         self.memory.update_user_memory(user_id, patch)
 
+    def _arm_smart_capture_description_v2(self, user_id: str) -> None:
+        """Arm SMART_CAPTURE_NEED_DESCRIPTION (Phase 2.3: FlowMachine-only,
+        no legacy flag). THREE arm sites: _start_smart_capture (the flow's
+        entry point, "add a job" with no inline content), _extract_and_
+        confirm's "nothing extracted" retry branch, and
+        _handle_smart_capture_confirm's "Edit" branch (transitioning BACK
+        from SMART_CAPTURE_CONFIRM_PENDING — see flows.py's
+        SmartCaptureConfirmPending.handle_response, which now checks the
+        returned operation instead of blindly resetting)."""
+        from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+        self.flow_machine.set_state(user_id, FLOW_SMART_CAPTURE_NEED_DESCRIPTION, {})
+        patch = {k: False for k in self._AWAITING_FLAGS}
+        patch["pending_disambiguation"] = None
+        self.memory.update_user_memory(user_id, patch)
+
     def _store_conversation(self, user_id: str, user_message: str, bot_response: str):
         """Store user message and bot response in conversation history."""
         self.memory.add_message(user_id, "user", user_message)
@@ -1028,13 +1044,13 @@ class IntentService:
         # awaiting_send_confirmation, awaiting_bank_details,
         # awaiting_name_change, awaiting_link_id, awaiting_poc_email,
         # awaiting_client_billing, awaiting_poc_name,
-        # awaiting_invoice_address, and awaiting_job_description removed
-        # (Phase 2.3) — FlowMachine is now the sole source of truth for
-        # INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS, NAME_CHANGE,
-        # LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL, INVOICE_NEED_BILLING,
-        # INVOICE_NEED_POC_NAME, INVOICE_ADDRESS, and
-        # INVOICE_NEED_JOB_DESCRIPTION.
-        "awaiting_job_input", "awaiting_compound_response", "awaiting_invoice_month",
+        # awaiting_invoice_address, awaiting_job_description, and
+        # awaiting_job_input removed (Phase 2.3) — FlowMachine is now the
+        # sole source of truth for INVOICE_AWAIT_SEND_CONFIRM, BANK_DETAILS,
+        # NAME_CHANGE, LINK_ACCOUNT, INVOICE_NEED_POC_EMAIL,
+        # INVOICE_NEED_BILLING, INVOICE_NEED_POC_NAME, INVOICE_ADDRESS,
+        # INVOICE_NEED_JOB_DESCRIPTION, and SMART_CAPTURE_NEED_DESCRIPTION.
+        "awaiting_compound_response", "awaiting_invoice_month",
         "awaiting_invoice_poc_email",
         "awaiting_modify_field",
     )
@@ -2156,7 +2172,7 @@ class IntentService:
                 "Fees: 25k"
             )
             self.memory.cancel_form(user_id)
-            self._arm_awaiting(user_id, "awaiting_job_input")
+            self._arm_smart_capture_description_v2(user_id)
             self._store_conversation(user_id, message, response)
             return {"operation": "smart_capture_edit", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
@@ -2353,7 +2369,7 @@ class IntentService:
         logger.info(f"[SMART_CAPTURE] Original='{message}' -> Cleaned='{content_clean}'")
         # If no meaningful content remains, prompt for details
         if not content_clean or len(content_clean) < 3:
-            self._arm_awaiting(user_id, "awaiting_job_input")
+            self._arm_smart_capture_description_v2(user_id)
             response = (
                 "Describe the job in one message.\n\n"
                 "Example:\n"
@@ -2373,7 +2389,6 @@ class IntentService:
 
     def _extract_and_confirm(self, user_id: str, content: str) -> Dict:
         """Extract fields from content and show confirmation or ask for missing."""
-        self.memory.update_user_memory(user_id, {"awaiting_job_input": False})
         logger.info(f"[SMART_CAPTURE] Extracting fields from: '{content[:200]}'")
         extracted = self.gemini.extract_job_fields(content)
         logger.info(f"[SMART_CAPTURE] Result: {extracted}")
@@ -2390,7 +2405,7 @@ class IntentService:
         if not extracted:
             # No fields extracted — user likely just expressed intent ("add a job")
             # without providing actual data. Show a friendly prompt, not an error.
-            self._arm_awaiting(user_id, "awaiting_job_input")
+            self._arm_smart_capture_description_v2(user_id)
             response = (
                 "Describe the job in one message.\n\n"
                 "Example:\n"
@@ -3472,13 +3487,13 @@ class IntentService:
         # awaiting_send_confirmation, awaiting_bank_details,
         # awaiting_name_change, awaiting_link_id, awaiting_poc_email,
         # awaiting_client_billing, awaiting_poc_name,
-        # awaiting_invoice_address, and awaiting_job_description removed
-        # (Phase 2.3) — FlowMachine is the sole source of truth for those
-        # nine flows now, checked explicitly below instead of via the
-        # legacy flag list.
+        # awaiting_invoice_address, awaiting_job_description, and
+        # awaiting_job_input removed (Phase 2.3) — FlowMachine is the sole
+        # source of truth for those ten flows now, checked explicitly below
+        # instead of via the legacy flag list.
         _active_subflow = bool(_mem.get("pending_disambiguation")) or any(
             _mem.get(k) for k in (
-                "awaiting_job_input", "awaiting_invoice_month",
+                "awaiting_invoice_month",
                 "awaiting_modify_field", "awaiting_compound_response",
                 "awaiting_invoice_poc_email",
             )
@@ -3489,12 +3504,14 @@ class IntentService:
                 FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
                 FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
                 FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
+                FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
             )
             _active_subflow = self.flow_machine.current_flow(user_id) in (
                 FLOW_INVOICE_AWAIT_SEND_CONFIRM, FLOW_BANK_DETAILS,
                 FLOW_NAME_CHANGE, FLOW_LINK_ACCOUNT, FLOW_INVOICE_NEED_POC_EMAIL,
                 FLOW_INVOICE_NEED_BILLING, FLOW_INVOICE_NEED_POC_NAME,
                 FLOW_INVOICE_ADDRESS, FLOW_INVOICE_NEED_JOB_DESCRIPTION,
+                FLOW_SMART_CAPTURE_NEED_DESCRIPTION,
             )
         if _active_subflow:
             logger.info("[REMINDER] Active sub-flow in progress — yielding so the reminder doesn't hijack the reply")
@@ -4125,14 +4142,14 @@ class IntentService:
                     # awaiting_send_confirmation, awaiting_bank_details,
                     # awaiting_name_change, awaiting_link_id,
                     # awaiting_poc_email, awaiting_client_billing,
-                    # awaiting_poc_name, awaiting_invoice_address, and
-                    # awaiting_job_description removed (Phase 2.3):
-                    # FlowMachine's own current_flow check (the `if
-                    # _v2_in_owned_flow` above this else) already routes
-                    # those flows correctly — nothing left to list here for
-                    # them.
+                    # awaiting_poc_name, awaiting_invoice_address,
+                    # awaiting_job_description, and awaiting_job_input
+                    # removed (Phase 2.3): FlowMachine's own current_flow
+                    # check (the `if _v2_in_owned_flow` above this else)
+                    # already routes those flows correctly — nothing left to
+                    # list here for them.
                     _idle_blockers = (
-                        "awaiting_job_input", "awaiting_invoice_month",
+                        "awaiting_invoice_month",
                         "awaiting_modify_field", "pending_disambiguation",
                         "awaiting_invoice_poc_email",
                     )
@@ -4320,36 +4337,15 @@ class IntentService:
                             })
                     return self._start_smart_capture(user_id, first_part_msg)
 
-            if user_mem.get("awaiting_job_input"):
-                # Escape hatch: if the user's message clearly looks like a new query
-                # (question word + verb, or a known query/command pattern), don't
-                # treat it as job-form input — clear the sticky state and fall through.
-                _msg_l_jobform = message.strip().lower().rstrip(".!?")
-                _question_starts = (
-                    "who ", "what ", "when ", "where ", "how ", "why ", "which ",
-                    "show ", "list ", "find ", "tell ", "give ", "fetch ", "get me ",
-                    "do you ", "can you ", "are you ", "is there ",
-                    "delete ", "remove ", "update ", "modify ", "change ",
-                    "generate invoice", "send invoice", "mark ",
-                )
-                _looks_like_query = (
-                    any(_msg_l_jobform.startswith(s) for s in _question_starts)
-                    or "?" in message
-                    or self.gemini.is_new_query_not_response(
-                        message,
-                        "free-text job description (brand, date, fees, client, POC) for the smart-capture form"
-                    )
-                )
-                if _looks_like_query:
-                    logger.info(
-                        f"[SMART_CAPTURE] Sticky awaiting_job_input cleared — message "
-                        f"looks like a new query: {message[:80]!r}"
-                    )
-                    self.memory.update_user_memory(user_id, {"awaiting_job_input": False})
-                    user_mem = self.memory.get_user_memory(user_id)
-                    # Fall through to normal pipeline
-                else:
-                    return self._extract_and_confirm(user_id, message)
+            # NOTE: awaiting_job_input's legacy dispatch (including its
+            # is_new_query_not_response escape-hatch LLM call) removed
+            # (Phase 2.3) — FlowMachine is now the sole source of truth for
+            # SMART_CAPTURE_NEED_DESCRIPTION. The identical "question-shaped
+            # → don't treat as form input" distinction is already made by
+            # the v2 classifier's per-flow guidance for this flow, and
+            # dispatch_in_flow's SIDE_QUESTION handling (reached earlier in
+            # the cascade) routes those messages correctly with a
+            # resume_nudge instead of silently consuming them as job input.
 
             # Universal intent-shift guard: if the bot is in any single-question awaiting state
             # and the user's message looks like a brand-new query, clear the pending state and

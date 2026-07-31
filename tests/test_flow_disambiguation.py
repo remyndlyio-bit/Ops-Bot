@@ -110,17 +110,16 @@ class TestReconciliation:
         svc._reconcile_legacy_to_flow_machine("u1", {})
         svc.flow_machine.set_state.assert_not_called()
 
-    def test_active_still_legacy_flow_wins_over_disambiguation(self):
+    def test_active_form_state_wins_over_disambiguation(self):
         """Mirrors the legacy precedence at the pending_disambiguation call
-        site: an active still-legacy flow takes priority over a
-        (potentially stale) disambiguation. Ordering in the reconcile
+        site: an active form_state (smart-capture confirm) takes priority
+        over a (potentially stale) disambiguation. Ordering in the reconcile
         if-chain gives this for free -- this test locks that down.
 
-        Uses awaiting_job_input as the example (checked before
-        disambiguation in reconcile's own order — one of the few flags
-        still checked before it after Phase 2.3's migrations moved
-        send-confirm/bank-details/name-change/link-account/poc-email/
-        client-billing/poc-name out of reconciliation entirely). The
+        Uses form_state as the example (checked before disambiguation in
+        reconcile's own order — the only thing still checked before it,
+        after Phase 2.3's migrations moved every boolean legacy flag,
+        including awaiting_job_input, out of reconciliation entirely). The
         equivalent precedence for awaiting_poc_email specifically moved out
         of reconciliation entirely in Phase 2.3 -- INVOICE_NEED_POC_EMAIL
         is FlowMachine-only now (no reconcile branch), and its own
@@ -129,17 +128,14 @@ class TestReconciliation:
         (services/intent_service.py, checks flow_machine.current_flow
         directly)."""
         svc = _make_svc()
-        user_mem = {
-            "awaiting_job_input": True,
-            "pending_disambiguation": DELETE_PENDING,
-        }
+        user_mem = {"pending_disambiguation": DELETE_PENDING}
         svc.flow_machine = MagicMock()
         svc.flow_machine.current_flow.return_value = FLOW_IDLE
-        svc.memory.get_form_state.return_value = None
+        svc.memory.get_form_state.return_value = {"step": "confirm"}
         svc._reconcile_legacy_to_flow_machine("u1", user_mem)
-        from services.flow_machine import FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+        from services.flow_machine import FLOW_SMART_CAPTURE_CONFIRM_PENDING
         args = svc.flow_machine.set_state.call_args.args
-        assert args[1] == FLOW_SMART_CAPTURE_NEED_DESCRIPTION
+        assert args[1] == FLOW_SMART_CAPTURE_CONFIRM_PENDING
 
     def test_already_tracking_a_flow_is_a_no_op(self):
         svc = _make_svc()
