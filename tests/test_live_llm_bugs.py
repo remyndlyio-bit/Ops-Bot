@@ -15,9 +15,19 @@ from unittest.mock import MagicMock
 
 @pytest.fixture
 def gemini_service():
-    """Real Gemini service (needs AI_KEY)."""
-    if not os.getenv("AI_KEY"):
-        pytest.skip("AI_KEY not set — skipping live LLM tests")
+    """Real Gemini service (needs a REAL AI_KEY).
+
+    The guard here used to be `if not os.getenv("AI_KEY")`, which never
+    fired: conftest.py injects a placeholder AI_KEY so service constructors
+    survive import, and CI sets the same value explicitly. AI_KEY is
+    therefore ALWAYS truthy, so these 11 tests never skipped — they ran
+    against a bogus key and failed on every single run. has_real_ai_key()
+    compares the VALUE against that placeholder instead of just checking
+    presence, so the skip is finally honest.
+    """
+    from tests.conftest import has_real_ai_key
+    if not has_real_ai_key():
+        pytest.skip("No real AI_KEY (unset or placeholder) — skipping live LLM tests")
     return GeminiService()
 
 
