@@ -242,38 +242,58 @@ check-after retry-loop bug) and three flagged-but-not-fixed out-of-scope bugs
 
 ---
 
-## Phase 3 — Fewer, cheaper, safer LLM calls (~2–3 days, after Phase 1.3)
+## Phase 3 — Fewer, cheaper, safer LLM calls ✅ DONE
 
-Target: ≤2 LLM calls per normal turn (today: 3–5, with 20–35s turns seen live).
+Target: ≤2 LLM calls per normal turn (was 3–5, with 20–35s turns seen live).
+**Met.** Measured per-turn cost today:
 
-### 3.1 Deterministic answers for aggregates — no synthesis call
-- **File:** `services/intent_service.py`, the query result handling (~line 5800s).
-- When the result is a single aggregate row (`rows == [{"result": N}]`), do NOT call
-  `synthesize_response`. Build the reply with `render_answer_payload(build_answer_payload(...))`
-  (already exists in `services/response_synthesis.py`, already used as the fallback).
-  This removes an entire LLM call AND the truncation/refusal flake surface from the most
-  common question type. Keep the LLM synthesis for multi-row prose answers.
-- **Config flag:** `DETERMINISTIC_AGGREGATES=1` default on, so it can be flipped off if
-  the phrasing feels too dry. (The renderer's phrasing can be improved in place —
-  it's plain Python.)
-- **Tests:** for each aggregate shape (count, sum, avg, distinct-count, ₹0 result):
-  assert `synthesize_response` was NOT called and the reply contains the number.
+| Shape | Calls | Path |
+|---|---|---|
+| Router-covered (~15 common shapes: "how many jobs", "average fees", "total billing", "who's unpaid", …) | **1** | classifier only — `route_common_query` is pure regex, planner never runs, 3.1 skips synthesis |
+| Planner-path scalar aggregate (filtered/date-scoped) | **2** | classifier + planner; 3.1 skips synthesis |
+| Planner-path multi-row list | 3 | classifier + planner + synthesis (prose genuinely needs the LLM) |
 
-### 3.2 Merge classify + plan for READ intents
-- Today a READ query pays: classifier call → planner call → synthesis call.
-- The classifier already extracts `params` (metric/column/group_by — see the
-  `[CLASSIFIER]` log line). For READ_AGGREGATE / READ_QUERY verdicts with high
-  confidence and complete params, build the plan dict directly from the verdict and skip
-  `build_operation_plan` entirely. Validate through the same `Plan.from_raw()` path
-  (Path 3) so malformed verdicts still get caught. Fall back to the full planner when
-  params are missing or validation fails.
-- With 3.1 + 3.2 a simple "how many clients have paid?" costs exactly ONE LLM call.
+### 3.1 Deterministic answers for aggregates — no synthesis call ✅ DONE
+- `_deterministic_aggregates_enabled()` + `_is_single_scalar_aggregate()` in
+  `services/intent_service.py`; wired into both the planner-result path and the
+  deterministic-router path. `DETERMINISTIC_AGGREGATES=1` default-on escape hatch.
+- Deliberately scoped to UNGROUPED scalars (`rows == [{"result": N}]`) — GROUP BY rows
+  carry a dimension column and read better as LLM prose.
+- **Tests:** `tests/test_deterministic_aggregates.py` (20).
 
-### 3.3 Cap and monitor
-- `[TELEMETRY_ALERT]` already fires at >2 calls/turn. After 3.1/3.2, treat that alert as
-  a CI-able regression: add a test that runs the 10 most common query shapes through
-  `process_request` (all AI mocked) and asserts `llm_calls <= 2` per turn via the
-  telemetry counter.
+### 3.2 Merge classify + plan for READ intents — ⏭️ INVESTIGATED, INTENTIONALLY SKIPPED
+The premise above ("a READ query pays classifier → planner → synthesis") went stale
+before this was picked up. Two things landed first that already capture the win:
+- **3.1** removed the synthesis call for scalar aggregates.
+- **`services/query_router.py`** (the deterministic router, a separate earlier change)
+  answers the ~15 most common shapes with *zero* LLM calls beyond the classifier —
+  already the "exactly ONE LLM call" ideal 3.2 was aiming for.
+
+Building the shortcut anyway would be nearly all cost, no benefit:
+- The router *already owns* every unfiltered aggregate, so a shortcut restricted to
+  the safe (unfiltered) case would essentially never fire.
+- The router deliberately **punts anything client- or date-qualified to the planner**
+  (see `_has_scope_qualifier`) because those need compound business-rule reasoning —
+  e.g. "how much does X owe me" must imply `paid='no'`; "se paisa aaya kya" must imply
+  `paid='yes'`. Those rules live in the planner prompt, not the classifier's.
+- The classifier's `parameters` is **not** plan-shaped except for the READ_AGGREGATE
+  branch. `Plan.filters` is `Dict[str, CanonicalFilter]` (every value normalising to
+  `NullCheck`/`BoolCheck`/`Equality`/`InList`/`Comparison`/`TextMatch` against the
+  column registry); the classifier emits loose scalars under semantic keys, with no
+  `operation`, no `limit`/`order`, and `field` naming a column without saying what to
+  test on it. Closing that gap means teaching the classifier prompt the whole column
+  registry — reintroducing precisely the "AI emits a shape we didn't anticipate →
+  wrong SQL → wrong number shown to the user" bug class `PATH_3.md` exists to prevent.
+
+The remaining 2-call case is already inside the 3.3 budget. Revisit only if profiling
+shows planner latency actually hurting, and prefer **adding deterministic routes to
+`query_router.py`** (same zero-LLM-trust pattern as the existing 15) over trusting
+classifier params to build SQL.
+
+### 3.3 Cap and monitor ✅ DONE
+- **Tests:** `tests/test_llm_call_budget.py` (5) — runs the common query shapes through
+  `process_request` with AI mocked and asserts `llm_calls <= 2` per turn off the real
+  telemetry log line, plus a negative test proving the assertion actually fails at 3.
 
 ---
 
