@@ -433,12 +433,32 @@ no chains deeper than one, every assertion is a real Assertion, write scenarios 
 derived expectations still agree with the fixture. A typo in a definition fails CI in two
 seconds instead of 40 minutes into a paid nightly run.*
 
-### 4.3 Score tracking — ⏸️ BLOCKED on 4.2
-*`run_assertions()` already emits JSON-serialisable `{assertion, passed, detail}` records shaped for `last_run.json`; needs the runner to exist before there's anything to score.*
-- The runner writes `tests/e2e/last_run.json`: per-scenario pass/fail + overall %.
-  Committing it on each run gives a pass-rate history in git log. Fail the run (exit
-  nonzero) if the pass rate drops below the previous committed run — regressions become
-  impossible to miss.
+### 4.3 Score tracking ✅ DONE
+*`tests/e2e/report.py` (logic) + `tests/e2e/conftest.py` (hooks). Writes
+`tests/e2e/last_run.json` — per-scenario pass/fail plus the overall rate — and fails the
+run (exit 1) when the pass rate drops below the previous committed run. Verified
+end-to-end: a simulated regression exits 1 and names the newly-failing scenario ids,
+since a bare rate delta doesn't say what broke.*
+
+*Three properties worth knowing, each guarding a way the gate could quietly stop working:*
+- *Hooks live in a **conftest**. A first draft put `pytest_sessionfinish` in
+  `test_scenarios.py`, where pytest never calls it — the artifact was silently never
+  written and the gate never ran. Confirmed with a scratch project; a test now asserts
+  the hooks stay in the conftest.*
+- *A run where NO live scenarios executed does **not** write the artifact. Every ordinary
+  `pytest tests/` run skips the live suite, so without this the first such run would
+  overwrite a real baseline with a 0/0 result — wiping the history and resetting the bar
+  to nothing.*
+- *A regressed run does **not** overwrite the baseline either. Writing on every run
+  ratchets the bar DOWNWARD: the bad result becomes the new baseline, the next run sees
+  no drop and passes, so the gate catches a regression once and then accepts it forever.
+  This bit the verification of this very feature — two consecutive local runs of a
+  regressed suite and the second reported "unchanged". `last_run.json` therefore means
+  "best known good".*
+
+*Tests: `tests/e2e/test_report.py` (20, offline). A regression gate that has never been
+tested is worth little — an `evaluate()` returning "fine" for every input would read
+green forever while quality fell.*
 
 ---
 

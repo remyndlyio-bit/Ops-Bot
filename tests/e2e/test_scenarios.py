@@ -28,12 +28,12 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-import json
 import pytest
 
 from tests.e2e.assertions import Assertion, ScenarioContext, run_assertions
 from tests.e2e.scenarios import SCENARIOS, Scenario, by_id, prerequisite_of
 from tests.e2e import seed as seed_mod
+from tests.e2e import report
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -175,9 +175,6 @@ def _db(uid):
     return _query
 
 
-RESULTS = []
-
-
 @live_suite
 @pytest.mark.live
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: f"{s.id:02d}-{s.category}")
@@ -197,7 +194,7 @@ class TestWhatsAppSuite:
         ctx = ScenarioContext(result=result, user_id=uid, db=_db(uid))
         checks = run_assertions(ctx, scenario.assertions)
 
-        RESULTS.append({
+        report.record({
             "id": scenario.id,
             "message": scenario.message,
             "category": scenario.category,
@@ -217,19 +214,3 @@ class TestWhatsAppSuite:
             + "\n  ".join(f"{c['assertion']}: {c['detail']}" for c in failed)
             + f"\n  response: {(result or {}).get('response','')[:300]!r}"
         )
-
-
-def pytest_sessionfinish(session, exitstatus):  # pragma: no cover - live only
-    """Phase 4.3 hook: dump per-scenario results for score tracking."""
-    if not RESULTS:
-        return
-    out = os.path.join(os.path.dirname(__file__), "last_run.json")
-    passed = sum(1 for r in RESULTS if r["passed"])
-    payload = {
-        "total": len(RESULTS),
-        "passed": passed,
-        "pass_rate": round(passed / len(RESULTS), 4) if RESULTS else 0.0,
-        "scenarios": RESULTS,
-    }
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
