@@ -405,21 +405,33 @@ run were contamination, not bugs. That noise cost more time than the bugs themse
 - Needs `SUPABASE_DB_URL` — skip (pytest `skipif`) when not set, so CI without secrets
   still passes.
 
-### 4.2 Scenario runner with graded assertions — ⚠️ PARTIAL (primitives done, corpus blocked)
-*`tests/e2e/assertions.py` DONE: the full machine-checkable vocabulary (contains, not_contains, contains_number, contains_amount, contains_currency, no_error, matches, operation_is/in, row_created, row_count_is, all_of/any_of, run_assertions), each returning pass/fail plus a diagnostic detail string. 57 offline tests in `tests/e2e/test_assertions.py`. The `live` marker infra it needs is wired in `tests/conftest.py` (--live opt-in + marker registration), so the e2e suite can't run in CI by accident.*
-*BLOCKED: the 134-scenario `Intent_Test_Matrix` sheet is not in the repo — only `tests/test_scenarios_from_matrix.py`, whose docstring says it covers just the deterministic subset of a user-supplied Excel file. Needs the source sheet to port.*
-- **New file:** `tests/e2e/test_scenarios.py`. Port the 134-scenario sheet
-  (`Intent_Test_Matrix`) into a Python list of
-  `(message, [assertion, ...])` where assertions are machine-checkable:
-  `contains_number`, `contains("₹")`, `operation == "query"`, `not contains("couldn't")`,
-  `row_created(client="...")` (checks the DB), etc. NO eyeball grading.
-- Scenarios that depend on a previous turn's state must declare it explicitly
-  (`requires: fresh_state` / `requires: after("Show Samsung jobs")`) — the runner resets
-  memory state between independent scenarios (one `MemoryService` wipe per group).
-- Each scenario runs against a REAL `IntentService` with real AI + the seeded fixture
-  account. Budget: this suite is slow and costs API money — mark it
-  `@pytest.mark.live`, excluded from default runs, run nightly / on demand:
-  `python -m pytest tests/e2e -m live -v`.
+### 4.2 Scenario runner with graded assertions ✅ DONE
+*Corpus: the 29-message WhatsApp suite from CLAUDE.md (the `Intent_Test_Matrix` sheet
+named in the plan was never in the repo). `tests/e2e/scenarios.py` holds the definitions,
+`tests/e2e/test_scenarios.py` the runner. Run with `python -m pytest tests/e2e -m live --live -v`.*
+
+*Two adaptations, both deliberate: client names are rewritten to the 4.1 fixture's three
+clients (the original suite ran against a real account), and every numeric expectation is
+DERIVED from FIXTURE_ROWS rather than copied from the sheet — the sheet's "should be 0"
+was true of that account, not this fixture. Where the original expectation was vague
+("a number") the assertion stays loose on purpose: over-specifying measures LLM wording,
+not correctness.*
+
+*State discipline: `requires="fresh"` (default) RE-SEEDS the account and wipes memory
+first; `requires="after:<id>"` replays the prerequisite in the same memory for genuine
+multi-turn tests (13 after 12, 20 after 19). Re-seeding is load-bearing, not caution —
+scenario 1 writes a row and 20 updates one, so without it every later count assertion
+would be off and the corpus would silently depend on execution order. Scenarios that
+write are flagged `mutates=True` and the runner re-seeds after them too.*
+
+*Nine of the scenarios carry `note=` linking them to the CLAUDE.md bug list (Bugs 1–5),
+so a failure says WHY it matters rather than just which row broke.*
+
+*A second, OFFLINE layer (`TestScenarioCorpusIsWellFormed`, 9 tests, runs in normal CI)
+validates the corpus itself — ids contiguous, dependencies resolve and point backwards,
+no chains deeper than one, every assertion is a real Assertion, write scenarios declared,
+derived expectations still agree with the fixture. A typo in a definition fails CI in two
+seconds instead of 40 minutes into a paid nightly run.*
 
 ### 4.3 Score tracking — ⏸️ BLOCKED on 4.2
 *`run_assertions()` already emits JSON-serialisable `{assertion, passed, detail}` records shaped for `last_run.json`; needs the runner to exist before there's anything to score.*

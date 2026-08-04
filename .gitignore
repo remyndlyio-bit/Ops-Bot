@@ -7,3 +7,7 @@ output/
 .DS_Store
 *.json
 .env.example
+
+# Phase 4.3 score tracking: this ONE json is meant to be committed so
+# git log carries a pass-rate history (the blanket *.json above hides it).
+!tests/e2e/last_run.json
