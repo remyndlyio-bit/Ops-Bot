@@ -37,18 +37,22 @@ required tests present in `tests/test_plan_retry.py`
   test where both calls are invalid — assert `_error` is set and calls == 2 (no infinite
   retry).
 
-### 0.2 Generalize the truncated-synthesis guard — ⚠️ PARTIAL
-*Audited 2026-08-04: the helper `_synthesis_looks_broken` EXISTS
-(`services/intent_service.py:170`) and is applied at 3 sites (5471, 5642, 6159). But
-there are **10** `self.gemini.synthesize_response(` call sites, and the other **7**
-(2025, 5969, 6027, 6092, 6396, 6437, 6955) are ALL data-query sites — every one builds
-a `build_clean_payload(rows, "select")` or `build_field_answer_payload(...)`. None are
-the small-talk/feature-question sites the spec excludes. Each still uses only
-`if not response or not response.strip():`, which catches an EMPTY reply but not the
-short-and-digit-free truncation ("You've had") this task exists to catch.*
-*Fix is mechanical: `_synthesis_looks_broken` already returns True for empty/whitespace,
-so swapping the weaker check for it is a strict superset — each site keeps its own
-existing fallback string.*
+### 0.2 Generalize the truncated-synthesis guard ✅ DONE
+*Audited then fixed 2026-08-04. The helper existed but guarded only 3 of 10
+`synthesize_response` call sites; the other 7 were ALL data-query sites still using
+`if not response or not response.strip():` — which catches an EMPTY reply but not the
+short-and-digit-free truncation ("You've had") the guard exists for. All 10 now go
+through `_synthesis_looks_broken`, each keeping its own existing fallback. (One site,
+line 2025, uses the inverted form `if not _synthesis_looks_broken(response): return`.)*
+*Tests: `TestEverySynthesisSiteIsGuardedAgainstTruncation` in
+`tests/test_answer_ledger_integration.py` asserts the invariant at SOURCE level rather
+than one brittle behavioural test per path — it also catches an 11th site added later,
+which is exactly how the original gap appeared. Plus a behavioural test on the
+newly-guarded router ROWS path. Both were verified to actually FAIL when a guard is
+reverted; the behavioural one initially passed while regressed (its rows were "full job
+rows", so they rendered as cards and never reached synthesis) and now asserts
+`synthesize_response.called` so it can't silently stop covering the path again.*
+
 - **File:** `services/intent_service.py` — search for `_looks_truncated`.
 - We shipped a narrow guard (short + digit-free ⇒ fall back to deterministic renderer)
   at ONE call site after a live incident where the bot replied literally `"You've had"`.
@@ -72,14 +76,25 @@ existing fallback string.*
 - **Test:** extend `tests/test_answer_ledger_integration.py::TestTruncatedSynthesisFallsBackToDeterministicAnswer`
   with one test per newly-guarded call site.
 
-### 0.3 Log every routing decision with one grep-able prefix — ⚠️ NEARLY DONE
-*Audited 2026-08-04: 12 `[ROUTE]` lines present (address_update, bank_details_response,
-compound_response, form_step, link_account, modify, name_change, pending_reminder,
-prompt_bank_details, query_pipeline, show_bank_details, show_user_id). Most names from
-the spec's list are correctly ABSENT because those checkpoints no longer exist as legacy
-return points at all (audit_reply, small_talk, disambiguation and every `awaiting_*`
-handler moved to v2 in Phases 1–2). Two genuine gaps remain: `no_op_cancel` and
-`small_talk` still return from `_process_request_impl` without a `[ROUTE]` line.*
+### 0.3 Log every routing decision with one grep-able prefix ✅ DONE
+*Audited then fixed 2026-08-04. Most names from the spec's list are correctly ABSENT —
+those checkpoints no longer exist as legacy return points after Phases 1–2. Three real
+gaps found and closed:*
+1. *`small_talk` and `no_op_cancel` returned silently — now logged + `note_route`d.*
+2. ***The deterministic router emitted no `[ROUTE]` line at all.** It answers the ~15
+   most common query shapes, so the single most common SUCCESSFUL path was the one
+   invisible to the grep this task exists to enable (turns logged as
+   `route=unclassified`). Now `[ROUTE] router:<name>` + `note_route("router:<name>")`,
+   named per-route so telemetry shows WHICH route absorbed the turn.*
+3. *`[ROUTE] compound_response declined:` (added during Phase 2) broke the uniform
+   format and had no `note_route` — log and metric disagreed. Now conforms as
+   `compound_declined`.*
+*Tests: `tests/test_route_logging.py` — the spec's "exactly one [ROUTE] line per turn"
+test (which is what caught the router gap), per-checkpoint tests for the new lines,
+telemetry `route=` assertions, plus two source-level invariants: every `[ROUTE]` log
+matches the uniform format, and every one has a `note_route()` beside it so 0.3 and 0.4
+can't drift apart.*
+
 - **File:** `services/intent_service.py`, `_process_request_impl`.
 - Today, when a checkpoint (audit-reply, small-talk, form-step, awaiting_* handler,
   disambiguation, etc.) claims a message, some log and some don't — diagnosing a hijack

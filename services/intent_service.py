@@ -2023,7 +2023,7 @@ class IntentService:
         payload = build_field_answer_payload(matched_col, value, last_row_data)
         _hist = self.memory.get_conversation_history(user_id)
         response = self.gemini.synthesize_response(payload, message, conversation_history=_hist)
-        if response and response.strip():
+        if not _synthesis_looks_broken(response):
             return response
         # Fallback if synthesis fails: minimal natural phrasing (no raw field:value)
         if isinstance(value, (int, float)):
@@ -4280,6 +4280,8 @@ class IntentService:
             if not _flow_machine_v2_enabled_for(user_id):
                 small_talk_resp = self._detect_small_talk(message, user_id=user_id)
                 if small_talk_resp:
+                    logger.info(f"[ROUTE] small_talk claimed message: {message[:60]!r}")
+                    note_route("small_talk")
                     self._store_conversation(user_id, message, small_talk_resp)
                     return {"operation": "small_talk", "response": small_talk_resp, "trigger_invoice": False, "invoice_data": {}}
 
@@ -4464,6 +4466,8 @@ class IntentService:
             # before falling back to a generic error message. There is
             # nothing here for "cancel" to mean except "never mind."
             if msg_lower in ("cancel", "stop", "nevermind", "never mind", "nvm", "abort", "quit", "exit"):
+                logger.info(f"[ROUTE] no_op_cancel claimed message: {message[:60]!r}")
+                note_route("no_op_cancel")
                 response = "👍 Nothing pending to cancel. Let me know if you need anything else."
                 self._store_conversation(user_id, message, response)
                 return {"operation": "no_op_cancel", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -5967,7 +5971,7 @@ class IntentService:
                     self._update_sql_context(user_id, rows)
                     payload = build_clean_payload(rows, "select")
                     response = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
-                    if not response or not response.strip():
+                    if _synthesis_looks_broken(response):
                         response = f"Done! Updated {rowcount} record{'s' if rowcount != 1 else ''}."
                 else:
                     # 0 rows updated — the planner may have injected a stale date filter from
@@ -6025,7 +6029,7 @@ class IntentService:
                                             self._update_sql_context(user_id, _retry_rows)
                                         payload = build_clean_payload(_retry_rows or _pre2_rows, "select")
                                         response = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
-                                        if not response or not response.strip():
+                                        if _synthesis_looks_broken(response):
                                             response = f"Done! Updated {_retry_exec.get('rowcount', 1)} record."
                                         self._store_conversation(user_id, message, response)
                                         return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -6090,7 +6094,7 @@ class IntentService:
                                 else:
                                     payload = build_clean_payload(kw_rows, "select")
                                     response = self.gemini.synthesize_response(payload, message, history_question=_is_history_q, conversation_history=conversation_history)
-                                    if not response or not response.strip():
+                                    if _synthesis_looks_broken(response):
                                         response = self._format_sql_result(kw_rows)
                                 self._store_conversation(user_id, message, response)
                                 return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -6357,6 +6361,13 @@ class IntentService:
         if not exec_result.get("ok"):
             logger.warning(f"[ROUTER] SQL failed for route '{routed.name}': {exec_result.get('error')}")
             return None
+        # 0.3/0.4: the deterministic router answers the ~15 most common query
+        # shapes, so without this it is the single most common successful path
+        # AND the only one invisible to `grep '[ROUTE]'` — turns showed up as
+        # route=unclassified. Named per-route (router:count_jobs) so telemetry
+        # can distinguish which route absorbed the turn, not merely that one did.
+        logger.info(f"[ROUTE] router:{routed.name} claimed message: {message[:60]!r}")
+        note_route(f"router:{routed.name}")
         rows = exec_result.get("rows", []) or []
 
         # Remember the SQL + rows so context-dependent follow-ups still work.
@@ -6394,7 +6405,7 @@ class IntentService:
             else:
                 payload = build_clean_payload(rows, "select")
                 resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
-                if not resp or not resp.strip():
+                if _synthesis_looks_broken(resp):
                     # WP-4: the deterministic fallback now carries headline + scope
                     # + a follow-up, built from the SAME scope the SQL actually
                     # used (scope_from_sql(routed.sql)) — not a message-keyword
@@ -6435,7 +6446,7 @@ class IntentService:
             return _finish(resp)
         payload = build_clean_payload(rows, "select")
         resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
-        if not resp or not resp.strip():
+        if _synthesis_looks_broken(resp):
             resp = render_answer_payload(build_answer_payload(
                 scope=scope_from_sql(routed.sql), metric=None, rows=rows))
         append_entry(self.memory, user_id, build_entry_from_sql(
@@ -6800,7 +6811,8 @@ class IntentService:
             logger.info(f"[COMPOUND] User confirmed next action: '{merged}' (pending='{pending_action}', qualifier='{remainder}')")
             return self.process_request(user_id=user_id, message=merged)
         elif msg_lower_check in {"no", "nah", "nope", "skip", "not now", "later"}:
-            logger.info(f"[ROUTE] compound_response declined: {message[:60]!r}")
+            logger.info(f"[ROUTE] compound_declined claimed message: {message[:60]!r}")
+            note_route("compound_declined")
             response = "👍 No problem. Let me know if you need anything else."
             self._store_conversation(user_id, message, response)
             return {"operation": "compound_declined", "response": response, "trigger_invoice": False, "invoice_data": {}}
@@ -6953,7 +6965,7 @@ class IntentService:
             # Re-fetch from memory so the synth call has context for the reply.
             _hist = self.memory.get_conversation_history(user_id)
             response = self.gemini.synthesize_response(payload, message, conversation_history=_hist)
-            if not response or not response.strip():
+            if _synthesis_looks_broken(response):
                 response = "Done! The selected record has been updated."
         else:
             response = "Done! The selected record has been updated."

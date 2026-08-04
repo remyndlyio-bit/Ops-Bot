@@ -258,3 +258,89 @@ class TestTruncatedSynthesisFallsBackToDeterministicAnswer:
             svc.gemini.synthesize_response.return_value = "Nice — you're working with Nike right now."
             result = svc.process_request("u1", "which single account have I been doing the most work for lately")
         assert result["response"] == "Nice — you're working with Nike right now."
+
+
+class TestEverySynthesisSiteIsGuardedAgainstTruncation:
+    """TODO.md 0.2: the truncation guard must be applied at EVERY
+    synthesize_response call site that answers a data query.
+
+    An audit found the helper existed but guarded only 3 of 10 sites — the
+    other 7 still used `if not response or not response.strip():`, which
+    catches an EMPTY reply but not the short-and-digit-free truncation
+    ("You've had") the guard exists for. Those 7 were all data-query sites.
+
+    This is a STRUCTURAL test rather than one behavioural test per site on
+    purpose. Driving all ten paths end-to-end would need ten deep, brittle
+    fixtures; asserting the invariant directly at the source level cannot
+    rot, and it also catches an ELEVENTH site added later by someone who
+    doesn't know about this rule — which is exactly how the original gap
+    appeared.
+    """
+
+    CALL = "self.gemini.synthesize_response("
+    GUARD = "_synthesis_looks_broken"
+
+    def _source_lines(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "services", "intent_service.py")
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().split("\n")
+
+    def test_every_call_site_is_followed_by_the_guard(self):
+        lines = self._source_lines()
+        unguarded = []
+        for i, line in enumerate(lines):
+            if self.CALL not in line:
+                continue
+            # Find the next non-blank, non-comment line.
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("#")):
+                j += 1
+            nxt = lines[j] if j < len(lines) else ""
+            if self.GUARD not in nxt:
+                unguarded.append(f"line {i+1}: guarded-by -> {nxt.strip()!r}")
+        assert not unguarded, (
+            "synthesize_response call site(s) not guarded by "
+            f"{self.GUARD}():\n  " + "\n  ".join(unguarded)
+        )
+
+    def test_the_audit_found_ten_sites(self):
+        """Pins the count so a NEW site can't be added without someone
+        consciously updating this number (and thus reading the rule above)."""
+        lines = self._source_lines()
+        assert sum(1 for l in lines if self.CALL in l) == 10
+
+
+class TestNewlyGuardedRouterPathRejectsTruncation:
+    """Behavioural proof for one of the seven newly-guarded sites: the
+    deterministic router's multi-row (ROWS) path, which previously accepted
+    any non-empty synthesis output verbatim.
+
+    The rows here deliberately omit `bill_no` and `job_date`: with either
+    present, `_is_full_job_row()` is True and the reply is rendered as job
+    cards WITHOUT calling synthesize_response at all. A first draft of this
+    test used full rows and passed even with the guard deliberately
+    reverted — it never reached the code it claimed to cover. Hence
+    `assert synthesize_response.called` below: if a future change reroutes
+    this shape away from synthesis, the test must FAIL loudly rather than
+    keep reporting green while testing nothing.
+    """
+
+    def test_truncated_router_rows_response_falls_back(self):
+        svc = _svc()
+        svc.supabase.execute_sql.return_value = {
+            "ok": True, "operation": "select",
+            "rows": [
+                {"client_name": "Acme", "fees": 25000},
+                {"client_name": "Nordic", "fees": 18000},
+            ],
+        }
+        svc.gemini.synthesize_response.return_value = "You've had"
+        result = svc.process_request("u1", "show me all my jobs")
+
+        assert svc.gemini.synthesize_response.called, (
+            "this test must actually reach a synthesize_response site — "
+            "otherwise it proves nothing about the truncation guard"
+        )
+        assert result["response"] != "You've had", (
+            "a short, digit-free synthesis result must not reach the user"
+        )
