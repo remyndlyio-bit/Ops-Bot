@@ -17,7 +17,11 @@ Rules that apply to EVERY task below:
 
 ## Phase 0 — Stop the live flakes (do these first, ~1–2 days total)
 
-### 0.1 Retry the planner once when the LLM returns invalid JSON
+### 0.1 Retry the planner once when the LLM returns invalid JSON ✅ DONE
+*Audited 2026-08-04: `for attempt in range(2)` at `services/query_planner.py:396`; both
+required tests present in `tests/test_plan_retry.py`
+(`test_malformed_json_first_try_valid_json_second_try`,
+`test_malformed_json_both_attempts_returns_error`).*
 - **File:** `services/query_planner.py`, in `build_operation_plan()` (~line 396–414).
 - The call already requests JSON mode (`responseMimeType: application/json`), but the
   upstream model still occasionally returns malformed JSON (seen live: `JSON parse
@@ -33,7 +37,18 @@ Rules that apply to EVERY task below:
   test where both calls are invalid — assert `_error` is set and calls == 2 (no infinite
   retry).
 
-### 0.2 Generalize the truncated-synthesis guard
+### 0.2 Generalize the truncated-synthesis guard — ⚠️ PARTIAL
+*Audited 2026-08-04: the helper `_synthesis_looks_broken` EXISTS
+(`services/intent_service.py:170`) and is applied at 3 sites (5471, 5642, 6159). But
+there are **10** `self.gemini.synthesize_response(` call sites, and the other **7**
+(2025, 5969, 6027, 6092, 6396, 6437, 6955) are ALL data-query sites — every one builds
+a `build_clean_payload(rows, "select")` or `build_field_answer_payload(...)`. None are
+the small-talk/feature-question sites the spec excludes. Each still uses only
+`if not response or not response.strip():`, which catches an EMPTY reply but not the
+short-and-digit-free truncation ("You've had") this task exists to catch.*
+*Fix is mechanical: `_synthesis_looks_broken` already returns True for empty/whitespace,
+so swapping the weaker check for it is a strict superset — each site keeps its own
+existing fallback string.*
 - **File:** `services/intent_service.py` — search for `_looks_truncated`.
 - We shipped a narrow guard (short + digit-free ⇒ fall back to deterministic renderer)
   at ONE call site after a live incident where the bot replied literally `"You've had"`.
@@ -57,7 +72,14 @@ Rules that apply to EVERY task below:
 - **Test:** extend `tests/test_answer_ledger_integration.py::TestTruncatedSynthesisFallsBackToDeterministicAnswer`
   with one test per newly-guarded call site.
 
-### 0.3 Log every routing decision with one grep-able prefix
+### 0.3 Log every routing decision with one grep-able prefix — ⚠️ NEARLY DONE
+*Audited 2026-08-04: 12 `[ROUTE]` lines present (address_update, bank_details_response,
+compound_response, form_step, link_account, modify, name_change, pending_reminder,
+prompt_bank_details, query_pipeline, show_bank_details, show_user_id). Most names from
+the spec's list are correctly ABSENT because those checkpoints no longer exist as legacy
+return points at all (audit_reply, small_talk, disambiguation and every `awaiting_*`
+handler moved to v2 in Phases 1–2). Two genuine gaps remain: `no_op_cancel` and
+`small_talk` still return from `_process_request_impl` without a `[ROUTE]` line.*
 - **File:** `services/intent_service.py`, `_process_request_impl`.
 - Today, when a checkpoint (audit-reply, small-talk, form-step, awaiting_* handler,
   disambiguation, etc.) claims a message, some log and some don't — diagnosing a hijack
@@ -74,7 +96,11 @@ Rules that apply to EVERY task below:
 - **Test:** one test that runs a plain query through `process_request` with everything
   mocked and asserts (via `caplog`) that exactly one `[ROUTE]` line was emitted.
 
-### 0.4 Add a per-turn route field to telemetry
+### 0.4 Add a per-turn route field to telemetry ✅ DONE
+*Audited 2026-08-04: `note_route()` at `utils/telemetry.py:81` (the spec said
+`services/telemetry.py` — the module actually lives under `utils/`), `route=` emitted on
+the `[TELEMETRY]` line (:138), 12 call sites in intent_service, and
+`tests/test_telemetry.py::test_note_route_visible_within_the_turn` covers it.*
 - **File:** `services/telemetry.py` (the `[TELEMETRY]` line already prints `route=unclassified`
   for every turn — it's never being set).
 - **What to do:** find where `Turn` is created/finished in `services/telemetry.py` and
@@ -100,7 +126,8 @@ top and port checkpoints behind them one at a time.
 **Order matters.** Do the tasks in this sequence — each one is independently shippable
 and independently revertible.
 
-### 1.1 Kill the audit-reply keyword hijack
+### 1.1 Kill the audit-reply keyword hijack ✅ DONE
+*Audited 2026-08-04: `AUDIT_REPLY` is in the classifier's intent enum and prompt, `audit_pending` is passed through the idle context block, and `services/flow_dispatcher.py` routes the intent. Legacy path retained for v2-off.*
 - **Files:** `services/intent_service.py` (`_handle_pending_audit_reply`, and its call
   site in `_handle_pending_reminder` ~line 3208), `services/classifier.py`.
 - This checkpoint intercepts any message containing "paid" while an overdue-audit nudge
@@ -126,14 +153,16 @@ and independently revertible.
   the classifier path (mock classifier verdict), and keep the originals passing for the
   v2-off path.
 
-### 1.2 Kill the small-talk keyword checkpoint (same recipe)
+### 1.2 Kill the small-talk keyword checkpoint (same recipe) ✅ DONE
+*Audited 2026-08-04: legacy `_detect_small_talk` is gated behind `if not _flow_machine_v2_enabled_for(user_id)` (`services/intent_service.py:4280`); `dispatch_idle` owns SMALL_TALK when v2 is on.*
 - `_detect_small_talk` runs on raw keyword/trigger lists before understanding. The
   classifier already has a small-talk-ish intent — verify what it's called in
   `services/classifier.py` (grep for `SMALL_TALK` / `GREETING`), route it in the
   dispatcher to the existing canned-response generator, and remove the early checkpoint
   when v2 is on. Same gating + test recipe as 1.1.
 
-### 1.3 Kill the invoice keyword check (`_INVOICE_CHECK`)
+### 1.3 Kill the invoice keyword check (`_INVOICE_CHECK`) ✅ DONE
+*Audited 2026-08-04: gated behind `if not _flow_machine_v2_enabled_for(user_id)` (`services/intent_service.py:4774`), plus the `_v2_says_read` override so a confident v2 READ verdict beats the legacy keyword check.*
 - **File:** `services/intent_service.py` — grep `[INVOICE_CHECK]`.
 - This regex/verb check decides "is this an invoice action?" before understanding and
   has already been overridden once by a guard (grep `TestV2VerdictBeatsLegacyInvoiceCheck`
@@ -143,7 +172,12 @@ and independently revertible.
   legacy check only runs when v2 is off. This one is the biggest single win — most
   misroutes we saw in live testing passed through this gate.
 
-### 1.4 Port the remaining pre-classifier checkpoints
+### 1.4 Port the remaining pre-classifier checkpoints — ⚠️ PARTIAL (2 of 4)
+*Audited 2026-08-04:*
+1. *`add_job` triggers — ✅ gated on v2-off (`intent_service.py:4351`).*
+2. *`modify` verb triggers — ✅ gated on v2-off (`intent_service.py:4331`).*
+3. *bank/name/link commands — ⚠️ **gated off without a replacement.** The legacy block (`intent_service.py:4065`) is behind `if not _flow_machine_v2_enabled_for(...)`, and its comment claims "the classifier handles these as SETTINGS_COMMAND" — but **`SETTINGS_COMMAND` does not exist** in the classifier's intent enum or prompt; only tests reference the string. `_prompt_bank_details_format`, `_handle_name_change` and `_handle_link_account` each have exactly ONE caller (4074 / 4090 / 4126), all inside that gated block. So with v2 ON (production default) an explicit "update my bank details" / "change my name" / "link my account" command appears to have no route. The flows themselves still work once armed, and the ungated `_has_bank_inline` check (4058) still catches a message that already contains the details — it is the bare COMMAND that looks orphaned. NOT verified against a live run.*
+4. *`_reconstruct_message` → `resolved_query` — ❌ not started. Still called at `intent_service.py:4528`; `resolved_query` remains shadow-only.*
 - One PR per checkpoint, same recipe, in this order (easiest → hardest):
   1. `add_job` trigger list (classifier: `CREATE_ENTRY`)
   2. `modify` verb triggers (classifier: `UPDATE_ENTRY`)
@@ -155,7 +189,8 @@ and independently revertible.
   `_process_request_impl`'s top half: onboarding gate → state TTL check → classifier →
   dispatcher. Nothing else.
 
-### 1.5 Delete `SHADOW_ONLY` fallbacks one branch at a time
+### 1.5 Delete `SHADOW_ONLY` fallbacks one branch at a time — ⚠️ PARTIAL
+*Audited 2026-08-04: both STATED priorities are done — SIDE_QUESTION for READ paths (commit 11077cd) and NEW_FLOW (commit 7165bec). ~8 `return SHADOW_ONLY` sites remain in `services/flow_dispatcher.py`, chiefly READ/WRITE intents in `dispatch_idle`, which still fall through to the legacy query pipeline by design. Finishing the section means porting those too.*
 - **File:** `services/flow_dispatcher.py`. Grep `SHADOW_ONLY`.
 - Each `return SHADOW_ONLY` means "v2 understood the message but legacy still handles
   it". For each one: implement the real dispatch (most just call an existing
@@ -303,7 +338,8 @@ classifier params to build SQL.
 State leaked between runs and between scenarios; roughly HALF the "failures" in every
 run were contamination, not bugs. That noise cost more time than the bugs themselves.
 
-### 4.1 Seeded fixture account
+### 4.1 Seeded fixture account ✅ DONE
+*`tests/e2e/seed.py` — synthetic `e2etest:<uuid>` account, 15 deterministic rows + bank details, prefix-guarded `teardown()` (guard runs BEFORE any DB connection opens). Expected values are DERIVED from the fixture so assertions can't drift from the data; dates are relative-with-fixed-offsets so "this month" scenarios don't rot. 28 offline tests in `tests/e2e/test_seed_guards.py` (not marked live, so they run in CI).*
 - **New file:** `tests/e2e/seed.py`. Creates a fresh synthetic user id (e.g.
   `e2etest:<uuid>`), inserts ~15 deterministic `job_entries` rows covering: paid/unpaid,
   multiple clients, multiple months, a no-poc-email client, a no-job-date row, bank
@@ -312,7 +348,9 @@ run were contamination, not bugs. That noise cost more time than the bugs themse
 - Needs `SUPABASE_DB_URL` — skip (pytest `skipif`) when not set, so CI without secrets
   still passes.
 
-### 4.2 Scenario runner with graded assertions
+### 4.2 Scenario runner with graded assertions — ⚠️ PARTIAL (primitives done, corpus blocked)
+*`tests/e2e/assertions.py` DONE: the full machine-checkable vocabulary (contains, not_contains, contains_number, contains_amount, contains_currency, no_error, matches, operation_is/in, row_created, row_count_is, all_of/any_of, run_assertions), each returning pass/fail plus a diagnostic detail string. 57 offline tests in `tests/e2e/test_assertions.py`. The `live` marker infra it needs is wired in `tests/conftest.py` (--live opt-in + marker registration), so the e2e suite can't run in CI by accident.*
+*BLOCKED: the 134-scenario `Intent_Test_Matrix` sheet is not in the repo — only `tests/test_scenarios_from_matrix.py`, whose docstring says it covers just the deterministic subset of a user-supplied Excel file. Needs the source sheet to port.*
 - **New file:** `tests/e2e/test_scenarios.py`. Port the 134-scenario sheet
   (`Intent_Test_Matrix`) into a Python list of
   `(message, [assertion, ...])` where assertions are machine-checkable:
@@ -326,7 +364,8 @@ run were contamination, not bugs. That noise cost more time than the bugs themse
   `@pytest.mark.live`, excluded from default runs, run nightly / on demand:
   `python -m pytest tests/e2e -m live -v`.
 
-### 4.3 Score tracking
+### 4.3 Score tracking — ⏸️ BLOCKED on 4.2
+*`run_assertions()` already emits JSON-serialisable `{assertion, passed, detail}` records shaped for `last_run.json`; needs the runner to exist before there's anything to score.*
 - The runner writes `tests/e2e/last_run.json`: per-scenario pass/fail + overall %.
   Committing it on each run gives a pass-rate history in git log. Fail the run (exit
   nonzero) if the pass rate drops below the previous committed run — regressions become
