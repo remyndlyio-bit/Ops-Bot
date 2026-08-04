@@ -206,7 +206,8 @@ and independently revertible.
    with v2 both on AND off, non-swallowing by the query pipeline, and the hijack guard.*
    *If SETTINGS_COMMAND is still wanted as the "proper" port, it is now a refactor on
    top of working behaviour rather than a fix for an outage.*
-4. *`_reconstruct_message` → `resolved_query` — ❌ not started. Still called at `intent_service.py:4528`; `resolved_query` remains shadow-only.*
+4. *`_reconstruct_message` → `resolved_query` — ⚠️ **PARTIAL, by design.** A full swap is unsafe and was rejected with evidence: the classifier emits `resolved_query` as null for anything that isn't READ_QUERY/READ_AGGREGATE, but FOUR of `_reconstruct_message`'s six cases are WRITE_INVOICE paths ("which month?" → "March" → Generate invoice) — replacing wholesale deletes them with no replacement. And the messages `resolved_query` exists for ("what about this month?", "and last quarter?") never reach the function: `_looks_like_a_question` returns early and the answer_ledger handles them. Both verified empirically.*
+   *What DID land: where reconstruction already fires, a client freshly resolved by the classifier for THIS turn now beats the stored `last_intent.client_name` — nearly every incident in that function's own comments is the stale-client shape. Gated to READ intents AND to turns with no pending clarification (while `pending` is set the user is answering the bot's own question about a specific flow, so the stored client is authoritative). That second guard exists because without it a stray READ verdict rewrote a mid-invoice "March" into "Generate invoice for Nike for March" — an invoice against the WRONG CLIENT, caught by its own test before release. Tests: `tests/test_resolved_query_reconstruction.py` (30).*
 - One PR per checkpoint, same recipe, in this order (easiest → hardest):
   1. `add_job` trigger list (classifier: `CREATE_ENTRY`)
   2. `modify` verb triggers (classifier: `UPDATE_ENTRY`)
