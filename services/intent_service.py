@@ -4062,68 +4062,84 @@ class IntentService:
             # Explicit settings commands (bank, name, address, user_id, link).
             # When FLOW_MACHINE_V2 is on, the classifier handles these as SETTINGS_COMMAND
             # or specific intent types. Only run legacy keyword checks when v2 is off.
-            if not _flow_machine_v2_enabled_for(user_id):
-                # Each explicit command is typo-tolerant (a misspelled target noun +
-                # an intent verb still routes here), so a typo can't silently fall
-                # through to the v2 classifier and get refused.
-                _BANK_TYPOS = ("bnk", "banck", "bnak", "detials", "detals", "deatils")
-                if self._cmd_with_typos(msg_lower, self._UPDATE_BANK_TRIGGERS, _BANK_TYPOS,
-                                        ("update", "change", "set", "edit", "add", "save", "new")):
-                    logger.info(f"[ROUTE] prompt_bank_details claimed message: {message[:60]!r}")
-                    note_route("prompt_bank_details")
-                    return self._prompt_bank_details_format(user_id, message)
-                if self._cmd_with_typos(msg_lower, self._VIEW_BANK_TRIGGERS, _BANK_TYPOS,
-                                        ("show", "view", "see", "get", "check", "my", "what")):
-                    logger.info(f"[ROUTE] show_bank_details claimed message: {message[:60]!r}")
-                    note_route("show_bank_details")
-                    return self._show_bank_details(user_id, message)
+            # Explicit settings commands (bank, name, address, user_id, link).
+            # NOT gated on FLOW_MACHINE_V2: these were previously wrapped in
+            # `if not _flow_machine_v2_enabled_for(user_id)` on the grounds that the
+            # classifier would handle them as SETTINGS_COMMAND -- but that intent was
+            # never added to services/classifier.py, and each handler below has exactly
+            # ONE caller (here). With v2 on (production default) all six commands fell
+            # through to the QUERY PIPELINE: 'update my bank details' was handed to the
+            # SQL planner as though it were a data question. These are explicit,
+            # unambiguous keyword commands, so running them before the classifier is
+            # safe -- see tests/test_settings_commands_reachable.py, which covers both
+            # reachability AND that the triggers don't hijack ordinary queries.
+            # Each explicit command is typo-tolerant (a misspelled target noun +
+            # an intent verb still routes here), so a typo can't silently fall
+            # through to the v2 classifier and get refused.
+            _BANK_TYPOS = ("bnk", "banck", "bnak", "detials", "detals", "deatils")
+            if self._cmd_with_typos(msg_lower, self._UPDATE_BANK_TRIGGERS, _BANK_TYPOS,
+                                    ("update", "change", "set", "edit", "add", "save", "new")):
+                logger.info(f"[ROUTE] prompt_bank_details claimed message: {message[:60]!r}")
+                note_route("prompt_bank_details")
+                return self._prompt_bank_details_format(user_id, message)
+            if self._cmd_with_typos(msg_lower, self._VIEW_BANK_TRIGGERS, _BANK_TYPOS,
+                                    ("show", "view", "see", "get", "check", "my", "what")):
+                logger.info(f"[ROUTE] show_bank_details claimed message: {message[:60]!r}")
+                note_route("show_bank_details")
+                return self._show_bank_details(user_id, message)
 
-                _NAME_CHANGE_TRIGGERS = [
-                    "change my name", "update my name", "set my name",
-                    "rename me", "my name is wrong", "fix my name",
-                ]
-                if self._cmd_with_typos(msg_lower, _NAME_CHANGE_TRIGGERS,
-                                        ("nme", "naem", "namee", "naame"),
-                                        ("change", "update", "set", "rename", "fix", "correct", "wrong")):
-                    logger.info(f"[ROUTE] name_change claimed message: {message[:60]!r}")
-                    note_route("name_change")
-                    return self._handle_name_change(user_id, message)
+            _NAME_CHANGE_TRIGGERS = [
+                "change my name", "update my name", "set my name",
+                "rename me", "my name is wrong", "fix my name",
+            ]
+            if self._cmd_with_typos(msg_lower, _NAME_CHANGE_TRIGGERS,
+                                    ("nme", "naem", "namee", "naame"),
+                                    ("change", "update", "set", "rename", "fix", "correct", "wrong")):
+                logger.info(f"[ROUTE] name_change claimed message: {message[:60]!r}")
+                note_route("name_change")
+                return self._handle_name_change(user_id, message)
 
-                _ADDRESS_UPDATE_TRIGGERS = [
-                    "update my address", "change my address", "update my business address",
-                    "change my business address", "update business address", "change business address",
-                    "set my address", "edit my address", "update invoice address", "change invoice address",
-                    "my address is", "my business address is", "wrong address", "address is wrong",
-                    "fix my address", "correct my address",
-                ]
-                if self._cmd_with_typos(msg_lower, _ADDRESS_UPDATE_TRIGGERS,
-                                        ("adress", "adres", "addres", "addresss", "addrress", "adddress"),
-                                        ("change", "update", "edit", "set", "fix", "correct", "wrong")):
-                    logger.info(f"[ROUTE] address_update claimed message: {message[:60]!r}")
-                    note_route("address_update")
-                    return self._handle_address_update(user_id, message, data_user_id)
+            _ADDRESS_UPDATE_TRIGGERS = [
+                "update my address", "change my address", "update my business address",
+                "change my business address", "update business address", "change business address",
+                "set my address", "edit my address", "update invoice address", "change invoice address",
+                "my address is", "my business address is", "wrong address", "address is wrong",
+                "fix my address", "correct my address",
+            ]
+            if self._cmd_with_typos(msg_lower, _ADDRESS_UPDATE_TRIGGERS,
+                                    ("adress", "adres", "addres", "addresss", "addrress", "adddress"),
+                                    ("change", "update", "edit", "set", "fix", "correct", "wrong")):
+                logger.info(f"[ROUTE] address_update claimed message: {message[:60]!r}")
+                note_route("address_update")
+                return self._handle_address_update(user_id, message, data_user_id)
 
-                _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
-                if any(t in msg_lower for t in _USER_ID_TRIGGERS):
-                    logger.info(f"[ROUTE] show_user_id claimed message: {message[:60]!r}")
-                    note_route("show_user_id")
-                    platform = "Telegram" if user_id.isdigit() else "WhatsApp"
-                    response = f"Your {platform} user ID is:\n`{user_id}`\n\nShare this with your other platform to link accounts."
-                    self._store_conversation(user_id, message, response)
-                    return {"operation": "show_user_id", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            _USER_ID_TRIGGERS = ["my user id", "what is my id", "what's my id", "show my id", "my id"]
+            # Word-boundary matched, NOT a bare substring test. "my id" is a
+            # substring of "my idea" and "my identity", so a plain `in` check
+            # hijacks "what is my idea for the Nike shoot" into the user-id
+            # command. Harmless while this block was gated off; live the moment
+            # it was un-gated — precisely the keyword-hijack class Phase 1 is
+            # about. Covered by TestSettingsTriggersDoNotHijackOrdinaryQueries.
+            if any(re.search(rf"\b{re.escape(t)}\b", msg_lower) for t in _USER_ID_TRIGGERS):
+                logger.info(f"[ROUTE] show_user_id claimed message: {message[:60]!r}")
+                note_route("show_user_id")
+                platform = "Telegram" if user_id.isdigit() else "WhatsApp"
+                response = f"Your {platform} user ID is:\n`{user_id}`\n\nShare this with your other platform to link accounts."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "show_user_id", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-                _LINK_TRIGGERS = [
-                    "link account", "link my account", "link telegram",
-                    "link my telegram", "link whatsapp", "link my whatsapp",
-                    "connect account", "connect telegram", "connect whatsapp",
-                ]
-                if self._cmd_with_typos(msg_lower, _LINK_TRIGGERS,
-                                        ("lnk account", "conect account", "link telegrm",
-                                         "link whatsap", "conect telegram", "conect whatsapp"),
-                                        intents=("",)):  # typos are full phrases
-                    logger.info(f"[ROUTE] link_account claimed message: {message[:60]!r}")
-                    note_route("link_account")
-                    return self._handle_link_account(user_id, message)
+            _LINK_TRIGGERS = [
+                "link account", "link my account", "link telegram",
+                "link my telegram", "link whatsapp", "link my whatsapp",
+                "connect account", "connect telegram", "connect whatsapp",
+            ]
+            if self._cmd_with_typos(msg_lower, _LINK_TRIGGERS,
+                                    ("lnk account", "conect account", "link telegrm",
+                                     "link whatsap", "conect telegram", "conect whatsapp"),
+                                    intents=("",)):  # typos are full phrases
+                logger.info(f"[ROUTE] link_account claimed message: {message[:60]!r}")
+                note_route("link_account")
+                return self._handle_link_account(user_id, message)
 
             # ── FlowMachine v2 — session 1 (classifier + IDLE leaf routing) ──
             # Behind a feature flag so production stays on the legacy path until

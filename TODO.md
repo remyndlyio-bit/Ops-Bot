@@ -187,11 +187,25 @@ and independently revertible.
   legacy check only runs when v2 is off. This one is the biggest single win — most
   misroutes we saw in live testing passed through this gate.
 
-### 1.4 Port the remaining pre-classifier checkpoints — ⚠️ PARTIAL (2 of 4)
+### 1.4 Port the remaining pre-classifier checkpoints — ⚠️ PARTIAL (3 of 4)
 *Audited 2026-08-04:*
 1. *`add_job` triggers — ✅ gated on v2-off (`intent_service.py:4351`).*
 2. *`modify` verb triggers — ✅ gated on v2-off (`intent_service.py:4331`).*
-3. *bank/name/link commands — ⚠️ **gated off without a replacement.** The legacy block (`intent_service.py:4065`) is behind `if not _flow_machine_v2_enabled_for(...)`, and its comment claims "the classifier handles these as SETTINGS_COMMAND" — but **`SETTINGS_COMMAND` does not exist** in the classifier's intent enum or prompt; only tests reference the string. `_prompt_bank_details_format`, `_handle_name_change` and `_handle_link_account` each have exactly ONE caller (4074 / 4090 / 4126), all inside that gated block. So with v2 ON (production default) an explicit "update my bank details" / "change my name" / "link my account" command appears to have no route. The flows themselves still work once armed, and the ungated `_has_bank_inline` check (4058) still catches a message that already contains the details — it is the bare COMMAND that looks orphaned. NOT verified against a live run.*
+3. *bank/name/link/address/user-id commands — ✅ **FIXED 2026-08-04** (was a live bug).
+   The block was gated behind `if not _flow_machine_v2_enabled_for(...)` on the grounds
+   that "the classifier handles these as SETTINGS_COMMAND" — but that intent was never
+   added to the classifier, and each handler had exactly ONE caller, inside that gate.
+   Reproduced with v2 ON: all six commands fell through to the QUERY PIPELINE
+   (`operation='query'`), so "update my bank details" was handed to the SQL planner as
+   though it were a data question. Fixed by un-gating the block rather than building a
+   SETTINGS_COMMAND intent — these are explicit unambiguous keyword commands, so the
+   simplest fix that restores correct behaviour (CLAUDE.md: "one-line fix > new
+   config"). Un-gating re-exposed a latent hijack: `"my id"` was substring-matched, so
+   "what is my idea for the Nike shoot" became the user-id command — now word-boundary
+   matched. Tests: `tests/test_settings_commands_reachable.py` (18) cover reachability
+   with v2 both on AND off, non-swallowing by the query pipeline, and the hijack guard.*
+   *If SETTINGS_COMMAND is still wanted as the "proper" port, it is now a refactor on
+   top of working behaviour rather than a fix for an outage.*
 4. *`_reconstruct_message` → `resolved_query` — ❌ not started. Still called at `intent_service.py:4528`; `resolved_query` remains shadow-only.*
 - One PR per checkpoint, same recipe, in this order (easiest → hardest):
   1. `add_job` trigger list (classifier: `CREATE_ENTRY`)
