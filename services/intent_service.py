@@ -3964,12 +3964,39 @@ class IntentService:
         self._store_conversation(user_id, message, response)
         return {"operation": "reminder", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+    def _stash_resume_nudge(self, nudge: str) -> None:
+        """Carry a flow's resume-nudge across a v2 -> legacy handoff.
+
+        Phase 1.5: when the user asks a side question mid-flow that the
+        deterministic router can't answer, dispatch_in_flow returns
+        SHADOW_ONLY and legacy's planner answers it — but legacy knows
+        nothing about the active flow, so the "still waiting on X" reminder
+        was dropped and the user was left stranded mid-flow. This stashes it
+        for THIS turn; process_request appends it to legacy's reply.
+
+        Thread-local (same mechanism as _turn_cache) because IntentService
+        is shared across concurrent requests — a plain attribute would let
+        one user's nudge land on another user's reply.
+        """
+        self._turn_cache.resume_nudge = nudge
+
+    def _take_resume_nudge(self) -> Optional[str]:
+        """Pop the pending nudge for this turn (read-once, so it can never
+        be appended twice or bleed into a later turn)."""
+        nudge = getattr(self._turn_cache, "resume_nudge", None)
+        self._turn_cache.resume_nudge = None
+        return nudge
+
     def process_request(self, user_id: str, message: str) -> Dict:
         """Public entry point — wraps _process_request_impl with WP-0
         telemetry (turn_ms, llm_calls, fallback rate) so every later work
         package has a baseline to beat. The implementation is unchanged;
         this wrapper only observes it."""
         with Turn(user_id) as t:
+            # Clear first: a nudge stashed by an earlier turn that never got
+            # consumed (an exception before the append point) must not be
+            # appended to an unrelated later reply.
+            self._turn_cache.resume_nudge = None
             result = self._process_request_impl(user_id, message)
             if not isinstance(result, dict):
                 # Observed live and in scripted test runs: _process_request_impl
@@ -3995,6 +4022,19 @@ class IntentService:
                     "trigger_invoice": False,
                     "invoice_data": {},
                 }
+            # Append the flow's resume-nudge if v2 handed a mid-flow side
+            # question to legacy this turn (see _stash_resume_nudge). Only
+            # when legacy actually produced a reply — appending "still
+            # waiting on X" to an error message would be noise on top of a
+            # failure. Popped read-once so it can't be applied twice.
+            _nudge = self._take_resume_nudge()
+            if _nudge and isinstance(result, dict) and result.get("operation") != "error":
+                _resp = result.get("response") or ""
+                if _resp.strip() and not _resp.endswith(_nudge):
+                    result = dict(result)
+                    result["response"] = _resp + _nudge
+                    logger.info("[V2_DISPATCH] resume-nudge appended to legacy side-question reply")
+
             t.operation = result.get("operation")
             t.response_text = result.get("response") or ""
             return result

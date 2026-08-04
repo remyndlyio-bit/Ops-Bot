@@ -253,13 +253,29 @@ def dispatch_in_flow(
                             return _result
                 except Exception as e:
                     logger.warning(f"[V2_DISPATCH] SIDE_QUESTION router attempt failed: {e}")
-            # No deterministic match (or a WRITE-shaped side question) — fall
-            # back to legacy. The active flow's awaiting_* legacy flag remains
-            # set in parallel, so the next message still routes to the flow
-            # handler. Legacy code appends no nudge for this path.
+            # No deterministic match (or a WRITE-shaped side question) — the
+            # LLM planner (legacy) answers it. Phase 1.5's stated goal for
+            # SIDE_QUESTION was that this path "currently loses the
+            # resume-nudge": v2 hands off, legacy answers, and the user is
+            # never reminded what the bot was waiting for — so a mid-flow
+            # side question silently strands them.
+            #
+            # Fully owning the branch would mean lifting the entire ~1000-line
+            # query cascade (follow-ups, ledger, invoice check, router,
+            # planner, synthesis, export) into the dispatcher. Instead we
+            # keep legacy answering and carry the nudge across the handoff:
+            # stash it for THIS turn, and process_request appends it to
+            # whatever legacy produces. Same user-visible outcome the fully
+            # ported branch would give, without duplicating the cascade.
+            try:
+                _nudge = flow.resume_nudge(current_context)
+                if _nudge:
+                    intent_service._stash_resume_nudge(_nudge)
+            except Exception as e:
+                logger.warning(f"[V2_DISPATCH] resume-nudge stash failed (non-fatal): {e}")
             logger.info(
                 f"[V2_DISPATCH] SIDE_QUESTION (READ) → shadow (legacy answers, "
-                f"flow={current_flow} preserved via legacy awaiting flag)"
+                f"flow={current_flow} preserved; resume-nudge carried across the handoff)"
             )
             return SHADOW_ONLY
 

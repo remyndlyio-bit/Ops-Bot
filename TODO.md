@@ -219,8 +219,35 @@ and independently revertible.
   `_process_request_impl`'s top half: onboarding gate → state TTL check → classifier →
   dispatcher. Nothing else.
 
-### 1.5 Delete `SHADOW_ONLY` fallbacks one branch at a time — ⚠️ PARTIAL
-*Audited 2026-08-04: both STATED priorities are done — SIDE_QUESTION for READ paths (commit 11077cd) and NEW_FLOW (commit 7165bec). ~8 `return SHADOW_ONLY` sites remain in `services/flow_dispatcher.py`, chiefly READ/WRITE intents in `dispatch_idle`, which still fall through to the legacy query pipeline by design. Finishing the section means porting those too.*
+### 1.5 Delete `SHADOW_ONLY` fallbacks one branch at a time — ✅ DONE (as far as is safe)
+*Audited then completed 2026-08-04. Both STATED priorities are now genuinely done:*
+- *`NEW_FLOW` — commit 7165bec.*
+- *`SIDE_QUESTION` for READ paths — the router-answerable half landed in 11077cd, but the
+  spec's actual complaint ("currently loses the resume-nudge") still applied to the OTHER
+  half: a side question the deterministic router can't answer is handed to legacy's
+  planner, which knows nothing about the active flow, so the "still waiting on X" reminder
+  was dropped and the user was stranded mid-flow. Fixed by carrying the nudge across the
+  handoff — stashed thread-locally for the turn, appended by `process_request` to whatever
+  legacy produced. Same user-visible result as fully porting the branch, without lifting
+  the ~1000-line query cascade (follow-ups, ledger, invoice check, router, planner,
+  synthesis, export) into the dispatcher. Tests: `tests/test_resume_nudge_handoff.py` (11).*
+
+*The 8 remaining `return SHADOW_ONLY` sites are NOT work items — audited individually:*
+- *4 are defensive fallbacks that must stay (flow not in registry; unknown/missing
+  `flow_compatible`; the outer exception handler; AUDIT_REPLY with no pending list).
+  Deleting them leaves an unhandled state with nowhere to go.*
+- *1 is intentional design: `NEW_FLOW` clears the flow then returns SHADOW_ONLY *so that*
+  the message is handled fresh by the normal cascade — that IS the correct behaviour.*
+- *1 is a deliberate correctness choice, already documented inline: a scope-shaped
+  question with an empty ledger must NOT go to the router, because a stray "unpaid"
+  inside "does this include unpaid?" false-matches the unpaid_list route.*
+- *2 are the genuine remainder — `dispatch_idle`'s READ/WRITE catch-all, and the
+  SIDE_QUESTION handoff above. Owning the first means extracting the whole query cascade
+  AND routing destructive WRITE_DELETE/WRITE_UPDATE on an LLM verdict with no legacy
+  safety net, which is precisely what the dispatcher's docstring says shadow mode exists
+  to avoid. Out of scope for "one branch at a time"; revisit only with the Phase 4
+  evaluation harness in place to measure it.*
+
 - **File:** `services/flow_dispatcher.py`. Grep `SHADOW_ONLY`.
 - Each `return SHADOW_ONLY` means "v2 understood the message but legacy still handles
   it". For each one: implement the real dispatch (most just call an existing
