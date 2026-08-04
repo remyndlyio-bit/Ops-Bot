@@ -1223,12 +1223,57 @@ class IntentService:
 
         return client_name
 
-    def _reconstruct_message(self, user_id: str, message: str, conversation_history: List[Dict]) -> str:
+    def _resolved_query_client(self, verdict: Optional[Dict]) -> Optional[str]:
+        """The client the v2 classifier RESOLVED for this turn, if any.
+
+        TODO.md 1.4 item 4 asked to "replace `_reconstruct_message` with the
+        classifier's `resolved_query`". A full swap is not safe: the
+        classifier emits `resolved_query` as null for anything that isn't
+        READ_QUERY/READ_AGGREGATE (see its prompt), while four of the six
+        reconstruction cases below are WRITE_INVOICE paths ("which month?"
+        -> "March" -> Generate invoice). Replacing wholesale would delete
+        those with nothing to take their place. The cases `resolved_query`
+        was designed for ("what about this month?", "and last quarter?")
+        never even reach this function -- `_looks_like_a_question` returns
+        early on them, and the answer_ledger handles them instead.
+
+        What IS safe, and is the real win available here: the reconstruction
+        cases that DO fire read `client_name` from the STORED `last_intent`,
+        which goes stale. Nearly every incident documented in the comments
+        below is that same shape -- a client left over from an unrelated
+        flow minutes earlier silently replacing the user's request. When the
+        classifier resolved a client for this turn from the actual recent
+        conversation, prefer that: it is computed fresh from what was just
+        said rather than from a field that may be several turns old.
+
+        Deliberately narrow -- returns None unless the verdict is a READ
+        intent with a dict `resolved_query` carrying a non-empty
+        client_name, so invoice paths keep their existing behaviour exactly.
+        """
+        if not isinstance(verdict, dict):
+            return None
+        if verdict.get("intent") not in ("READ_QUERY", "READ_AGGREGATE"):
+            return None
+        rq = verdict.get("resolved_query")
+        if not isinstance(rq, dict):
+            return None
+        client = rq.get("client_name")
+        if not isinstance(client, str) or not client.strip():
+            return None
+        return client.strip()
+
+    def _reconstruct_message(self, user_id: str, message: str, conversation_history: List[Dict],
+                             verdict: Optional[Dict] = None) -> str:
         """
         Context reconstruction: if the message is short/ambiguous, merge it
         with stored last_intent and recent conversation to produce a fully
         self-contained query.  Returns the original message unchanged when no
         reconstruction is needed.
+
+        `verdict` is the v2 classifier's output for this turn (optional, and
+        None when v2 is off). When it carries a freshly-resolved client for a
+        READ intent, that wins over the stored `last_intent.client_name` --
+        see _resolved_query_client.
         """
         msg_lower = message.strip().lower()
         word_count = len(message.strip().split())
@@ -1296,6 +1341,27 @@ class IntentService:
         client_name = last_intent.get("client_name", "")
         month_val = last_intent.get("month", "")
         entity = last_intent.get("entity", "")
+
+        # Prefer the classifier's freshly-resolved client over the stored one
+        # (READ intents only — see _resolved_query_client for why this is
+        # narrow). Logged when they disagree, because that disagreement is
+        # the stale-context bug this guards against actually being caught.
+        #
+        # NOT applied while a clarification is pending. When `pending` is set
+        # the user is literally answering a question the bot just asked about
+        # a SPECIFIC flow, so the stored client is authoritative and the
+        # classifier's view of the turn is not. Without this guard a stray
+        # READ verdict naming another client rewrote a mid-invoice month
+        # reply ("March", pending=month, client=Acme) into "Generate invoice
+        # for Nike for March" — an invoice raised against the wrong client.
+        # Caught by TestInvoiceReconstructionPathsUnchanged before release.
+        _fresh_client = self._resolved_query_client(verdict) if not pending else None
+        if _fresh_client and _fresh_client.lower() != (client_name or "").lower():
+            logger.info(
+                f"[CONTEXT] resolved_query client {_fresh_client!r} overrides stale "
+                f"last_intent client {client_name!r}"
+            )
+            client_name = _fresh_client
 
         # Get last assistant message to understand what was asked
         last_assistant_msg = ""
@@ -4545,7 +4611,8 @@ class IntentService:
             # For short / ambiguous messages, merge with stored last_intent
             # to produce a fully self-contained query before main pipeline.
             original_message = message
-            message = self._reconstruct_message(user_id, message, conversation_history)
+            message = self._reconstruct_message(user_id, message, conversation_history,
+                                                verdict=_v2_verdict)
             if message != original_message:
                 msg_lower = message.strip().lower()  # refresh after reconstruction
 
