@@ -96,7 +96,12 @@ class TestDerivedExpectationsMatchFixture:
     literals."""
 
     def test_row_count(self):
-        assert ROW_COUNT == len(FIXTURE_ROWS) == 15
+        # 15 originally; 20 since the Nike / Star Studios rows were added so
+        # the Intent_Test_Matrix sheet (which names those clients and April
+        # dates) asks about data that actually exists. Changing this literal
+        # should always be a deliberate act — that is what makes it a
+        # tripwire for accidental fixture drift.
+        assert ROW_COUNT == len(FIXTURE_ROWS) == 20
 
     def test_totals_partition_cleanly(self):
         assert PAID_TOTAL + UNPAID_TOTAL == TOTAL_FEES
@@ -122,7 +127,9 @@ class TestDerivedExpectationsMatchFixture:
         assert sum(1 for v in FEES_BY_CLIENT.values() if v == top) == 1
 
     def test_client_count(self):
-        assert CLIENT_COUNT == len(CLIENTS) == 3
+        # 3 originally (Acme / Bridgestone / Nordic); 5 since Nike and Star
+        # Studios were added for the Intent_Test_Matrix sheet.
+        assert CLIENT_COUNT == len(CLIENTS) == 5
 
 
 class TestFixtureCoverage:
