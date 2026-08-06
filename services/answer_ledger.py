@@ -86,40 +86,26 @@ def append_entry(memory, user_id: str, entry: LedgerEntry) -> None:
         pass
 
 
-def scope_from_sql(sql: str) -> Dict[str, Any]:
-    """Best-effort filters extraction for the DETERMINISTIC ROUTER path
-    (services/query_router.py), which has no typed plan — only a raw SQL
-    string. Detects the router's OWN exact SQL fragments (PAID_TRUE /
-    PAID_FALSE, imported from query_router rather than duplicated, so this
-    can never drift out of sync with what the router actually emits) plus a
-    plain client ILIKE extraction. The router never emits a date-range filter
-    (query_router._has_scope_qualifier forces date-qualified questions to the
-    planner instead), so time_range is always None here — correctly so."""
-    from services.query_router import PAID_TRUE, PAID_FALSE
-
-    filters: Dict[str, Any] = {}
-    if PAID_FALSE in sql:
-        filters["paid"] = "no"
-    elif PAID_TRUE in sql:
-        filters["paid"] = "yes"
-
-    m = re.search(r"client_name\s+ILIKE\s+'%([^']*)%'", sql, re.IGNORECASE)
-    if m and m.group(1):
-        filters["client_name"] = m.group(1)
-
-    return {"filters": filters, "time_range": None}
-
-
-def build_entry_from_sql(*, question: str, sql: str, rows: List[Dict],
+def build_entry_from_sql(*, question: str, scope: Dict[str, Any], rows: List[Dict],
                           response: str, render_kind: str) -> LedgerEntry:
     """Alternate constructor for the deterministic router path — same output
-    shape as build_entry(), scope derived from the executed SQL instead of a
-    typed plan (the router has no typed plan to hand over)."""
+    shape as build_entry(), except `scope` comes straight from the
+    RoutedQuery that produced the SQL (query_router.py — every route sets
+    its own `filters`/`time_range` explicitly) instead of being
+    reverse-engineered from the SQL text (P1-1, PLAN_OF_ACTION.md).
+
+    The regex-based scope_from_sql() this replaced had no vocabulary for
+    date filters at all (every date-qualified route disclosed "no date
+    filter — all time" regardless of what actually ran) and missed a
+    client filter wrapped in query_router.CLIENT_EXPR's COALESCE instead
+    of a bare `client_name ILIKE`. Passing the route's own scope can't
+    drift from what it actually put in the SQL, by construction.
+    """
     kind = "aggregate" if render_kind == "AGGREGATE" else "list"
     value = rows[0].get("result") if (kind == "aggregate" and rows) else len(rows)
     row_ids = [str(r["id"]) for r in rows if r.get("id") is not None][:25]
     return LedgerEntry(
-        question=question, kind=kind, scope=scope_from_sql(sql),
+        question=question, kind=kind, scope=scope,
         value=value, row_ids=row_ids, surface=(response or "")[:200],
     )
 

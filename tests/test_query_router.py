@@ -273,6 +273,68 @@ class TestSqlSafety:
         assert "o''brien" in r.sql.lower()
 
 
+# ── P1-1 (PLAN_OF_ACTION.md): every route's OWN scope, not reverse-engineered
+# from the SQL text after the fact. scope_from_sql (the regex-based guesser
+# this replaced) had no vocabulary for date filters at all — every
+# date-qualified route disclosed "no date filter — all time" regardless of
+# what actually ran — and missed a client filter wrapped in CLIENT_EXPR's
+# COALESCE instead of a bare `client_name ILIKE`. A route's scope is set at
+# the same place its SQL is built, so the two can't drift apart.
+# ─────────────────────────────────────────────────────────────────────────
+
+class TestRouteScope:
+    def test_payment_status_scope_has_client_filter(self):
+        # route_common_query lowercases the message before any route sees
+        # it, so the captured client name is lowercase too — same as
+        # meta["client"] on this route already was before this change.
+        r = _route("Has Nike paid?")
+        assert r.scope == {"filters": {"client_name": "nike"}, "time_range": None}
+
+    def test_client_owes_scope_has_client_and_unpaid_filter(self):
+        r = _route("How much does Nike owe me?")
+        assert r.scope == {"filters": {"client_name": "nike", "paid": "no"}, "time_range": None}
+
+    def test_clients_paid_list_unpaid_scope(self):
+        r = _route("which clients haven't paid")
+        assert r.scope == {"filters": {"paid": "no"}, "time_range": None}
+
+    def test_clients_paid_list_paid_scope(self):
+        r = _route("which clients have paid")
+        assert r.scope == {"filters": {"paid": "yes"}, "time_range": None}
+
+    def test_date_lookup_scope_has_time_range_not_none(self):
+        """The exact live bug (row 51, Intent Test Matrix): 'What did I do
+        on 10 April?' was disclosed as 'no date filter — all time' even
+        though job_date = '...' WAS in the SQL — scope_from_sql simply had
+        no date vocabulary. The route's own scope can't have that gap."""
+        r = _route("What did I do on 10 April?")
+        assert r.scope["time_range"] is not None
+        assert r.scope["time_range"]["value"]["start"] == r.scope["time_range"]["value"]["end"]
+
+    def test_bill_not_sent_scope_has_bill_sent_filter(self):
+        r = _route("Kiska invoice bhejna baki hai")
+        assert r.scope == {"filters": {"bill_sent": "no"}, "time_range": None}
+
+    def test_unpaid_list_scope_has_paid_filter(self):
+        r = _route("show me pending invoices")
+        assert r.scope == {"filters": {"paid": "no"}, "time_range": None}
+
+    @pytest.mark.parametrize("msg", [
+        "how many jobs have I done",
+        "total billing",
+        "average fees per job",
+        "who is my biggest client",
+        "show all my jobs",
+        "what was my last job",
+    ])
+    def test_unqualified_routes_default_to_empty_scope(self, msg):
+        """No filter was applied, so 'no filters, no time range' IS the
+        honest scope — not a signal that scope tracking was skipped."""
+        r = _route(msg)
+        assert r is not None, f"{msg!r} should have matched a route"
+        assert r.scope == {"filters": {}, "time_range": None}
+
+
 # ── Deterministic renderers ─────────────────────────────────────────────────
 
 class TestRenderers:

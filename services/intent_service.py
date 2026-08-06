@@ -5,7 +5,7 @@ from utils.date_utils import month_name_to_number, number_to_month_name
 from services.answer_ledger import (
     answer_scope_question, build_entry, build_entry_from_sql, append_entry,
     get_entries as get_ledger_entries, is_scope_question as answer_ledger_is_scope_question,
-    scope_from_sql, format_inr,
+    format_inr,
 )
 from services.sql_generator import generate_sql
 from services.sql_validator import validate_sql
@@ -249,6 +249,29 @@ def _format_job_cards(rows: list) -> str:
         prefix = f"Job {i}\n" if len(rows) > 1 else ""
         cards.append(prefix + _format_job_card(row))
     return "\n\n".join(cards)
+
+
+def _list_result_message(rows: list) -> str:
+    """Chat-visible summary for a >4-row list result. P2-3 (PLAN_OF_ACTION.md):
+    "Found 20 results — here's a spreadsheet with all of them" left chat
+    with nothing to actually read — the whole answer sat in an attachment
+    the user had to open. Shows the first 5 as job cards, same format as
+    the <=4-row path, with the spreadsheet as the way to see the rest.
+
+    Falls back to the plain count when the rows aren't full job entries
+    (e.g. a GROUP BY result) — _format_job_card's fields (POC, Invoice
+    Date, Invoice No) wouldn't exist on those, so cards would render
+    mostly "—" instead of anything useful."""
+    if not rows or not _is_full_job_row(rows[0]):
+        return f"Found {len(rows)} results — here's a spreadsheet with all of them."
+    preview = _format_job_cards(rows[:5])
+    remaining = len(rows) - 5
+    tail = (
+        f"\n\n…and {remaining} more in the attached spreadsheet."
+        if remaining > 0 else
+        "\n\n(Full list also attached as a spreadsheet.)"
+    )
+    return f"Found {len(rows)} results — here are the first 5:\n\n{preview}{tail}"
 
 
 def _format_aggregate_fallback(payload: dict, user_message: str) -> str:
@@ -2483,6 +2506,19 @@ class IntentService:
         self._store_conversation(user_id, f"Save job: {summary}", response)
         return {"operation": "form_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+    @staticmethod
+    def _job_date_display_value(extracted: Dict) -> Optional[str]:
+        """The Date line's display text for a smart-capture card. Discloses
+        when job_date was silently defaulted to today (no date anywhere in
+        the message) instead of showing it as if the user had actually
+        stated it (P2-5, PLAN_OF_ACTION.md)."""
+        val = extracted.get("job_date")
+        if val is None:
+            return None
+        if extracted.get("_job_date_defaulted"):
+            return f"{val} (today — no date in your message; reply with the real date to change)"
+        return val
+
     def _show_smart_capture_confirmation(self, user_id: str, extracted: Dict) -> Dict:
         """Show confirmation message and wait for Yes/Edit."""
         lines = ["Got it 👍\n"]
@@ -2498,7 +2534,7 @@ class IntentService:
             ("notes", "Notes"),
         ]
         for key, label in field_labels:
-            val = extracted.get(key)
+            val = self._job_date_display_value(extracted) if key == "job_date" else extracted.get(key)
             if val is not None:
                 if key == "fees":
                     val = f"₹{format_inr(val)}" if isinstance(val, (int, float)) else val
@@ -2627,10 +2663,14 @@ class IntentService:
             self._store_conversation(user_id, content, response)
             return {"operation": "smart_capture_prompt", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
-        # Default job_date to today if not extracted
+        # Default job_date to today if not extracted. Marked so the
+        # confirmation/missing-fields cards can disclose this instead of
+        # silently showing today's date as if the user had stated it
+        # (P2-5, PLAN_OF_ACTION.md).
         if not extracted.get("job_date"):
             from datetime import date as _date
             extracted["job_date"] = _date.today().isoformat()
+            extracted["_job_date_defaulted"] = True
 
         # Check required fields — brand, date, and description are mandatory.
         # POC fields are optional: user can add them later or skip if not needed.
@@ -2655,7 +2695,7 @@ class IntentService:
                 ("poc_name", "POC name"), ("poc_email", "POC email"), ("notes", "Notes"),
             ]
             for key, label in field_display:
-                val = extracted.get(key)
+                val = self._job_date_display_value(extracted) if key == "job_date" else extracted.get(key)
                 if val is not None:
                     if key == "fees":
                         val = f"₹{format_inr(val)}" if isinstance(val, (int, float)) else val
@@ -6355,7 +6395,7 @@ class IntentService:
                                 self.memory.update_user_memory(user_id, {"uscf_context": ctx})
                                 if len(kw_rows) > 4:
                                     excel_path = _generate_jobs_excel(kw_rows, data_user_id)
-                                    response = f"Found {len(kw_rows)} results — here's a spreadsheet with all of them."
+                                    response = _list_result_message(kw_rows)
                                     self._store_conversation(user_id, message, response)
                                     return {"operation": "query", "response": response, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
                                 if _is_full_job_row(kw_rows[0]) and not _is_history_q:
@@ -6390,7 +6430,7 @@ class IntentService:
                 _ledger_plan = plan_result.get("plan") if isinstance(plan_result, dict) else None
                 if len(rows) > 4:
                     excel_path = _generate_jobs_excel(rows, data_user_id)
-                    response = f"Found {len(rows)} results — here's a spreadsheet with all of them."
+                    response = _list_result_message(rows)
                     logger.info(f"[QUERY] Excel generated: {excel_path} ({len(rows)} rows)")
                     append_entry(self.memory, user_id, build_entry(
                         question=message, plan=_ledger_plan, rows=rows, response=response))
@@ -6670,19 +6710,19 @@ class IntentService:
                            else "avg" if "AVG(" in routed.sql.upper() else "count")
             if _deterministic_aggregates_enabled():
                 resp = render_answer_payload(build_answer_payload(
-                    scope=scope_from_sql(routed.sql), metric=_agg_metric, rows=rows))
+                    scope=routed.scope, metric=_agg_metric, rows=rows))
             else:
                 payload = build_clean_payload(rows, "select")
                 resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
                 if _synthesis_looks_broken(resp):
                     # WP-4: the deterministic fallback now carries headline + scope
-                    # + a follow-up, built from the SAME scope the SQL actually
-                    # used (scope_from_sql(routed.sql)) — not a message-keyword
-                    # guess like the old _format_aggregate_fallback made.
+                    # + a follow-up, built from the SAME scope the route actually
+                    # used (routed.scope) — not a message-keyword guess like the
+                    # old _format_aggregate_fallback made.
                     resp = render_answer_payload(build_answer_payload(
-                        scope=scope_from_sql(routed.sql), metric=_agg_metric, rows=rows))
+                        scope=routed.scope, metric=_agg_metric, rows=rows))
             append_entry(self.memory, user_id, build_entry_from_sql(
-                question=message, sql=routed.sql, rows=rows, response=resp, render_kind="AGGREGATE"))
+                question=message, scope=routed.scope, rows=rows, response=resp, render_kind="AGGREGATE"))
             return _finish(resp)
 
         # ── ROWS: full job rows → cards / spreadsheet / synthesiser ──
@@ -6690,9 +6730,9 @@ class IntentService:
             return None  # nothing to show — hand to planner for a helpful empty-state reply
         if len(rows) > 4 and _is_full_job_row(rows[0]):
             excel_path = _generate_jobs_excel(rows, data_user_id)
-            resp = f"Found {len(rows)} results — here's a spreadsheet with all of them."
+            resp = _list_result_message(rows)
             append_entry(self.memory, user_id, build_entry_from_sql(
-                question=message, sql=routed.sql, rows=rows, response=resp, render_kind="ROWS"))
+                question=message, scope=routed.scope, rows=rows, response=resp, render_kind="ROWS"))
             self._store_conversation(user_id, message, resp)
             return {"operation": "query", "response": resp, "trigger_invoice": False, "invoice_data": {}, "excel_path": excel_path}
         if _is_full_job_row(rows[0]):
@@ -6709,17 +6749,17 @@ class IntentService:
                 resp = _format_job_cards(rows)
             else:
                 resp = render_answer_payload(build_answer_payload(
-                    scope=scope_from_sql(routed.sql), metric=None, rows=rows))
+                    scope=routed.scope, metric=None, rows=rows))
             append_entry(self.memory, user_id, build_entry_from_sql(
-                question=message, sql=routed.sql, rows=rows, response=resp, render_kind="ROWS"))
+                question=message, scope=routed.scope, rows=rows, response=resp, render_kind="ROWS"))
             return _finish(resp)
         payload = build_clean_payload(rows, "select")
         resp = self.gemini.synthesize_response(payload, message, conversation_history=conversation_history)
         if _synthesis_looks_broken(resp):
             resp = render_answer_payload(build_answer_payload(
-                scope=scope_from_sql(routed.sql), metric=None, rows=rows))
+                scope=routed.scope, metric=None, rows=rows))
         append_entry(self.memory, user_id, build_entry_from_sql(
-            question=message, sql=routed.sql, rows=rows, response=resp, render_kind="ROWS"))
+            question=message, scope=routed.scope, rows=rows, response=resp, render_kind="ROWS"))
         return _finish(resp)
 
     def _keyword_sql_fallback(self, message: str, user_id: str) -> Optional[str]:

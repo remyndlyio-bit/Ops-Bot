@@ -97,6 +97,41 @@ class TestRouterPathToScopeAnswer:
         assert ledger["entries"][0]["value"] == 500000
 
 
+class TestRouterPathDateScopeDisclosure:
+    """P1-1 (PLAN_OF_ACTION.md) — the exact live bug (Intent Test Matrix row
+    51): 'What did I do on 10 April?' correctly filtered by job_date in the
+    SQL, but the DISCLOSED scope said 'no date filter — all time', because
+    scope_from_sql (the regex-based guesser the response text and the
+    ledger both relied on) had no vocabulary for date filters at all.
+    _route_date_lookup now carries its own scope, so the disclosed text and
+    the SQL that actually ran can't disagree."""
+
+    def test_date_lookup_response_does_not_claim_no_date_filter(self):
+        svc = _svc()
+        svc.supabase.execute_sql.return_value = {
+            "ok": True, "operation": "select",
+            "rows": [{"id": "r1", "client_name": "Nike", "job_date": "2026-04-10",
+                      "fees": 2500, "paid": "Yes", "bill_no": "INV-1"}],
+        }
+        result = svc.process_request("u1", "What did I do on 10 April?")
+        response = result["response"].lower()
+        assert "no date filter" not in response
+        assert "2026-04-10" in result["response"]
+
+    def test_date_lookup_ledger_entry_carries_the_real_time_range(self):
+        svc = _svc()
+        svc.supabase.execute_sql.return_value = {
+            "ok": True, "operation": "select",
+            "rows": [{"id": "r1", "client_name": "Nike", "job_date": "2026-04-10",
+                      "fees": 2500, "paid": "Yes", "bill_no": "INV-1"}],
+        }
+        svc.process_request("u1", "What did I do on 10 April?")
+        ledger = svc.memory.get_user_memory("u1").get("answer_ledger")
+        entry = ledger["entries"][0]
+        assert entry["scope"]["time_range"] is not None
+        assert entry["scope"]["time_range"]["value"]["start"] == "2026-04-10"
+
+
 class TestPlannerPathToScopeAnswer:
     """Same behaviour via the LLM planner path (execute_query_plan), for a
     message unusual enough not to match the deterministic router."""

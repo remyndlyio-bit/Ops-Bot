@@ -226,6 +226,69 @@ class TestSmartCaptureConfirmationFeeFormatting:
         assert "₹1,50,000" in result["response"]
 
 
+class TestSmartCaptureDefaultedDateDisclosure:
+    """P2-5 (PLAN_OF_ACTION.md): when no date is anywhere in the message,
+    _extract_and_confirm silently defaults job_date to today — the
+    confirmation/missing-fields cards must disclose that instead of
+    showing today's date as if the user had actually said it."""
+
+    def test_confirmation_card_discloses_defaulted_date(self):
+        svc = _make_svc()
+        result = svc._show_smart_capture_confirmation(
+            "u1", {"brand_name": "Nike", "job_date": "2026-08-06", "_job_date_defaulted": True},
+        )
+        assert "2026-08-06" in result["response"]
+        assert "today" in result["response"].lower()
+
+    def test_confirmation_card_does_not_disclose_an_explicit_date(self):
+        svc = _make_svc()
+        result = svc._show_smart_capture_confirmation(
+            "u1", {"brand_name": "Nike", "job_date": "2026-04-10"},
+        )
+        assert "Date: 2026-04-10" in result["response"]
+        assert "today" not in result["response"].lower()
+
+    def test_missing_fields_card_also_discloses_defaulted_date(self):
+        svc = _make_svc()
+        svc.gemini.extract_job_fields.return_value = {"brand_name": "Nike"}
+        result = svc._extract_and_confirm("u1", "add a job for Nike")
+        assert result["operation"] == "smart_capture_missing"
+        assert "today" in result["response"].lower()
+
+    def test_extract_and_confirm_end_to_end_marks_defaulted_date(self):
+        """The marker must actually reach the confirmation card through the
+        real extraction path, not just when constructed by hand in a test."""
+        svc = _make_svc()
+        svc.gemini.extract_job_fields.return_value = {
+            "brand_name": "Nike", "job_description_details": "shoot",
+        }
+        result = svc._extract_and_confirm("u1", "add a job for Nike, shoot")
+        assert result["operation"] == "smart_capture_confirm"
+        assert "today" in result["response"].lower()
+
+    def test_extract_and_confirm_with_explicit_date_stays_silent(self):
+        svc = _make_svc()
+        svc.gemini.extract_job_fields.return_value = {
+            "brand_name": "Nike", "job_description_details": "shoot", "job_date": "2026-04-10",
+        }
+        result = svc._extract_and_confirm("u1", "add a job for Nike, 10 April, shoot")
+        assert "2026-04-10" in result["response"]
+        assert "today" not in result["response"].lower()
+
+    def test_defaulted_date_marker_never_reaches_the_saved_record(self):
+        """The internal marker key must not leak into the actual DB insert —
+        _save_smart_capture_job maps an explicit field allowlist, but this
+        pins that down instead of trusting it silently."""
+        svc = _make_svc()
+        svc.supabase.insert_job_entry.return_value = {"ok": True}
+        svc.memory.get_user_memory.return_value = {}
+        svc._save_smart_capture_job("u1", {
+            "brand_name": "Nike", "job_date": "2026-08-06", "_job_date_defaulted": True,
+        })
+        saved_record = svc.supabase.insert_job_entry.call_args.args[0]
+        assert "_job_date_defaulted" not in saved_record
+
+
 class TestSmartCaptureConfirm:
     VALUES = {"brand_name": "Nike", "fees": 25000, "paid": "Yes"}
 

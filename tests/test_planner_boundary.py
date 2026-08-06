@@ -725,3 +725,53 @@ class TestClampTimeRange:
                                 "value": {"start": "this_month", "end": None}}}
         out = _clamp_time_range(plan)
         assert out["time_range"]["value"]["start"] == "this_month"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# P2-2 (PLAN_OF_ACTION.md): 'this month' / 'this quarter' / 'this year' used
+# to end at TODAY instead of the calendar period's real end. The SQL result
+# was unaffected (job_entries can't have future-dated rows), but the
+# disclosed scope read like an arbitrary custom range: "How much did I earn
+# this month?" answered "2026-08-01 to 2026-08-05" instead of "August 2026"
+# — correct number, confusing scope. Live matrix rows 28 ("this month") and
+# 33 ("this quarter") were both graded wrong for exactly this reason.
+# ════════════════════════════════════════════════════════════════════════
+
+class TestPrecomputedTimeRangesUseFullCalendarPeriods:
+    def _ranges(self, monkeypatch, today_str):
+        import services.query_planner as qp
+        from datetime import date as _date
+        y, m, d = (int(x) for x in today_str.split("-"))
+        monkeypatch.setattr(qp, "date", type("_FixedDate", (_date,), {
+            "today": classmethod(lambda cls: _date(y, m, d)),
+        }))
+        return qp._precompute_time_ranges()
+
+    def test_this_month_ends_on_the_real_last_day_not_today(self, monkeypatch):
+        text = self._ranges(monkeypatch, "2026-08-05")
+        assert "'this month' → start: 2026-08-01, end: 2026-08-31" in text
+
+    def test_this_month_handles_a_30_day_month(self, monkeypatch):
+        text = self._ranges(monkeypatch, "2026-04-10")
+        assert "'this month' → start: 2026-04-01, end: 2026-04-30" in text
+
+    def test_this_month_handles_february_in_a_leap_year(self, monkeypatch):
+        text = self._ranges(monkeypatch, "2024-02-10")
+        assert "'this month' → start: 2024-02-01, end: 2024-02-29" in text
+
+    def test_this_quarter_ends_on_the_quarters_real_last_day(self, monkeypatch):
+        # Aug 5 falls in Q3 (Jul-Sep) — real end is Sep 30, not Aug 5.
+        text = self._ranges(monkeypatch, "2026-08-05")
+        assert "'this quarter' → start: 2026-07-01, end: 2026-09-30" in text
+
+    def test_this_year_ends_on_december_31_not_today(self, monkeypatch):
+        text = self._ranges(monkeypatch, "2026-08-05")
+        assert "'this year' → start: 2026-01-01, end: 2026-12-31" in text
+
+    def test_last_month_last_quarter_last_year_unaffected(self, monkeypatch):
+        """These were always full-period ranges — pinned down so a future
+        edit to 'this X' can't accidentally regress the 'last X' rows too."""
+        text = self._ranges(monkeypatch, "2026-08-05")
+        assert "'last month' → start: 2026-07-01, end: 2026-07-31" in text
+        assert "'last quarter' → start: 2026-04-01, end: 2026-06-30" in text
+        assert "'last year' → start: 2025-01-01, end: 2025-12-31" in text

@@ -68,6 +68,15 @@ class RoutedQuery:
     sql: str
     render: str
     meta: Dict = field(default_factory=dict)
+    # {"filters": {...}, "time_range": {...}|None} — same shape as the
+    # planner's typed Plan.filters/.time_range. Every route sets this
+    # explicitly to what it ACTUALLY put in `sql`, so the answer ledger can
+    # build a truthful scope disclosure directly instead of reverse-
+    # engineering one from the SQL text after the fact (P1-1,
+    # PLAN_OF_ACTION.md — scope_from_sql's regexes had no vocabulary for
+    # date filters at all, and missed a client filter wrapped in the
+    # CLIENT_EXPR COALESCE instead of a bare `client_name ILIKE`).
+    scope: Dict = field(default_factory=lambda: {"filters": {}, "time_range": None})
 
 
 # A "client word" and a "count word" reused across routes.
@@ -131,7 +140,8 @@ def _route_payment_status(msg: str, uid: str) -> Optional[RoutedQuery]:
         f"AND (client_name ILIKE '%{c}%' OR brand_name ILIKE '%{c}%' OR production_house ILIKE '%{c}%') "
         f"ORDER BY job_date DESC NULLS LAST"
     )
-    return RoutedQuery("payment_status", sql, PAYMENT_STATUS, {"client": client})
+    return RoutedQuery("payment_status", sql, PAYMENT_STATUS, {"client": client},
+                       scope={"filters": {"client_name": client}, "time_range": None})
 
 
 def _route_client_owes(msg: str, uid: str) -> Optional[RoutedQuery]:
@@ -152,7 +162,8 @@ def _route_client_owes(msg: str, uid: str) -> Optional[RoutedQuery]:
         f"WHERE user_id='{uid}' AND {NOT_DELETED} "
         f"AND ({CLIENT_EXPR} ILIKE '%{c}%') AND {PAID_FALSE}"
     )
-    return RoutedQuery("client_owes", sql, AGGREGATE, {"client": client})
+    return RoutedQuery("client_owes", sql, AGGREGATE, {"client": client},
+                       scope={"filters": {"client_name": client, "paid": "no"}, "time_range": None})
 
 
 def _route_clients_paid_list(msg: str, uid: str) -> Optional[RoutedQuery]:
@@ -184,7 +195,8 @@ def _route_clients_paid_list(msg: str, uid: str) -> Optional[RoutedQuery]:
         f"AND {CLIENT_EXPR} IS NOT NULL AND {clause} ORDER BY 1"
     )
     return RoutedQuery("clients_paid_list", sql, CLIENT_LIST,
-                       {"status": "unpaid" if wants_unpaid else "paid"})
+                       {"status": "unpaid" if wants_unpaid else "paid"},
+                       scope={"filters": {"paid": "no" if wants_unpaid else "yes"}, "time_range": None})
 
 
 def _route_biggest_client(msg: str, uid: str) -> Optional[RoutedQuery]:
@@ -330,7 +342,10 @@ def _route_date_lookup(msg: str, uid: str) -> Optional[RoutedQuery]:
     if not iso:
         return None
     sql = f"{_base(uid)} AND job_date = '{iso}' ORDER BY job_date DESC"
-    return RoutedQuery("date_lookup", sql, ROWS, {"date": iso})
+    return RoutedQuery("date_lookup", sql, ROWS, {"date": iso},
+                       scope={"filters": {}, "time_range": {
+                           "type": "absolute", "value": {"start": iso, "end": iso},
+                       }})
 
 
 def _route_last_job(msg: str, uid: str) -> Optional[RoutedQuery]:
@@ -360,7 +375,8 @@ def _route_bill_not_sent(msg: str, uid: str) -> Optional[RoutedQuery]:
     ):
         return None
     sql = f"{_base(uid)} AND {BILL_NOT_SENT} ORDER BY job_date DESC NULLS LAST LIMIT 25"
-    return RoutedQuery("bill_not_sent_list", sql, ROWS)
+    return RoutedQuery("bill_not_sent_list", sql, ROWS,
+                       scope={"filters": {"bill_sent": "no"}, "time_range": None})
 
 
 def _route_unpaid_list(msg: str, uid: str) -> Optional[RoutedQuery]:
@@ -369,7 +385,8 @@ def _route_unpaid_list(msg: str, uid: str) -> Optional[RoutedQuery]:
         return None
     # "which clients unpaid" is handled by the client-list route earlier.
     sql = f"{_base(uid)} AND {PAID_FALSE} ORDER BY job_date DESC NULLS LAST LIMIT 25"
-    return RoutedQuery("unpaid_list", sql, ROWS)
+    return RoutedQuery("unpaid_list", sql, ROWS,
+                       scope={"filters": {"paid": "no"}, "time_range": None})
 
 
 def _route_list_jobs(msg: str, uid: str) -> Optional[RoutedQuery]:

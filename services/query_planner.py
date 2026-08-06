@@ -149,12 +149,25 @@ def _strip_markdown_json(raw: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _precompute_time_ranges() -> str:
-    """Compute common time ranges so the AI doesn't have to do date math."""
+    """Compute common time ranges so the AI doesn't have to do date math.
+
+    P2-2 (PLAN_OF_ACTION.md): 'this month' / 'this quarter' / 'this year'
+    use the FULL calendar period's end date, not today. Ending them at
+    `today` doesn't change what rows come back (job_entries can't have
+    future-dated rows under a normal reading, and if a job WERE logged
+    ahead of time, "this month" should include it same as any other day
+    in the month) — it only made the DISCLOSED scope read like an
+    arbitrary custom range ("2026-08-01 to 2026-08-05") instead of what
+    the user actually asked for ("this month" -> August 2026). A live run
+    scored "How much did I earn this month?" as wrong for exactly this:
+    the sum was correct, the disclosed range looked like a bug.
+    """
     from datetime import timedelta
     today = date.today()
 
     # This month
     this_month_start = today.replace(day=1)
+    this_month_end = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
 
     # Last month
     last_month_end = this_month_start - timedelta(days=1)
@@ -163,6 +176,8 @@ def _precompute_time_ranges() -> str:
     # This quarter
     current_q_start_month = ((today.month - 1) // 3) * 3 + 1
     this_q_start = date(today.year, current_q_start_month, 1)
+    this_q_end_month = current_q_start_month + 2
+    this_q_end = date(today.year, this_q_end_month, calendar.monthrange(today.year, this_q_end_month)[1])
 
     # Last quarter
     if current_q_start_month == 1:
@@ -175,17 +190,18 @@ def _precompute_time_ranges() -> str:
 
     # This year
     this_year_start = date(today.year, 1, 1)
+    this_year_end = date(today.year, 12, 31)
 
     # Last year
     last_year_start = date(today.year - 1, 1, 1)
     last_year_end = date(today.year - 1, 12, 31)
 
     return (
-        f"- 'this month' → start: {this_month_start.isoformat()}, end: {today.isoformat()}\n"
+        f"- 'this month' → start: {this_month_start.isoformat()}, end: {this_month_end.isoformat()}\n"
         f"- 'last month' → start: {last_month_start.isoformat()}, end: {last_month_end.isoformat()}\n"
-        f"- 'this quarter' → start: {this_q_start.isoformat()}, end: {today.isoformat()}\n"
+        f"- 'this quarter' → start: {this_q_start.isoformat()}, end: {this_q_end.isoformat()}\n"
         f"- 'last quarter' → start: {last_q_start.isoformat()}, end: {last_q_end.isoformat()}\n"
-        f"- 'this year' → start: {this_year_start.isoformat()}, end: {today.isoformat()}\n"
+        f"- 'this year' → start: {this_year_start.isoformat()}, end: {this_year_end.isoformat()}\n"
         f"- 'last year' → start: {last_year_start.isoformat()}, end: {last_year_end.isoformat()}\n"
     )
 
