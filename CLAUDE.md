@@ -119,7 +119,7 @@ All AI calls go through OpenRouter to Gemini 2.5 Flash (`AI_KEY` env var). Used 
 
 ### Environment Variables
 
-See `.env.example`. Required: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`, `BASE_URL`, `TELEGRAM_BOT_TOKEN`, `AI_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL` (use pooler connection, port 6543). Optional: `RESEND_API`, `RESEND_FROM_EMAIL`, `COLUMN_SCHEMA`, `STRICT_PLAN_VALIDATION` (default `1`).
+See `.env.example`. Required: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`, `BASE_URL`, `TELEGRAM_BOT_TOKEN`, `AI_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL` (use pooler connection, port 6543). Optional: `RESEND_API`, `RESEND_FROM_EMAIL`, `COLUMN_SCHEMA`, `STRICT_PLAN_VALIDATION` (default `1`), `DB_CONNECTION_POOL` (default off — see `services/supabase_service.py`'s module docstring before enabling; a prior single-persistent-connection attempt made production latency worse).
 
 ### Deployment
 

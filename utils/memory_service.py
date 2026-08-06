@@ -43,6 +43,20 @@ class MemoryService:
         self._lock = threading.Lock()                     # global lock (file I/O + DB access)
         self._user_locks: Dict[str, threading.Lock] = {}  # per-user read-modify-write locks
         self.memory_level = int(os.getenv("CHAT_MEMORYLEVEL", "5"))
+        # P1-4 (PLAN_OF_ACTION.md): one DB read per (user, turn) instead of
+        # one per call site — a single turn calls get_user_memory /
+        # update_user_memory a dozen-plus times across intent_service.py
+        # (uscf_context lookups, awaiting-state checks, _save_last_intent,
+        # ...), each previously a fresh round trip for the identical row.
+        # threading.local(), not an instance dict: MemoryService is a
+        # process-wide singleton and FastAPI runs each sync request on its
+        # own worker thread (one turn per thread at a time), so this is the
+        # same pattern IntentService._turn_cache already uses for the
+        # user profile. reset_turn_cache() is called at the top of every
+        # turn (process_request) so a leftover entry from an EARLIER turn
+        # on a reused worker thread can never look valid for a new one —
+        # matching is checked on user_id too, as a second, cheap guard.
+        self._turn_cache = threading.local()
 
         self._db_url = (os.getenv("SUPABASE_DB_URL") or "").strip() or None
         self._conn = None          # single reused connection (lazy)
@@ -143,19 +157,59 @@ class MemoryService:
             except Exception as e:
                 logger.warning(f"[MEMORY] file save failed: {e}")
 
+    # ── per-turn cache (P1-4, PLAN_OF_ACTION.md) ────────────────────────────
+    def reset_turn_cache(self) -> None:
+        """Call once at the very top of a turn, before any get/update_user_memory
+        call. Bounds the cache's lifetime explicitly to "this turn" instead of
+        relying on it happening to still be correct if the same worker thread
+        picks up a later turn (for the same or a different user)."""
+        self._turn_cache.entry = None
+
+    def _cached_entry(self, user_id: str) -> Optional[Dict]:
+        entry = getattr(self._turn_cache, "entry", None)
+        if entry is not None and entry[0] == user_id:
+            return entry[1]
+        return None
+
+    def _set_cached_entry(self, user_id: str, payload: Dict) -> None:
+        self._turn_cache.entry = (user_id, dict(payload))
+
     # ── unified per-user read/write (DB first, file fallback) ──────────────
-    def _read_raw(self, user_id: str) -> Optional[Dict]:
-        """Return the stored dict for a user, or None if no record yet."""
-        if self._db_ok:
-            return self._db_get(user_id)
-        return self.memory.get(user_id)
+    # _write_raw is the ONE place every write path ends up — update_user_memory,
+    # start_form, set_form_value, advance_form_step, complete_form, cancel_form,
+    # add_message all funnel through it — so populating the cache here (not
+    # separately in each of those) is what keeps ALL of them correct instead
+    # of just the ones some future edit remembers to also update.
+    def _read_raw(self, user_id: str, use_cache: bool = True) -> Optional[Dict]:
+        """Return the stored dict for a user, or None if no record yet.
+
+        `use_cache=False` (update_user_memory only): two call sites write
+        memory from OUTSIDE process_request's turn boundary (main.py's
+        background invoice-send tasks), so they never call
+        reset_turn_cache() — trusting a possibly-stale cached value as
+        their read-modify-write base could silently clobber a concurrent
+        update made through a real turn in between. Bypassing the cache
+        for that one read keeps update_user_memory's own DB cost exactly
+        what it was before this cache existed: one read, one write,
+        always.
+        """
+        if use_cache:
+            cached = self._cached_entry(user_id)
+            if cached is not None:
+                return dict(cached)
+        data = self._db_get(user_id) if self._db_ok else self.memory.get(user_id)
+        if data is not None:
+            self._set_cached_entry(user_id, data)
+        return data
 
     def _write_raw(self, user_id: str, payload: Dict):
         if self._db_ok and self._db_set(user_id, payload):
+            self._set_cached_entry(user_id, payload)
             return
         # DB unavailable → file fallback (also mirror to the in-RAM dict)
         self.memory[user_id] = payload
         self._save_file()
+        self._set_cached_entry(user_id, payload)
 
     # ── public API (signatures unchanged) ──────────────────────────────────
     def get_user_memory(self, user_id: str) -> Dict:
@@ -165,7 +219,7 @@ class MemoryService:
     def update_user_memory(self, user_id: str, data: Dict):
         lock = self._get_user_lock(user_id)
         with lock:
-            current = self._read_raw(user_id) or dict(_DEFAULT)
+            current = self._read_raw(user_id, use_cache=False) or dict(_DEFAULT)
             current.update(data)
             self._write_raw(user_id, current)
 

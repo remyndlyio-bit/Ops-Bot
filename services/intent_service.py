@@ -4658,6 +4658,14 @@ class IntentService:
             # consumed (an exception before the append point) must not be
             # appended to an unrelated later reply.
             self._turn_cache.resume_nudge = None
+            # P1-4 (PLAN_OF_ACTION.md): bound MemoryService's per-turn read
+            # cache explicitly to this turn — see MemoryService.reset_turn_cache
+            # for why this can't just rely on thread-local scoping alone.
+            # hasattr-guarded: self.memory is always a real MemoryService in
+            # production, but ~20 test files stand in a hand-rolled fake
+            # implementing only the methods that existed before this one.
+            if hasattr(self.memory, "reset_turn_cache"):
+                self.memory.reset_turn_cache()
             result = self._process_request_impl(user_id, message)
             if not isinstance(result, dict):
                 # Observed live and in scripted test runs: _process_request_impl

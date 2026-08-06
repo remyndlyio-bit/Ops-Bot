@@ -159,3 +159,129 @@ class TestStartFormClearsCompetingPendingState:
         assert mem["pending_disambiguation"] is None
         assert mem["pending_send_invoice"] is None
         assert mem["form"]["active"] is True  # the form itself still gets set
+
+
+class TestPerTurnMemoryCache:
+    """P1-4 (PLAN_OF_ACTION.md): one DB read per (user, turn) instead of one
+    per call site. _db_get/_db_set are the real DB-hitting methods (still
+    called exactly the same way whether the cache is involved or not) — spy
+    on them directly rather than modifying the shared db_backed fixture."""
+
+    def _spy(self, svc, monkeypatch):
+        calls = {"get": 0, "set": 0}
+        real_get = svc._db_get
+        real_set = svc._db_set
+
+        def counting_get(uid):
+            calls["get"] += 1
+            return real_get(uid)
+
+        def counting_set(uid, payload):
+            calls["set"] += 1
+            return real_set(uid, payload)
+
+        monkeypatch.setattr(svc, "_db_get", counting_get)
+        monkeypatch.setattr(svc, "_db_set", counting_set)
+        return calls
+
+    def test_second_get_in_the_same_turn_is_a_cache_hit(self, db_backed, monkeypatch):
+        store, make = db_backed
+        svc = make()
+        # Seed the backing store directly (bypassing svc) so the cache
+        # starts genuinely cold — going through svc.update_user_memory
+        # first would already prime it via _write_raw, making every
+        # get_user_memory below a hit regardless of whether reads cache.
+        store["u1"] = {"name": "Darshit"}
+        calls = self._spy(svc, monkeypatch)
+
+        svc.get_user_memory("u1")
+        svc.get_user_memory("u1")
+        svc.get_user_memory("u1")
+
+        assert calls["get"] == 1, "only the FIRST get_user_memory should hit the DB"
+
+    def test_reset_turn_cache_forces_a_fresh_read(self, db_backed, monkeypatch):
+        store, make = db_backed
+        svc = make()
+        store["u1"] = {"name": "Darshit"}
+        calls = self._spy(svc, monkeypatch)
+
+        svc.get_user_memory("u1")
+        svc.reset_turn_cache()
+        svc.get_user_memory("u1")
+
+        assert calls["get"] == 2
+
+    def test_write_immediately_primes_the_cache_no_read_needed(self, db_backed, monkeypatch):
+        """update_user_memory's own _write_raw populates the cache from its
+        own known-fresh result — the get_user_memory right after a write
+        doesn't even need the one read the cold-cache case above does."""
+        store, make = db_backed
+        svc = make()
+        svc.update_user_memory("u1", {"name": "Darshit"})
+        calls = self._spy(svc, monkeypatch)
+
+        svc.get_user_memory("u1")
+
+        assert calls["get"] == 0
+
+    def test_switching_users_never_returns_the_wrong_users_data(self, db_backed):
+        """The cache holds ONE (user_id, payload) slot per thread — correct
+        for a real turn, which only ever touches one user_id throughout,
+        but worth pinning down explicitly: switching users mid-sequence
+        must never return stale data from whichever user was cached
+        before, even though it costs that user a fresh read next time."""
+        store, make = db_backed
+        svc = make()
+        svc.update_user_memory("u1", {"name": "A"})
+        svc.update_user_memory("u2", {"name": "B"})
+
+        assert svc.get_user_memory("u1")["name"] == "A"
+        assert svc.get_user_memory("u2")["name"] == "B"
+        assert svc.get_user_memory("u1")["name"] == "A"
+
+    def test_a_write_via_start_form_is_immediately_visible_to_a_later_get(self, db_backed):
+        """The exact bug this design has to avoid: start_form (and
+        set_form_value / advance_form_step / complete_form / cancel_form /
+        add_message) write through _write_raw directly, NOT through
+        update_user_memory — an earlier version of this cache only
+        refreshed on update_user_memory and went stale the instant any of
+        those other writers ran."""
+        store, make = db_backed
+        svc = make()
+        svc.get_user_memory("u1")  # populate the cache with the pre-form state
+        svc.start_form("u1", ["field_a"])
+        mem = svc.get_user_memory("u1")
+        assert mem["form"]["active"] is True
+
+    def test_add_message_write_is_immediately_visible_to_a_later_get(self, db_backed):
+        store, make = db_backed
+        svc = make()
+        svc.get_user_memory("u1")
+        svc.add_message("u1", "user", "hello")
+        assert len(svc.get_conversation_history("u1")) == 1
+
+    def test_update_user_memory_never_uses_a_stale_cached_read_as_its_base(self, db_backed, monkeypatch):
+        """update_user_memory must always read fresh before merging — two
+        call sites (main.py's background invoice-send tasks) write from
+        outside any turn boundary and never call reset_turn_cache(), so a
+        cached pre-write read as the merge base could silently drop a
+        concurrent change. Simulated here by mutating the store directly
+        (as if a different process/thread had written) between two
+        update_user_memory calls that never call reset_turn_cache()."""
+        store, make = db_backed
+        svc = make()
+        svc.update_user_memory("u1", {"name": "Darshit"})
+        svc.get_user_memory("u1")  # populate the cache
+
+        # A "concurrent" write that bypasses this svc instance entirely —
+        # store is the shared backing dict both instances in db_backed talk to.
+        store["u1"]["industry"] = "Video Production"
+
+        svc.update_user_memory("u1", {"company_name": "Remyndly"})
+        mem = svc.get_user_memory("u1")
+        assert mem["industry"] == "Video Production", (
+            "update_user_memory must not have overwritten the concurrent "
+            "write with a stale cached value"
+        )
+        assert mem["company_name"] == "Remyndly"

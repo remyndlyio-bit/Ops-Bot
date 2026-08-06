@@ -6,23 +6,104 @@ IMPORTANT: On Railway/serverless use the CONNECTION POOLER URL (port 6543), not 
 Direct (db.xxx.supabase.co:5432) often fails with "Network is unreachable".
 Dashboard → Project Settings → Database → Connection string → "Transaction" / pooler (port 6543).
 
-Connections are opened per-call and closed again (NOT reused/persistent) — deliberately.
-Transaction-mode PgBouncer is designed for short connect→query→disconnect usage, not a
-long-lived idle client connection. A prior attempt to hold one connection open across
-calls (for latency) caused *worse* multi-user latency in production: the pooler/network
-silently dropped the idle connection, the next query hung on a dead socket with no
-timeout, and — because that shared connection was lock-guarded — every other concurrent
-user's request queued up behind that one hung call. connect_timeout + statement_timeout
-below bound each call so a bad connection/query fails fast instead of hanging; they do
-NOT bring back a persistent connection.
+Connections are opened per-call and closed again by default (NOT reused/persistent) —
+deliberately. Transaction-mode PgBouncer is designed for short connect→query→disconnect
+usage, not a long-lived idle client connection. A prior attempt to hold ONE connection
+open across calls (for latency) caused *worse* multi-user latency in production: the
+pooler/network silently dropped the idle connection, the next query hung on a dead
+socket with no timeout, and — because that shared connection was lock-guarded — every
+other concurrent user's request queued up behind that one hung call. connect_timeout +
+statement_timeout below bound each call so a bad connection/query fails fast instead of
+hanging; on their own they do NOT bring back a persistent connection.
+
+Optional pool (DB_CONNECTION_POOL=1, default OFF — PLAN_OF_ACTION.md P1-4): a REAL,
+health-checked pool of several connections, not a repeat of the single-connection
+mistake above. Default-off so it ships inert; every call site is unchanged either way
+(see _get_connection/_PooledConnWrapper) — flip the flag only after watching it under
+real traffic in staging.
 """
 
 import os
 import json
 import re
+import threading
 from datetime import date, datetime
 from typing import List, Dict, Any, Optional
 from utils.logger import logger
+
+# ── Optional connection pool (P1-4, PLAN_OF_ACTION.md) ──────────────────────
+# One pool per distinct db_url, lazily created. Module-level (not per-
+# SupabaseService-instance) so every instance — and every test that
+# constructs a fresh one — shares the same underlying connections instead of
+# each opening its own pool.
+_POOLS: Dict[str, Any] = {}
+_POOLS_LOCK = threading.Lock()
+
+
+def _pool_enabled() -> bool:
+    return (os.getenv("DB_CONNECTION_POOL", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _get_pool(db_url: str):
+    pool = _POOLS.get(db_url)
+    if pool is not None:
+        return pool
+    with _POOLS_LOCK:
+        pool = _POOLS.get(db_url)
+        if pool is None:
+            from psycopg2.pool import ThreadedConnectionPool
+            # Sized per PLAN_OF_ACTION.md's own estimate (min 1 / max 5-10).
+            # ThreadedConnectionPool is thread-safe internally — required
+            # since FastAPI runs each sync request handler in a worker
+            # thread, so concurrent turns really do call getconn()/putconn()
+            # from different threads at once.
+            pool = ThreadedConnectionPool(
+                1, 10, db_url, connect_timeout=5,
+                options="-c statement_timeout=15000",
+            )
+            _POOLS[db_url] = pool
+            logger.info("[DB_POOL] Created connection pool (min=1, max=10)")
+    return pool
+
+
+class _PooledConnWrapper:
+    """Stands in for a plain psycopg2 connection so every existing call
+    site — `conn.autocommit = True`, `conn.cursor(...)`, `conn.close()` —
+    keeps working unchanged. The one behavioural difference: `.close()`
+    returns the connection to the pool instead of terminating the socket.
+    Every other attribute/method passes straight through to the real
+    connection."""
+    __slots__ = ("_conn", "_pool", "_closed")
+
+    def __init__(self, conn, pool):
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_pool", pool)
+        object.__setattr__(self, "_closed", False)
+
+    def close(self):
+        if self._closed:
+            return
+        object.__setattr__(self, "_closed", True)
+        try:
+            self._pool.putconn(self._conn)
+        except Exception as e:
+            logger.warning(f"[DB_POOL] putconn failed, closing connection directly: {e}")
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._conn, name, value)
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
 
 
 def _compute_bill_no(cur, user_id: str, client_name: Any, brand_name: Any, production_house: Any) -> str:
@@ -227,6 +308,45 @@ class SupabaseService:
             self._client = create_client(self.url, self.key)
         return self._client
 
+    def _get_connection(self):
+        """Return a connection ready for `.autocommit = True` / `.cursor()`
+        / `.close()`, exactly like a fresh `psycopg2.connect(...)` — every
+        call site is unchanged regardless of which path this takes.
+
+        DB_CONNECTION_POOL off (default): today's behaviour exactly — a
+        brand new connection, closed for real by the caller's `.close()`.
+
+        DB_CONNECTION_POOL on: pulled from the module-level pool and
+        health-checked with a cheap `SELECT 1` before being handed back —
+        PgBouncer can silently drop an idle pooled connection, and hand-
+        ing back a dead one would surface as a confusing mid-query
+        failure instead of a clean retry. A bad connection is discarded
+        (closed, not returned to the pool) and replaced once; a second
+        failure propagates like any other connection error. The caller's
+        `.close()` returns it to the pool via _PooledConnWrapper.
+        """
+        import psycopg2
+        if not _pool_enabled():
+            return psycopg2.connect(
+                self.db_url, connect_timeout=5, options="-c statement_timeout=15000",
+            )
+        pool = _get_pool(self.db_url)
+        last_err = None
+        for attempt in range(2):
+            conn = pool.getconn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                return _PooledConnWrapper(conn, pool)
+            except Exception as e:
+                last_err = e
+                logger.warning(f"[DB_POOL] stale pooled connection discarded (attempt {attempt + 1}): {e}")
+                try:
+                    pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+        raise last_err
+
     def get_schema(self) -> Dict[str, Any]:
         """Return table name, column list, and description for SQL generation."""
         return {
@@ -259,7 +379,7 @@ class SupabaseService:
             return {"ok": False, "error": "Only SELECT, INSERT, and UPDATE are allowed."}
 
         try:
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql)
@@ -347,7 +467,7 @@ class SupabaseService:
             return {"ok": False, "error": "psycopg2 not installed (required for DB inserts)."}
 
         try:
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # Auto-assign bill_no if missing (UNIQUE constraint on (user_id, bill_no)
@@ -439,7 +559,7 @@ class SupabaseService:
             return {"ok": False, "error": "psycopg2 not installed (required for DB queries)."}
 
         try:
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 try:
@@ -518,7 +638,7 @@ class SupabaseService:
 
         try:
             import calendar
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 try:
@@ -567,7 +687,7 @@ class SupabaseService:
             value = value.isoformat()
         try:
             import psycopg2
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor() as cur:
                 cur.execute(f'UPDATE public.job_entries SET "{field}" = %s WHERE id = %s', (value, row_id))
@@ -586,7 +706,7 @@ class SupabaseService:
             return {"ok": False, "error": "Database URL not configured."}
         try:
             import psycopg2
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor() as cur:
                 cur.execute(
@@ -655,7 +775,7 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, tuple(params))
@@ -700,7 +820,7 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, tuple(params))
@@ -737,7 +857,7 @@ class SupabaseService:
         except ImportError:
             return {"ok": False, "error": "psycopg2 not installed."}
         try:
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
@@ -786,7 +906,7 @@ class SupabaseService:
         except ImportError:
             return {"ok": False, "error": "psycopg2 not installed."}
         try:
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
@@ -838,7 +958,7 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, (str(user_id),))
@@ -891,7 +1011,7 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, params)
@@ -928,7 +1048,7 @@ class SupabaseService:
         except ImportError:
             return True
         try:
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
@@ -956,7 +1076,7 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql, (str(user_id),))
@@ -1042,7 +1162,7 @@ class SupabaseService:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
-            conn = psycopg2.connect(self.db_url, connect_timeout=5, options="-c statement_timeout=15000")
+            conn = self._get_connection()
             conn.autocommit = True
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 logger.info(f"[PROFILE] SQL: {sql}")
