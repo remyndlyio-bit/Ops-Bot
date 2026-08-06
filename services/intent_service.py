@@ -5744,6 +5744,40 @@ class IntentService:
             if is_delete:
                 return self._handle_soft_delete(user_id, message, data_user_id, conversation_history)
 
+            return self._handle_query_request(
+                user_id, message, data_user_id, conversation_history, user_mem)
+
+        except Exception as e:
+            logger.error(f"[QUERY_FAIL] Exception for user {user_id}, msg='{message[:60]}': {e}", exc_info=True)
+            user_name = self._get_user_name(user_id)
+            if user_name:
+                response = format_response(ERROR_MODE, error_detail=f"Sorry {user_name}, {error_calm_phrase().lower()}")
+            else:
+                response = format_response(ERROR_MODE, error_detail=error_calm_phrase())
+
+        self._store_conversation(user_id, message, response)
+        return {
+            "operation": "query",
+            "response": response,
+            "trigger_invoice": trigger_invoice,
+            "invoice_data": invoice_data
+        }
+
+    def _handle_query_request(self, user_id: str, message: str, data_user_id: str,
+                               conversation_history, user_mem: Dict) -> Dict:
+        """
+        Week 5.1 (PLAN_OF_ACTION.md §9) -- the NL->SQL query-answering path,
+        extracted verbatim from _process_request_impl's step 4 so dispatch_idle
+        can call the exact same logic for READ_QUERY/READ_AGGREGATE that legacy
+        already uses at idle, mirroring dispatch_in_flow's SIDE_QUESTION branch
+        (flow_dispatcher.py) which already calls this same cascade mid-flow.
+        Pure move, no logic changes -- own try/except mirrors the tail that used
+        to live in _process_request_impl's outer try.
+        """
+        trigger_invoice = False
+        invoice_data = {}
+        response = ""
+        try:
             # 4. SQL path: intent → generate SQL → validate → execute on Supabase → format → response
             columns = [c for c in JOB_ENTRIES_COLUMNS if not c.startswith("_")]
 
@@ -6484,7 +6518,6 @@ class IntentService:
                         logger.info(f"[QUERY] Success: {len(rows)} rows, response length={len(response)}")
                 append_entry(self.memory, user_id, build_entry(
                     question=message, plan=_ledger_plan, rows=rows, response=response))
-
         except Exception as e:
             logger.error(f"[QUERY_FAIL] Exception for user {user_id}, msg='{message[:60]}': {e}", exc_info=True)
             user_name = self._get_user_name(user_id)
