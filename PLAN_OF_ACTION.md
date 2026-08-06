@@ -486,6 +486,30 @@ classification, query planning, invoice generation, all of it. Needs a new OpenR
 key rotated into Railway's `AI_KEY` immediately; this is separate from and more urgent
 than anything else in this document.
 
+**P3-3 re-scoped (2026-08-06)**: tracing `_process_request_impl` past the v2 dispatch
+block (`intent_service.py:4977-5132`) shows the legacy keyword cascade (steps 0a-4)
+is NOT temporary migration debris safe to bulk-delete once v2 covers every intent.
+Two things anchor it permanently:
+
+1. **The documented rollback plan** (§8 checklist: *"Rollback plan: FLOW_MACHINE_V2
+   flag flip documented as the instant revert"*). Several branches are explicitly
+   gated `if not _flow_machine_v2_enabled_for(user_id)` — deleting what they fall
+   back to breaks that checklist item outright.
+2. **It's the classifier-failure resilience layer, not a separate code path.**
+   `_v2_classify(...)` and `_v2_dispatch_idle(...)` run inside a
+   `try/except Exception as _v2_err` (line 5131) — when the classifier LLM call
+   itself fails (network error, dead key — exactly what happened during the Week
+   5.3 matrix run above), execution falls through to the SAME legacy cascade steps
+   that also serve as dispatch_idle's own per-branch SHADOW_ONLY fallback. There is
+   no clean seam between "pure duplicate of what v2 owns" and "resilience for a v2
+   failure" — they are identical lines, reached for two different reasons.
+
+So P3-3 as originally scoped (delete the cascade once v2 covers everything) isn't a
+safe action right now, full stop — not a coding gap, an architectural one. The real
+remaining scope is narrower: genuinely orphaned functions (defined, zero callers
+anywhere) left over from the migration, distinct from the intentionally-kept
+cascade. Investigating that narrower scope as the actual P3-3.
+
 ---
 
 ## 7. Expected Outcomes
