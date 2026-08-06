@@ -392,11 +392,73 @@ ask which the user meant. Never let account numbers become `job_entries` rows.
 **Week 4: polish + flip**
 11. P2-1 context follow-ups authoritative; P2-2 calendar semantics; P2-3 list rendering;
     P2-5 capture polish; P1-1 scope-from-plan.
-12. Canary flip → global flip → P3-3 dead-code deletion → P3-4 dashboards.
+12. ~~Canary flip → global flip → P3-3 dead-code deletion → P3-4 dashboards.~~
+    **Corrected 2026-08-06** — the flip is done (`FLOW_MACHINE_V2=true` has been live and
+    stable in production), but dead-code deletion is NOT yet safe. See §9: `dispatch_idle`
+    never got a READ_QUERY/READ_AGGREGATE branch, so the query pipeline — the single
+    most-used path in the app — is still 100% legacy even with v2 "on" for every user.
+    That has to close first. Real order: **Week 5 (§9) → matrix parity confirmed → P3-3 → P3-4.**
 
 Every step lands with regression tests (per the repo's own protocol) and none breaks the
 currently-working categories: Payments/Earnings/Small Talk paths are untouched until
 week 3's flagged changes, which the matrix suite gates.
+
+---
+
+## 9. Query-Pipeline Migration Scope (Week 5) — the real prerequisite for P3-3
+
+Added 2026-08-06, after confirming `FLOW_MACHINE_V2=true` has been live in production
+for a while. The assumption baked into item 12 above — "global flip → legacy is now
+dead code" — was wrong. Flip and dead-code-safety are two different milestones.
+
+**What v2 actually owns today**, read directly from `services/flow_dispatcher.py`:
+
+- `dispatch_idle` intercepts exactly 8 intents: `SMALL_TALK`, `AUDIT_REPLY`,
+  `FEATURE_QUESTION`, `UNKNOWN`, `WRITE_CREATE`, `WRITE_UPDATE`, `WRITE_DELETE`,
+  `WRITE_INVOICE`. Every `WRITE_*` branch falls back to `SHADOW_ONLY` on any exception
+  — legacy is the intended safety net there, not a gap.
+- `READ_QUERY` / `READ_AGGREGATE` at idle are **unconditionally** `SHADOW_ONLY`
+  (`flow_dispatcher.py:182-188`) — by original design ("Session 1 only owns the LEAF
+  paths... Sessions 2 and 3 will progressively take over"), never revisited since.
+  This is the NL→SQL pipeline: CLAUDE.md itself calls it "the most complex path," and
+  it's what the 29-message WhatsApp suite and the Intent Test Matrix mostly exercise.
+- All 16 `Flow` classes ARE registered (`services/flows.py:827-844` — corrects an
+  earlier undercount from a stale docstring in `flow_dispatcher.py` that says "session
+  2 only owns one"). `dispatch_in_flow` already routes CANCEL/FLOW_RESPONSE for all of
+  them, and its SIDE_QUESTION branch for READ intents already reuses the same shared
+  functions the idle path would need (`answer_scope_question`, `route_common_query`,
+  `_execute_routed_query` — see `flow_dispatcher.py:249-314`). So flows are NOT the gap.
+
+**The actual gap is narrow**: `dispatch_idle` has no `READ_QUERY`/`READ_AGGREGATE`
+branch. The functions it would call already exist and are already proven safe
+mid-flow — they're just never reached at idle, where the legacy cascade's own
+~750-line query section (`services/intent_service.py:5748-6503` — SQL-path columns
+setup, invoice-confirmation-mid-query check, AnswerLedger scope check, context
+follow-up, value-fork resolution, deterministic router, LLM planner fallback,
+message↔SQL consistency gate, disambiguation) still runs.
+
+**Proposed shape** (same pattern as Week 2's P0-1 write-intent wiring):
+
+1. Extract `intent_service.py:5748-6503` into a single method, e.g.
+   `_handle_query_request(self, user_id, message, data_user_id, conversation_history,
+   user_mem)` — mechanical extraction, same technique already used twice this session
+   for `_handle_invoice_retrieval_request` and `_handle_create_entry_request`.
+2. Add a `READ_QUERY`/`READ_AGGREGATE` branch to `dispatch_idle` calling that method,
+   wrapped in the same try/except → `SHADOW_ONLY` every other v2 branch uses, so a bug
+   in the extraction can never break a live turn — it silently falls back to legacy,
+   identical to today's behavior.
+3. Legacy cascade keeps calling the same extracted method (behavior-preserving).
+4. Re-run the 148-scenario Intent Test Matrix with `FLOW_MACHINE_V2=true` to confirm
+   v2's new branch produces identical answers to what legacy gives today for every
+   read/query row — the same gate P2-4 established for the write-intent migration.
+5. Only once that run is clean is "legacy is truly unreachable" a fact, not a guess —
+   and P3-3 (dead-code deletion) becomes safe to actually do.
+
+**Sizing**: comparable to Week 2's P0-1 in kind (one extraction + one dispatch wire +
+one matrix re-run), but the extracted section is larger (~750 lines vs ~550) and has
+more embedded early-return branches (invoice confirmation, ledger, follow-up,
+value-fork, clarification, disambiguation) to preserve exactly. Budget it as its own
+week (Week 5) rather than folding it into Week 4's list above.
 
 ---
 
