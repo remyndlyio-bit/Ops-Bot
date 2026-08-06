@@ -121,6 +121,28 @@ def _looks_like_a_question(message: str) -> bool:
     return first in _QUESTION_STARTERS
 
 
+_SQL_INJECTION_SIGNATURES = (
+    r";\s*(DROP|DELETE|TRUNCATE|ALTER|EXEC|EXECUTE)\b",
+    r"\bUNION\s+SELECT\b",
+    r"\b(OR|AND)\s+['\"]?1['\"]?\s*=\s*['\"]?1['\"]?",
+    r"'\s*OR\s*'[^']{0,20}'\s*=\s*'",
+)
+
+
+def _looks_like_sql_injection(message: str) -> bool:
+    """Deterministic, not LLM-judged — a security-adjacent check must not
+    depend on model behaviour. High-precision on purpose (four narrow
+    patterns, not a general WAF ruleset): the DB layer was never actually
+    at risk from this input (SQL is built from a typed plan's structured
+    fields, never by echoing the raw user string — see
+    services/sql_validator.py's keyword/table allowlist), so this exists
+    only to give a clean refusal instead of letting the message fall
+    through to the query pipeline, where the planner — unable to make
+    sense of it — used to default to an unfiltered SELECT and answer with
+    a full data dump (P0-3, PLAN_OF_ACTION.md)."""
+    return any(re.search(p, message, re.IGNORECASE) for p in _SQL_INJECTION_SIGNATURES)
+
+
 def _is_full_job_row(row: dict) -> bool:
     """True when the row is a SELECT * from job_entries (not an aggregate)."""
     return "bill_no" in row or "job_date" in row
@@ -1153,31 +1175,42 @@ class IntentService:
 
     def _arm_disambiguation(self, user_id: str, disambiguation: dict, extra: dict = None) -> None:
         """Set pending_disambiguation (a numbered "which one did you mean?"
-        list), clearing every awaiting_* flag first -- the mirror image of
-        _arm_awaiting's own clearing of pending_disambiguation. Without this,
-        an active awaiting_* prompt from an unrelated flow could take
-        precedence over a freshly-shown disambiguation list, or vice versa,
-        the same mutual-exclusivity gap _arm_awaiting was built to close.
+        list), clearing every other pending single-question state first --
+        the mirror image of start_form's own clearing of
+        pending_disambiguation / pending_send_invoice. Without this, a
+        leftover open form or invoice-send confirmation from an unrelated
+        flow could take precedence over a freshly-shown disambiguation
+        list, or vice versa (P0-2, PLAN_OF_ACTION.md).
 
         Phase 2.3: DISAMBIGUATION is FlowMachine-only now (no reconciliation
         branch left to reconcile FROM), so this writes flow_machine.set_state()
         directly instead of going through _sync_flow_machine_now/reconcile.
+        set_state() stamps a fresh started_at, so a disambiguation list also
+        now inherits FlowMachine's IDLE_TTL_MINUTES auto-expiry (see the
+        unconditional expire_if_stale check in _process_request_impl) --
+        previously this only happened for v2-canary users, since the
+        FlowMachine write itself used to be gated on the same flag.
         """
         patch = {k: False for k in self._AWAITING_FLAGS}
         patch["pending_disambiguation"] = disambiguation
+        # A fresh disambiguation list supersedes any other single-question
+        # state the user might still technically be "in" — an open
+        # smart-capture form or an invoice-send confirmation they were never
+        # shown again must not compete with the list just presented.
+        patch["form"] = {"active": False}
+        patch["pending_send_invoice"] = None
         if extra:
             patch.update(extra)
         self.memory.update_user_memory(user_id, patch)
-        if _flow_machine_v2_enabled_for(user_id):
-            try:
-                from services.flow_machine import FLOW_DISAMBIGUATION
-                rows = disambiguation.get("rows") or []
-                self.flow_machine.set_state(
-                    user_id, FLOW_DISAMBIGUATION,
-                    {"count": len(rows), "type": disambiguation.get("type", "delete")},
-                )
-            except Exception as e:
-                logger.warning(f"[FLOW_V2] eager sync after disambiguation arm failed (non-fatal): {e}")
+        try:
+            from services.flow_machine import FLOW_DISAMBIGUATION
+            rows = disambiguation.get("rows") or []
+            self.flow_machine.set_state(
+                user_id, FLOW_DISAMBIGUATION,
+                {"count": len(rows), "type": disambiguation.get("type", "delete")},
+            )
+        except Exception as e:
+            logger.warning(f"[FLOW_V2] eager sync after disambiguation arm failed (non-fatal): {e}")
 
     @staticmethod
     def _fuzzy_match_client_name(client_name: str, db_clients: List[str], message: str) -> str:
@@ -4165,6 +4198,24 @@ class IntentService:
                 logger.info(f"[ROUTE] bank_details_response claimed message: {message[:60]!r}")
                 note_route("bank_details_response")
                 return self._handle_bank_details_response(user_id, message)
+
+            # Structured bank-details block sent WITHOUT first triggering "update
+            # bank details" ("Account Name: X\nBank: Y\nAccount: Z\nIFSC: W"). The
+            # inline check above only catches a single SENTENCE ("my account
+            # is..."); a multi-line labeled block like this has none of those
+            # phrases, so it fell through to smart capture, which extracted a
+            # stray field or two as job data and asked "Save this job?" — an
+            # account number heading toward job_entries permanently if the user
+            # then said "yes" (P1-5, PLAN_OF_ACTION.md). >=2 parsed fields is the
+            # threshold — one stray label match is too weak a signal on its own,
+            # but real bank-detail blocks always carry several.
+            if not _has_bank_inline:
+                _structured_bank_fields = self._parse_bank_details_message(message)
+                if _structured_bank_fields and len(_structured_bank_fields) >= 2:
+                    logger.info(f"[ROUTE] bank_details_response (unsolicited structured block) claimed message: {message[:60]!r}")
+                    note_route("bank_details_response")
+                    return self._handle_bank_details_response(user_id, message)
+
             # Explicit settings commands (bank, name, address, user_id, link).
             # When FLOW_MACHINE_V2 is on, the classifier handles these as SETTINGS_COMMAND
             # or specific intent types. Only run legacy keyword checks when v2 is off.
@@ -4264,23 +4315,29 @@ class IntentService:
             # invoice baki hai bhejna" — v2 said READ_QUERY but legacy said
             # 'looks like invoice, ask which client').
             _v2_verdict = None
-            if _v2_enabled:
-                try:
-                    # First: apply TTL — long-idle flow auto-resets so the user
-                    # isn't trapped in a stale state from hours ago. When the
-                    # FlowMachine resets, also clear ALL legacy awaiting flags
-                    # so they don't re-arm the flow on the next message.
-                    # expire_if_stale() already reset FlowMachine itself; the
-                    # extra flow_machine.reset() inside _clear_flow_state is a
-                    # harmless no-op re-write of the same IDLE state — the
-                    # legacy-flag clear + form-cancel is the part this site
-                    # actually needs.
-                    if self.flow_machine.expire_if_stale(user_id):
-                        self._clear_flow_state(user_id)
-                        user_mem = self.memory.get_user_memory(user_id)
-                except Exception as _ttl_err:
-                    logger.warning(f"[V2] TTL check failed: {_ttl_err}")
+            # TTL — long-idle flow auto-resets so the user isn't trapped in a
+            # stale state from hours ago. P0-2 (PLAN_OF_ACTION.md): this used
+            # to run only when v2 is enabled for this user, so a legacy-path
+            # pending_disambiguation or open form (which set FlowMachine state
+            # regardless of the flag — see _arm_disambiguation) never actually
+            # expired for anyone outside the v2 canary. Runs unconditionally
+            # now: expire_if_stale/_clear_flow_state are pure state resets, not
+            # v2-specific routing, so this is safe for every user regardless
+            # of the flag. When the FlowMachine resets, also clear ALL legacy
+            # awaiting flags so they don't re-arm the flow on the next
+            # message. expire_if_stale() already reset FlowMachine itself;
+            # the extra flow_machine.reset() inside _clear_flow_state is a
+            # harmless no-op re-write of the same IDLE state — the
+            # legacy-flag clear + form-cancel is the part this site actually
+            # needs.
+            try:
+                if self.flow_machine.expire_if_stale(user_id):
+                    self._clear_flow_state(user_id)
+                    user_mem = self.memory.get_user_memory(user_id)
+            except Exception as _ttl_err:
+                logger.warning(f"[TTL] expire_if_stale check failed: {_ttl_err}")
 
+            if _v2_enabled:
                 # Reconciliation: legacy code paths still arm awaiting_* flags
                 # in dozens of places (we haven't migrated each arm site to
                 # write FlowMachine directly). Once per message, if v2 thinks
@@ -4630,6 +4687,14 @@ class IntentService:
                     response = "👍 Got it. Let me know if you need anything else."
                     self._store_conversation(user_id, message, response)
                     return {"operation": "decline_followup", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # 0b5b. SQL-injection-shaped input — refuse deterministically instead of
+            # letting it fall through to the query pipeline (P0-3, PLAN_OF_ACTION.md).
+            if _looks_like_sql_injection(message):
+                logger.warning(f"[SECURITY] SQL-injection-shaped input from user={user_id}: {message[:120]!r}")
+                response = "I can't process that request. Try something like 'Show my jobs' or 'Total fees this month'."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "rejected", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
             # 0b6. Clearly out-of-scope requests (book a flight/cab/hotel, order food,
             # etc.) — give a deterministic on-brand refusal instead of letting them hit
@@ -6947,7 +7012,7 @@ class IntentService:
     def _handle_disambiguation_reply(self, user_id: str, message: str, pending: Dict) -> Dict:
         """User is replying to pick one row (by number) or all rows ('all'/'yes') from a disambiguation list."""
         msg = message.strip().lower().rstrip(".!?")
-        if msg in ("cancel", "stop", "nevermind", "abort", "no"):
+        if msg in ("cancel", "stop", "nevermind", "abort", "no", "skip"):
             self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
             response = "Cancelled. Let me know if you need anything else."
             self._store_conversation(user_id, message, response)
@@ -7012,7 +7077,21 @@ class IntentService:
                 for w in ("who", "what", "show", "list", "how", "when", "which", "get", "find",
                           "kiska", "kitne", "kitna", "kaunsa", "kya")
             )
-            _new_query_signals = "?" in message or _starts_with_query_word
+            # An email address, or a message that opens with an unrelated
+            # top-level command verb, is never a disambiguation pick either —
+            # it's meant for a DIFFERENT prompt (a POC-email collection step,
+            # a fresh invoice/job request, ...). A stale disambiguation list
+            # must not swallow a reply meant for another flow just because
+            # it doesn't happen to be question-shaped (P0-2, PLAN_OF_ACTION.md).
+            _looks_like_email = bool(re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', message.strip()))
+            _starts_with_command_verb = any(
+                msg.startswith(w + " ") for w in
+                ("generate", "send", "create", "regenerate", "update", "add", "make")
+            )
+            _new_query_signals = (
+                "?" in message or _starts_with_query_word
+                or _looks_like_email or _starts_with_command_verb
+            )
             if _new_query_signals:
                 self.memory.update_user_memory(user_id, {"pending_disambiguation": None})
                 return None  # fall through to normal pipeline

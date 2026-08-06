@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form, BackgroundTasks, Request
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -12,6 +12,7 @@ from services.telegram_service import TelegramService  # Added TelegramService i
 from services.invoice_generation_service import InvoiceGenerationService
 from services.resend_email_service import ResendEmailService
 from utils.logger import logger
+from utils.dedupe import TTLDedupe
 
 # Load environment variables
 load_dotenv()
@@ -49,6 +50,10 @@ telegram_service = TelegramService()  # Initialized TelegramService
 invoice_gen_service = InvoiceGenerationService()
 email_service = ResendEmailService()
 intent_service = IntentService()
+
+# P0-4 (PLAN_OF_ACTION.md): dedupe redelivered webhooks (Twilio/Telegram retry
+# on a slow response) so a redelivery can't re-process the same message.
+_webhook_dedupe = TTLDedupe(ttl_seconds=300.0)
 
 UPDATE_MESSAGE = (
     "Hi! I've just been updated with new features and I'm smarter than ever. Have a great day 😊"
@@ -586,12 +591,20 @@ async def _handle_bot_message(
     user_id: str,
     message: str,
     platform: str,
-    background_tasks: BackgroundTasks,
     chat_id: int = None,
 ):
     """
     Unified message handler for both Telegram and WhatsApp.
     Ensures IDENTICAL processing flow regardless of platform.
+
+    P0-4 (PLAN_OF_ACTION.md): the webhooks now fire this as a background
+    asyncio task instead of awaiting it, so they can ack Twilio/Telegram
+    immediately. That means FastAPI's `BackgroundTasks` (which only runs
+    tasks queued before the endpoint's own response is sent) is no longer a
+    valid way to schedule the invoice-generation follow-up — this function
+    itself now runs AFTER the response already went out, so anything it adds
+    to a BackgroundTasks instance would never execute. Step 6 below awaits
+    process_and_send_invoice directly instead.
     """
     tag = platform.upper()
     result = {"operation": "error", "response": None, "trigger_invoice": False, "invoice_data": {}}
@@ -647,11 +660,13 @@ async def _handle_bot_message(
             logger.info(f"[WHATSAPP] Sending Excel export as {os.path.basename(send_path)}")
             whatsapp_service.send_media_message(to_number=user_id, body="", media_url=media_url)
 
-    # 6. Handle invoice generation — SAME for both platforms
+    # 6. Handle invoice generation — SAME for both platforms. Awaited directly
+    # (see the docstring above) — this already runs off the webhook's request/
+    # response cycle since the caller scheduled the whole function via
+    # asyncio.create_task, so awaiting here doesn't add user-visible latency.
     if result.get("trigger_invoice"):
         inv = result["invoice_data"]
-        background_tasks.add_task(
-            process_and_send_invoice,
+        await process_and_send_invoice(
             user_id if platform == "whatsapp" else None,  # to_number (WhatsApp only)
             inv["client_name"],
             inv["month"],
@@ -668,25 +683,36 @@ async def _handle_bot_message(
 
 @app.post("/webhooks/whatsapp")
 async def whatsapp_webhook(
-    background_tasks: BackgroundTasks,
     Body: str = Form(...),
     From: str = Form(...),
     MessageSid: str = Form(None),
 ):
-    """Twilio WhatsApp Webhook — delegates to unified handler."""
+    """Twilio WhatsApp Webhook — acks immediately, processes in the background.
+
+    P0-4 (PLAN_OF_ACTION.md): this used to `await _handle_bot_message(...)`
+    before returning, holding the HTTP response open for the whole turn.
+    Measured p95 turn time (15.5s) was past Twilio's own webhook timeout
+    (~15s), so a slow turn made Twilio retry the webhook and re-process the
+    same message — a duplicate LLM call, a duplicate reply, and in the worst
+    case a duplicate DB write. `_handle_bot_message` sends the actual reply
+    itself via the Twilio API, not via this response, so nothing user-facing
+    depends on this endpoint waiting for it to finish.
+    """
     try:
+        if MessageSid and _webhook_dedupe.seen_recently(MessageSid):
+            logger.info(f"[WHATSAPP] Duplicate webhook delivery MessageSid={MessageSid} — skipping")
+            return Response(status_code=204)
+
         logger.info(f"[WHATSAPP] Received from {From}: {Body[:120]}")
         # Fire typing indicator IMMEDIATELY (don't wait for processing to finish).
-        # BackgroundTasks runs AFTER the response is returned — too late, the reply
-        # is already out by then. asyncio.to_thread runs the sync requests.post
-        # call in a worker so it doesn't block the event loop.
+        # asyncio.to_thread runs the sync requests.post call in a worker so it
+        # doesn't block the event loop.
         if MessageSid:
             asyncio.create_task(
                 asyncio.to_thread(whatsapp_service.send_typing_indicator, MessageSid)
             )
-        await _handle_bot_message(
-            user_id=From, message=Body, platform="whatsapp",
-            background_tasks=background_tasks,
+        asyncio.create_task(
+            _handle_bot_message(user_id=From, message=Body, platform="whatsapp")
         )
     except Exception as e:
         logger.error(f"WhatsApp webhook error: {e}")
@@ -977,26 +1003,48 @@ async def _handle_reminder_callback(callback_query: dict):
 
 
 @app.post("/webhooks/telegram")
-async def telegram_webhook(background_tasks: BackgroundTasks, request: Request):
-    """Telegram Webhook — delegates to unified handler."""
+async def telegram_webhook(request: Request):
+    """Telegram Webhook — acks immediately, processes in the background.
+
+    Same rationale as the WhatsApp webhook (P0-4, PLAN_OF_ACTION.md): a slow
+    turn shouldn't hold this response open, and a redelivered update must not
+    silently re-run the same turn. Telegram's update_id is unique and
+    increasing per bot, so it's a reliable dedupe key for messages; a
+    callback_query's own id serves the same purpose for button taps.
+    """
     try:
         data = await request.json()
 
-        # Handle inline button callbacks (e.g. reminder confirmations)
+        # Inline button callbacks (reminder confirmations, audit replies) —
+        # kept synchronous: each is fast (one DB update + one message edit),
+        # and a caller awaiting the result should see a real error instead of
+        # one swallowed inside a detached task. Deduped on the callback's own
+        # id — a redelivered tap must not re-send a reminder email or
+        # double-apply a DB update.
         if "callback_query" in data:
+            cb_id = data["callback_query"].get("id")
+            if cb_id and _webhook_dedupe.seen_recently(f"cb:{cb_id}"):
+                logger.info(f"[TELEGRAM] Duplicate callback delivery id={cb_id} — skipping")
+                return {"status": "ok"}
             await _handle_reminder_callback(data["callback_query"])
             return {"status": "ok"}
 
         if "message" not in data:
             return {"status": "ok"}
 
+        update_id = data.get("update_id")
+        if update_id is not None and _webhook_dedupe.seen_recently(f"upd:{update_id}"):
+            logger.info(f"[TELEGRAM] Duplicate webhook delivery update_id={update_id} — skipping")
+            return {"status": "ok"}
+
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
         logger.info(f"[TELEGRAM] Received from {chat_id}: {text[:120]}")
 
-        await _handle_bot_message(
-            user_id=str(chat_id), message=text, platform="telegram",
-            background_tasks=background_tasks, chat_id=chat_id,
+        asyncio.create_task(
+            _handle_bot_message(
+                user_id=str(chat_id), message=text, platform="telegram", chat_id=chat_id,
+            )
         )
         return {"status": "ok"}
     except Exception as e:

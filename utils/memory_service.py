@@ -217,6 +217,14 @@ class MemoryService:
                     "created_at": datetime.now().isoformat(),
                     "retry_count": 0,
                 }
+            # P0-2 (PLAN_OF_ACTION.md): a freshly-started form supersedes any
+            # other pending single-question state — a stale disambiguation
+            # list or invoice-send confirmation the user was never shown
+            # again must not outrank the prompt they're now being shown.
+            # Mirrors IntentService._arm_disambiguation's own clearing of
+            # form/pending_send_invoice in the other direction.
+            current["pending_disambiguation"] = None
+            current["pending_send_invoice"] = None
             self._write_raw(user_id, current)
 
     def get_form_state(self, user_id: str) -> Optional[Dict]:

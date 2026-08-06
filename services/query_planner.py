@@ -555,6 +555,27 @@ def _is_date(val) -> bool:
     return bool(re.match(r"^\d{4}-\d{2}-\d{2}$", str(val).strip()))
 
 
+def _plan_has_no_real_signal(plan: Dict[str, Any]) -> bool:
+    """True when a query plan carries no actual filtering/aggregation/
+    ordering signal — the shape that turns into an unfiltered `SELECT *`
+    and dumps every row as the answer. Used by execute_query_plan's
+    low-confidence safety net (P0-3, PLAN_OF_ACTION.md): a genuine
+    unfiltered request ("show all my jobs") still gets through, because it
+    matches a _QUERY_PATTERNS keyword and classify_operation reports
+    confidence=high for it — this only fires in combination with low
+    confidence, i.e. input the classifier itself didn't recognise as a
+    real data request in the first place."""
+    if plan.get("operation") != "query":
+        return False
+    if plan.get("filters"):
+        return False
+    if plan.get("metric") or plan.get("group_by") or plan.get("time_range"):
+        return False
+    if plan.get("order") or plan.get("limit") is not None:
+        return False
+    return True
+
+
 _DATE_COLUMNS = {
     "job_date", "invoice_date", "payment_date", "due_date",
     "first_reminder_sent", "second_reminder_sent", "third_reminder_sent",
@@ -1086,6 +1107,32 @@ def execute_query_plan(
         # Defensive — if Path 3 itself crashes, fall through to the legacy
         # builder rather than break the request. Surfaced loudly in logs.
         logger.error(f"[PLAN_VALIDATOR] internal error: {_e}")
+
+    # Deterministic safety net (P0-3, PLAN_OF_ACTION.md): classify_operation
+    # falling back to its own confidence="low" default means NEITHER a
+    # keyword pattern NOR a confident LLM classification recognised this as
+    # a genuine data request — exactly the shape of garbled, foreign-
+    # language, or injection-style input the planner has no business
+    # guessing at. If the resulting plan ALSO carries no real signal (no
+    # filter, no metric, no group_by, no time_range, no order/limit),
+    # executing it would run an unfiltered SELECT * and dump the user's
+    # entire table as the answer to whatever they actually said — the
+    # single worst-scoring failure mode in the Intent Test Matrix live run
+    # (an SQL injection string, a bare link-ID reply, a Hindi job entry,
+    # and more all answered with "Found 20 results — here's a
+    # spreadsheet"). A genuine unfiltered request ("show all my jobs")
+    # still executes fine — it matches a _QUERY_PATTERNS keyword, so
+    # classify_operation reports confidence="high" for it, not "low".
+    if classification.get("confidence") == "low" and _plan_has_no_real_signal(plan):
+        return {
+            "sql": None, "plan": plan, "classification": classification,
+            "clarification": (
+                "I didn't quite catch that. Try something like 'show my "
+                "jobs', 'total earnings this month', or 'add a job for "
+                "Nike'."
+            ),
+            "_error": None,
+        }
 
     # Column Validation
     valid, errors = validate_plan_columns(plan, allowed_columns)

@@ -196,3 +196,104 @@ class TestInvoiceCacheUsesSharedPolicy:
         from services.flow_machine import is_timestamp_stale
         fresh = (datetime.now() - timedelta(minutes=5)).isoformat()
         assert is_timestamp_stale(fresh) is False
+
+
+class _FakeMemory:
+    """Minimal real (non-Mock) memory store — enough of MemoryService's
+    surface for process_request to run its early cascade for real, so the
+    TTL wiring test below exercises actual FlowMachine reads/writes instead
+    of asserting on a MagicMock call that a mock would happily accept
+    whether the code path ran or not."""
+
+    def __init__(self, seed=None):
+        self._store = {"u1": dict(seed or {})}
+
+    def get_user_memory(self, uid):
+        return dict(self._store.get(uid, {}))
+
+    def update_user_memory(self, uid, patch):
+        self._store.setdefault(uid, {}).update(patch)
+
+    def get_form_state(self, uid):
+        form = self._store.get(uid, {}).get("form")
+        return form if form and form.get("active") else None
+
+    def get_conversation_history(self, uid):
+        return []
+
+    def cancel_form(self, uid):
+        self._store.setdefault(uid, {})["form"] = {"active": False}
+
+    def add_message(self, uid, role, content):
+        pass
+
+
+class TestTTLExpiryRunsRegardlessOfV2Flag:
+    """P0-2 (PLAN_OF_ACTION.md): the expire_if_stale check used to sit
+    inside `if _v2_enabled:` in _process_request_impl, so a stale
+    FlowMachine flow — including a disambiguation list, which now always
+    gets a FlowMachine started_at via _arm_disambiguation regardless of the
+    flag (see tests/test_flow_disambiguation.py::TestArmDisambiguation::
+    test_syncs_flow_machine_even_when_v2_off) — never actually expired for
+    anyone outside the v2 canary. It's unconditional now."""
+
+    def _svc(self, seed):
+        # IntentService.__init__ does `self.flow_machine = FlowMachine(self.memory)`,
+        # binding FlowMachine to whatever MemoryService() returned AT
+        # CONSTRUCTION TIME. Reassigning svc.memory afterward (the pattern
+        # every other test file in this repo uses) would leave
+        # flow_machine._mem pointed at the original mocked-class instance,
+        # not the fake — current_flow() would then read back FLOW_IDLE no
+        # matter what this test seeds or what the TTL check does, making
+        # the assertions below pass regardless of whether the fix works.
+        # Patching MemoryService's return_value directly keeps svc.memory
+        # and flow_machine._mem as the SAME object from construction.
+        fake_mem = _FakeMemory(seed)
+        with patch("services.intent_service.GeminiService"), \
+             patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), \
+             patch("services.intent_service.MemoryService", return_value=fake_mem):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.supabase = MagicMock()
+        svc.gemini = MagicMock()
+        svc.supabase.get_user_profile.return_value = {
+            "ok": True, "data": {"onboarded_at": "2024-01-01", "name": "D"},
+        }
+        svc.gemini.is_invoice_action_request.return_value = False
+        svc.gemini.is_new_query_not_response.return_value = False
+        return svc
+
+    def _stale_flow_v2_state(self):
+        old = (datetime.now() - timedelta(minutes=45)).isoformat()
+        return {
+            "flow": FLOW_BANK_DETAILS,
+            "context": {},
+            "started_at": old,
+            "stack": [],
+        }
+
+    def test_stale_pending_disambiguation_cleared_with_v2_off(self):
+        seed = {
+            "flow_v2": self._stale_flow_v2_state(),
+            "pending_disambiguation": {"rows": [{"id": "a"}], "type": "delete"},
+        }
+        svc = self._svc(seed)
+        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
+            svc.process_request("u1", "cancel")
+        mem = svc.memory.get_user_memory("u1")
+        assert mem["pending_disambiguation"] is None, (
+            "a stale disambiguation must be cleared by the TTL check even "
+            "when v2 is off for this user"
+        )
+        assert svc.flow_machine.current_flow("u1") == FLOW_IDLE
+
+    def test_fresh_flow_state_left_alone_with_v2_off(self):
+        fresh = (datetime.now() - timedelta(minutes=5)).isoformat()
+        seed = {"flow_v2": {"flow": FLOW_BANK_DETAILS, "context": {}, "started_at": fresh, "stack": []}}
+        svc = self._svc(seed)
+        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
+            svc.process_request("u1", "cancel")
+        assert svc.flow_machine.current_flow("u1") == FLOW_BANK_DETAILS, (
+            "a fresh (non-stale) flow must survive the TTL check untouched"
+        )

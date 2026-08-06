@@ -98,6 +98,56 @@ class TestSQLInjection:
         assert valid
 
 
+class TestSQLInjectionDeterministicRefusal:
+    """P0-3 (PLAN_OF_ACTION.md): the validator above (and sql_validator.py
+    generally) was never actually the gap — planner-generated SQL is built
+    from typed plan fields, never by echoing the raw user string, so the
+    DB was never at risk. The real bug: injection-shaped input fell through
+    every cascade check into the query pipeline, where the planner —
+    unable to make sense of it — defaulted to an unfiltered SELECT * and
+    answered with 'Found 20 results — here's a spreadsheet'. This is the
+    reply-level fix: refuse deterministically before ever reaching the
+    LLM or the DB."""
+
+    def test_classic_drop_table_string_detected(self):
+        from services.intent_service import _looks_like_sql_injection
+        assert _looks_like_sql_injection("'; DROP TABLE job_entries; --") is True
+
+    def test_union_select_detected(self):
+        from services.intent_service import _looks_like_sql_injection
+        assert _looks_like_sql_injection("Nike' UNION SELECT * FROM users --") is True
+
+    def test_tautology_injection_detected(self):
+        from services.intent_service import _looks_like_sql_injection
+        assert _looks_like_sql_injection("' OR '1'='1") is True
+
+    def test_numeric_tautology_injection_detected(self):
+        from services.intent_service import _looks_like_sql_injection
+        assert _looks_like_sql_injection("1 OR 1=1") is True
+
+    def test_ordinary_business_message_not_flagged(self):
+        from services.intent_service import _looks_like_sql_injection
+        for msg in ("Show my jobs for Nike and Bridgestone", "total earnings this month",
+                    "add a job for Nike or Bridgestone", "Mark this as paid",
+                    "delete last job", "update fees to 30000"):
+            assert _looks_like_sql_injection(msg) is False, msg
+
+    def test_injection_input_gets_refusal_not_a_data_dump(self):
+        svc = _make_svc()
+        result = svc.process_request("u1", "'; DROP TABLE job_entries; --")
+        assert result["operation"] == "rejected"
+        assert "spreadsheet" not in result["response"].lower()
+        svc.supabase.execute_sql.assert_not_called()
+        svc.gemini._call_api.assert_not_called()
+
+    def test_injection_attempt_logs_a_security_warning(self, caplog):
+        import logging
+        svc = _make_svc()
+        with caplog.at_level(logging.WARNING):
+            svc.process_request("u1", "' OR '1'='1")
+        assert any("[SECURITY]" in r.getMessage() for r in caplog.records)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 133 – No data in system (0 records)
 # ══════════════════════════════════════════════════════════════════════════
@@ -649,6 +699,56 @@ class TestBankDetailsParser:
         assert parsed.get("bank_name") == "HDFC"
         assert parsed.get("bank_account_number") == "123456"
         assert parsed.get("bank_ifsc") == "HDFC001"
+
+
+class TestUnsolicitedStructuredBankBlockRouting:
+    """P1-5 (PLAN_OF_ACTION.md): the parser above (TestBankDetailsParser)
+    already handles this exact text correctly — the bug was routing, not
+    parsing. Sent WITHOUT first triggering "update bank details" (no
+    BANK_DETAILS flow armed), a structured block used to fall all the way
+    through to smart capture, which extracted a stray field as job data and
+    asked "Save this job?" — an account number heading toward job_entries
+    permanently if the user said "yes"."""
+
+    def test_structured_block_routes_to_bank_handler_not_smart_capture(self):
+        svc = _make_svc()
+        svc.supabase.upsert_user_config.return_value = {"ok": True}
+        result = svc.process_request(
+            "u1", "Account Name: Darshit\nBank: HDFC\nAccount: 123456\nIFSC: HDFC001",
+        )
+        assert result["operation"] != "smart_capture_prompt"
+        assert "save this job" not in (result["response"] or "").lower()
+        svc.supabase.upsert_user_config.assert_called_once()
+        saved = svc.supabase.upsert_user_config.call_args.args[1]
+        assert saved["bank_account_name"] == "Darshit"
+        assert saved["bank_account_number"] == "123456"
+
+    def test_single_line_comma_separated_block_also_routes_correctly(self):
+        svc = _make_svc()
+        svc.supabase.upsert_user_config.return_value = {"ok": True}
+        result = svc.process_request(
+            "u1", "Account Name: Darshit, Bank: HDFC, Account: 123456, IFSC: HDFC001",
+        )
+        assert "save this job" not in (result["response"] or "").lower()
+        svc.supabase.upsert_user_config.assert_called_once()
+
+    def test_single_stray_label_is_not_enough_to_hijack_a_real_message(self):
+        """Guard against over-broadening: ONE incidental label match must
+        not divert an otherwise-ordinary message away from its real
+        handler — only >=2 parsed fields count as a genuine bank block."""
+        svc = _make_svc()
+        svc.supabase.get_available_months_for_client.return_value = {"ok": False}
+        result = svc.process_request("u1", "Generate invoice for Bank of Baroda for March")
+        svc.supabase.upsert_user_config.assert_not_called()
+
+    def test_ordinary_job_entry_text_not_misrouted(self):
+        svc = _make_svc()
+        svc.gemini.extract_job_fields.return_value = {
+            "brand_name": "Nike", "job_date": "2026-04-10",
+            "job_description_details": "shoot", "fees": 25000,
+        }
+        svc.process_request("u1", "Add job for Nike, 10 April, shoot, 25k")
+        svc.supabase.upsert_user_config.assert_not_called()
 
 
 class TestStandaloneBankDetailsUpdateClearsStaleInvoice:

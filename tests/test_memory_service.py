@@ -120,3 +120,42 @@ class TestDbBackedMemory:
         mem = svc.get_user_memory("u3")
         assert mem["name"] == "Darshit"               # untouched key preserved
         assert mem["awaiting_bank_details"] is False  # updated key changed
+
+
+class TestStartFormClearsCompetingPendingState:
+    """P0-2 (PLAN_OF_ACTION.md): a form and a disambiguation list / invoice-
+    send confirmation are mutually exclusive "what is the bot waiting for"
+    states. Before this, starting a form left a stale pending_disambiguation
+    or pending_send_invoice sitting in memory — a leftover disambiguation
+    list from an earlier, unrelated turn could then out-rank the form the
+    user was just shown, swallowing their reply. start_form is the single
+    choke point ~10 call sites go through, so fixing it here covers all of
+    them at once (the mirror-image fix lives in
+    IntentService._arm_disambiguation)."""
+
+    def test_start_form_clears_pending_disambiguation(self, db_backed):
+        store, make = db_backed
+        svc = make()
+        svc.update_user_memory("u1", {"pending_disambiguation": {"rows": [{"id": "a"}]}})
+        svc.start_form("u1", ["field_a"])
+        assert svc.get_user_memory("u1")["pending_disambiguation"] is None
+
+    def test_start_form_clears_pending_send_invoice(self, db_backed):
+        store, make = db_backed
+        svc = make()
+        svc.update_user_memory("u1", {"pending_send_invoice": {"client_name": "Nike"}})
+        svc.start_form("u1", ["field_a"])
+        assert svc.get_user_memory("u1")["pending_send_invoice"] is None
+
+    def test_start_form_with_override_also_clears_competing_state(self, db_backed):
+        store, make = db_backed
+        svc = make()
+        svc.update_user_memory("u1", {
+            "pending_disambiguation": {"rows": [{"id": "a"}]},
+            "pending_send_invoice": {"client_name": "Nike"},
+        })
+        svc.start_form("u1", [], form_override={"form_type": "smart_capture_confirm", "values": {}})
+        mem = svc.get_user_memory("u1")
+        assert mem["pending_disambiguation"] is None
+        assert mem["pending_send_invoice"] is None
+        assert mem["form"]["active"] is True  # the form itself still gets set

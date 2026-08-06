@@ -411,3 +411,49 @@ class TestDisambiguationInterruptedByUnrelatedMessage:
         result = svc._handle_disambiguation_reply("u1", "99", self.PENDING)
         assert "between 1 and 2" in result["response"]
         assert svc.supabase.execute_sql.call_count == 0
+
+    def test_skip_cancels_like_other_decline_words(self):
+        """P0-2 (PLAN_OF_ACTION.md): 'skip' used to fall into the generic
+        'no number found' branch and get the confusing 'reply with a number
+        to select the record...' nudge — the same behavior a genuine numeric
+        typo would get, even though 'skip' is unambiguously a decline."""
+        svc = _make_svc()
+        result = svc._handle_disambiguation_reply("u1", "skip", self.PENDING)
+        assert result["operation"] == "query"
+        assert "cancel" in result["response"].lower()
+        assert svc.supabase.execute_sql.call_count == 0
+
+    def test_email_shaped_reply_falls_through(self):
+        """An email address is never a disambiguation pick — it's meant for
+        a DIFFERENT prompt (a POC-email collection step). Before this, a
+        stale disambiguation list could swallow that reply with 'reply with
+        a number...' instead of letting the real (email-expecting) flow see
+        it (P0-2, PLAN_OF_ACTION.md)."""
+        svc = _make_svc()
+        result = svc._handle_disambiguation_reply("u1", "rahul@starstudios.com", self.PENDING)
+        assert result is None, "an email reply must fall through, not be read as a row pick"
+        cleared = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
+                   if "pending_disambiguation" in c.args[1]]
+        assert cleared and cleared[0]["pending_disambiguation"] is None
+
+    def test_command_verb_reply_falls_through(self):
+        """A message that opens with a fresh top-level command verb
+        ('generate invoice for Nike') is a new instruction, not a reply to
+        'which one did you mean?' — it must clear the stale disambiguation
+        and fall through to the real pipeline instead of being re-prompted."""
+        svc = _make_svc()
+        result = svc._handle_disambiguation_reply("u1", "generate invoice for Nike", self.PENDING)
+        assert result is None
+        cleared = [c.args[1] for c in svc.memory.update_user_memory.call_args_list
+                   if "pending_disambiguation" in c.args[1]]
+        assert cleared and cleared[0]["pending_disambiguation"] is None
+
+    def test_plain_junk_reply_still_reprompts(self):
+        """Guard against over-broadening: a reply that ISN'T a question, an
+        email, or a known command verb should still get the original
+        'reply with a number...' nudge rather than silently falling through
+        for everything."""
+        svc = _make_svc()
+        result = svc._handle_disambiguation_reply("u1", "not-an-email", self.PENDING)
+        assert result is not None
+        assert "reply with a number" in result["response"].lower()

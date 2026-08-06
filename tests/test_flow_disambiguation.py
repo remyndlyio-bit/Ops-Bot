@@ -126,12 +126,20 @@ class TestArmDisambiguation:
         args = svc.flow_machine.set_state.call_args.args
         assert args[2]["type"] == "modify"
 
-    def test_skips_flow_machine_when_v2_off(self):
+    def test_syncs_flow_machine_even_when_v2_off(self):
+        """P0-2 (PLAN_OF_ACTION.md): this used to be gated on the v2 flag,
+        so a legacy-path disambiguation never got a FlowMachine
+        started_at — which meant it could never expire via
+        expire_if_stale, and the unrelated _active_subflow check in
+        _handle_pending_reminder (which lists FLOW_DISAMBIGUATION and
+        runs unconditionally) never actually detected an in-progress
+        legacy disambiguation. The FlowMachine write is a pure state
+        record, not v2-specific routing, so it's unconditional now."""
         svc = _make_svc()
         svc.flow_machine = MagicMock()
         with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
             svc._arm_disambiguation("u1", DELETE_PENDING)
-        svc.flow_machine.set_state.assert_not_called()
+        svc.flow_machine.set_state.assert_called_once()
 
     def test_legacy_patch_still_written_when_v2_off(self):
         svc = _make_svc()
@@ -141,6 +149,20 @@ class TestArmDisambiguation:
         svc.memory.update_user_memory.assert_called_once()
         patch_arg = svc.memory.update_user_memory.call_args.args[1]
         assert patch_arg["pending_disambiguation"] == DELETE_PENDING
+
+    def test_clears_open_form_and_pending_send_invoice(self):
+        """P0-2 (PLAN_OF_ACTION.md): arming a disambiguation supersedes any
+        other pending single-question state — an open smart-capture form or
+        an invoice-send confirmation the user was never shown again must
+        not compete with the list just presented. Mirror-image of
+        start_form's own clearing of pending_disambiguation (see
+        tests/test_memory_service.py::TestStartFormClearsCompetingPendingState)."""
+        svc = _make_svc()
+        svc.flow_machine = MagicMock()
+        svc._arm_disambiguation("u1", DELETE_PENDING)
+        patch_arg = svc.memory.update_user_memory.call_args.args[1]
+        assert patch_arg["form"] == {"active": False}
+        assert patch_arg["pending_send_invoice"] is None
 
     def test_flow_machine_exception_does_not_propagate(self):
         svc = _make_svc()
