@@ -1527,31 +1527,6 @@ class IntentService:
 
         return message
 
-    def _get_schema_and_columns(self, records: List[Dict]) -> tuple:
-        """Return (schema_description, allowed_columns, date_column). Prefer AI-generated schema; fallback to rule-based."""
-        from services.business_logic_service import BusinessLogicService
-        logic = BusinessLogicService()
-        cols = list(records[0].keys()) if records else []
-        if not cols:
-            column_map = logic._get_column_names(None)
-            cols = list({c for v in column_map.values() for c in v})
-        # Prefer AI-generated schema; cache by column names so we don't call the AI every message
-        cache_key = tuple(sorted(cols))
-        schema_description = IntentService._schema_cache.get(cache_key)
-        if not schema_description:
-            schema_description = self.gemini.generate_schema_from_columns(
-                cols,
-                sample_row=records[0] if records else None,
-            )
-            if schema_description:
-                IntentService._schema_cache[cache_key] = schema_description
-        if not schema_description:
-            schema_description = logic.get_schema_for_intent(cols)
-        column_map = logic._get_column_names(cols)
-        date_cols = column_map.get("invoice_date", []) or ([c for c in cols if "date" in c.lower()] if cols else [])
-        date_column = date_cols[0] if date_cols else (cols[0] if cols else "Date")
-        return schema_description, cols, date_column
-
     def _resolve_response_mode(self, result: Dict, cmd: Dict) -> str:
         """
         Determine ResponseMode based on priority:
@@ -1935,22 +1910,6 @@ class IntentService:
         ctx["last_operation"] = "query"
         self.memory.update_user_memory(user_id, {"uscf_context": ctx})
 
-    def _build_uscf_context(self, user_id: str, conversation_history: List[Dict]) -> Optional[Dict]:
-        """Build context for USCF parser (helps resolve 'it', 'that', 'update it')."""
-        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
-        # Extract info from recent assistant messages (dates, clients mentioned)
-        if conversation_history:
-            for msg in reversed(conversation_history[-4:]):
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", "")
-                    # Look for dates like "04 Apr 2025" or "2025-04-04"
-                    import re
-                    date_match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4}-\d{2}-\d{2})", content)
-                    if date_match and not ctx.get("last_result_date"):
-                        ctx["last_result_date"] = date_match.group(1)
-                    break
-        return ctx if ctx else None
-
     def _is_followup_field_request(self, message: str, columns: List[str]) -> Optional[str]:
         """
         Check if message is a follow-up request for a specific field from last row.
@@ -2154,46 +2113,6 @@ class IntentService:
                 return f"The amount was ₹{value:,.0f}."
             return f"The value is {value}."
         return f"That was {value}."
-
-    def _update_uscf_context(self, user_id: str, cmd: Dict, result: Dict):
-        """Update context after command execution for future reference resolution."""
-        ctx = self.memory.get_user_memory(user_id).get("uscf_context", {})
-        
-        # Only update context if we got successful results with matched rows
-        matched_rows = result.get("count", 0)
-        rows = result.get("rows", [])
-        full_rows = result.get("_full_rows", [])  # Full rows for context (not filtered by return_fields)
-        
-        if matched_rows == 0 and not rows and not full_rows:
-            # Don't store context for empty results
-            logger.info("[CONTEXT] No matched rows - not updating context")
-            return
-        
-        filters = cmd.get("filters", {})
-        # Store filters for "update it" type references
-        if filters:
-            ctx["current_filters"] = filters
-        
-        # Store date from result
-        if result.get("value_type") == "date" and result.get("value"):
-            ctx["last_result_date"] = result["value"]
-        
-        # Store operation type
-        ctx["last_operation"] = cmd.get("operation")
-        
-        # Store FULL row data for follow-up questions (prefer _full_rows over rows)
-        # This ensures we have ALL columns, not just return_fields
-        source_rows = full_rows if full_rows else rows
-        if source_rows and len(source_rows) > 0:
-            last_row = source_rows[0]
-            # Store the ENTIRE row, excluding only internal keys
-            ctx["last_row_data"] = {k: v for k, v in last_row.items() if not str(k).startswith("_")}
-            ctx["last_row_id"] = last_row.get("_row")
-            all_keys = list(ctx["last_row_data"].keys())
-            logger.info(f"[CONTEXT] Stored full row with keys: {all_keys}")
-            logger.info(f"[CONTEXT] last_row_id={ctx.get('last_row_id')}, total_fields={len(all_keys)}")
-        
-        self.memory.update_user_memory(user_id, {"uscf_context": ctx})
 
     def _handle_form_step(self, user_id: str, message: str) -> Dict:
         """Handle smart capture confirmation, missing fields, or edit flow."""
@@ -7794,39 +7713,6 @@ class IntentService:
                 "Let's set you up. What's your name?"
             )
 
-    def _handle_excel_import(self, user_id: str, message: str) -> Dict:
-        """Handle Excel file import choice."""
-        response = (
-            "📎 To import from Excel:\n\n"
-            "1. Download the template from: [Your template URL]\n"
-            "2. Fill it with your job data\n"
-            "3. Send the file here\n\n"
-            "Or reply 'back' to choose another option."
-        )
-        self._store_conversation(user_id, message, response)
-        return {"operation": "onboarding_excel", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-    def _handle_csv_import(self, user_id: str, message: str) -> Dict:
-        """Handle CSV import choice."""
-        response = (
-            "📋 Paste your CSV data in this format:\n\n"
-            "Client Name,Job Description,Date,Fees,Email\n"
-            "Garnier,Short animation,2026-02-20,2000,email@example.com\n\n"
-            "Send your data or reply 'back' to choose another option."
-        )
-        self._store_conversation(user_id, message, response)
-        return {"operation": "onboarding_csv", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-    def _handle_manual_entry(self, user_id: str, message: str) -> Dict:
-        """Handle manual entry choice."""
-        response = (
-            "✏️ I'll help you add jobs manually!\n\n"
-            "Let's add your first job. What's the client name?\n\n"
-            "(Type 'cancel' anytime to stop)"
-        )
-        self._store_conversation(user_id, message, response)
-        return {"operation": "onboarding_manual", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
     def _complete_onboarding(self, user_id: str, message: str) -> Dict:
         """Complete the onboarding process."""
         # Mark as onboarded
@@ -7849,21 +7735,3 @@ class IntentService:
         )
         self._store_conversation(user_id, message, response)
         return {"operation": "onboarding_complete", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-    @staticmethod
-    def get_help_text() -> str:
-        return (
-            "I'm your conversational assistant! Here's what I can do:\n\n"
-            "✏️ Add a job (one message!):\n"
-            "Add job\n"
-            "Bridgestone\n"
-            "10 Feb\n"
-            "Master film 30 sec + 4 cutdowns\n"
-            "Client: The Good Take\n"
-            "Fees: 25k\n\n"
-            "Or ultra-fast: + Bridgestone 10 Feb 25k master film\n\n"
-            "📄 Invoices: 'Send invoice to Garnier for April'\n"
-            "📊 Queries: 'Total fees this month' / 'Jobs for Client X'\n"
-            "💳 Bank: 'Update bank details' / 'My bank details'\n\n"
-            "How can I help you today?"
-        )
