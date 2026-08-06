@@ -18,6 +18,10 @@ SELECT_ALL = "SELECT * FROM public.job_entries WHERE user_id='u' AND (\"isDelete
 SELECT_UNPAID = "SELECT * FROM public.job_entries WHERE user_id='u' AND (paid IS NULL OR LOWER(paid) NOT IN ('true','t','yes','1','paid')) LIMIT 25"
 SELECT_CLIENT = "SELECT * FROM public.job_entries WHERE user_id='u' AND client_name ILIKE '%garnier%' LIMIT 25"
 SUM_CLIENT_UNPAID = "SELECT SUM(fees) AS result FROM public.job_entries WHERE user_id='u' AND (COALESCE(client_name,'') ILIKE '%star%') AND (paid IS NULL OR LOWER(paid) NOT IN ('yes'))"
+SELECT_BILL_NOT_SENT = (
+    "SELECT * FROM public.job_entries WHERE user_id='u' AND "
+    "(bill_sent IS NULL OR LOWER(bill_sent) NOT IN ('true','t','yes','1','sent','y','paid')) LIMIT 25"
+)
 
 
 class TestGuardRejects:
@@ -147,6 +151,69 @@ class TestSharedDispatchDetector:
     def test_non_dispatch_questions_not_detected(self, msg, why):
         from services.query_guard import mentions_invoice_dispatch
         assert not mentions_invoice_dispatch(msg), f"{msg!r} wrongly read as dispatch ({why})"
+
+
+class TestBakiDisambiguation:
+    """P1-3 (PLAN_OF_ACTION.md): "baki"/"baaki" (Hindi "remaining/pending")
+    is genuinely ambiguous — "payment baki" means UNPAID (paid predicate),
+    "invoice bhejna baki" means NOT YET SENT (bill_sent predicate). Before
+    this, bare "baki" always satisfied _STATUS_RE regardless of which
+    reading applied, so a bill_sent route's SQL (no "paid" filter) always
+    got rejected as "paid/unpaid qualifier not reflected", even though the
+    message was never about payment status."""
+
+    def test_bhejna_baki_accepts_bill_sent_sql_not_paid_sql(self):
+        ok, why = chk("Kiska invoice bhejna baki hai", SELECT_BILL_NOT_SENT)
+        assert ok, why
+
+    def test_bhejni_baki_accepts_bill_sent_sql(self):
+        ok, why = chk("Kiska invoice bhejni baki hai", SELECT_BILL_NOT_SENT)
+        assert ok, why
+
+    def test_bhejna_baki_rejects_paid_only_sql(self):
+        """The dispatch reading must still demand a bill_sent predicate —
+        a plain unpaid-filtered SQL doesn't answer 'is it SENT'."""
+        ok, why = chk("Kiska invoice bhejna baki hai", SELECT_UNPAID)
+        assert not ok
+        assert "invoice-sent" in why
+
+    def test_bare_payment_baki_still_requires_paid_predicate(self):
+        """The OTHER reading is untouched: bare "payment baki" (no
+        "bhejna"/"bhejni") must still demand a paid predicate."""
+        ok, why = chk("Nike ka payment baki hai", SELECT_ALL)
+        assert not ok
+        assert "paid/unpaid" in why
+
+    def test_bare_payment_baki_accepts_unpaid_sql(self):
+        ok, why = chk("Nike ka payment baki hai", SELECT_UNPAID)
+        assert ok, why
+
+
+class TestQuestionWordsNotMistakenForClients:
+    """P1-3 (PLAN_OF_ACTION.md): _NOUN_RE's leftover-noun heuristic reads
+    ANY word directly before a job-noun ("invoices", "jobs", ...) as a
+    candidate client name. Hindi/English question words sitting in that
+    exact position (kiska/kaunsa/which/what/who) used to get swept up —
+    "which invoices are not sent yet" was rejected as if "which" were an
+    unreflected client filter."""
+
+    @pytest.mark.parametrize("msg", [
+        "Which invoices are not sent yet",
+        "What invoices are pending",
+        "Kiska invoice bhejna baki hai",
+        "Kaunsa client ne paid kiya",
+    ])
+    def test_question_word_before_noun_not_read_as_client(self, msg):
+        from services.query_guard import _client_in_message
+        client = _client_in_message(" " + msg.lower() + " ", ())
+        assert client is None, f"{msg!r} misread {client!r} as a client name"
+
+    def test_real_client_before_noun_still_detected(self):
+        """Guard against over-broadening: an actual client name in the same
+        grammatical position must still be caught."""
+        from services.query_guard import _client_in_message
+        client = _client_in_message(" show garnier invoices ", ())
+        assert client == "garnier"
 
 
 class TestDispatchGuardNoFalsePositive:

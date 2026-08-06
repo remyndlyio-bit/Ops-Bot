@@ -31,9 +31,35 @@ from tests.e2e.seed import (
     E2E_USER_PREFIX, FIXTURE_ROWS, FEES_BY_CLIENT, UNPAID_BY_CLIENT,
     ROW_COUNT, TOTAL_FEES, PAID_TOTAL, UNPAID_TOTAL, PAID_COUNT, UNPAID_COUNT,
     CLIENTS, CLIENT_COUNT, BIGGEST_CLIENT, NO_EMAIL_COUNT, NO_DATE_COUNT,
-    BILL_SENT_COUNT, BILL_NOT_SENT_COUNT,
+    BILL_SENT_COUNT, BILL_NOT_SENT_COUNT, SEED_VARIANTS,
     new_user_id, teardown, _assert_synthetic,
 )
+
+
+class TestSeedVariantValidation:
+    """P2-4 (PLAN_OF_ACTION.md): seed_variant() validates its `variant`
+    argument BEFORE opening a DB connection, so an unknown name fails fast
+    and offline rather than burning a connection attempt (or worse,
+    silently seeding the base fixture with no variant applied at all)."""
+
+    def test_unknown_variant_rejected_before_any_db_call(self):
+        with pytest.raises(ValueError, match="unknown seed variant"):
+            seed_mod.seed_variant("not_a_real_variant")
+
+    @pytest.mark.parametrize("variant", list(SEED_VARIANTS))
+    def test_every_declared_variant_is_actually_handled(self, variant):
+        """A variant present in SEED_VARIANTS but missing its own
+        if/elif branch would pass the up-front validation check and then
+        silently no-op — seed the base fixture and remove nothing, so the
+        row's precondition still wouldn't hold. Can't exercise the real
+        DB branch offline, but the source must at least reference every
+        declared name somewhere in the dispatch."""
+        import inspect
+        source = inspect.getsource(seed_mod.seed_variant)
+        assert f'"{variant}"' in source or f"'{variant}'" in source, (
+            f"{variant!r} is declared in SEED_VARIANTS but seed_variant() "
+            "has no branch handling it"
+        )
 
 
 class TestTeardownSafetyGuard:

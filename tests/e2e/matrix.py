@@ -39,7 +39,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 SHEET_PATH = os.path.join(os.path.dirname(__file__), "Intent_Test_Matrix.xlsx")
 SHEET_NAME = "Test Matrix"
@@ -53,11 +53,21 @@ _ANNOTATION = re.compile(r"\s*\(([^)]*)\)\s*$")
 # from a chat reply.
 _MANUAL_HINTS = ("check pdf", "check received email", "check email")
 
-# Rows whose annotation asserts a DATA precondition the fixture may not meet
-# ("no bank saved", "no March data"). They still run, but a failure may be
-# the fixture rather than the bot, so the report says so instead of
-# silently counting it against the product.
-_PRECONDITION_HINTS = ("no bank", "no billing", "no poc_email", "no march")
+# Rows whose annotation asserts a DATA precondition the shared fixture
+# contradicts by design (it always seeds bank details and gives Nike full
+# billing/POC-email/March+April data, because OTHER rows need exactly
+# that). Mapped to the seed.py variant that actually removes the one thing
+# each precondition is about — P2-4 (PLAN_OF_ACTION.md): before this, these
+# rows ran against the shared fixture regardless, so the precondition never
+# held and a failure measured the fixture instead of the bot.
+_PRECONDITION_VARIANTS: Dict[str, str] = {
+    "no bank": "no_bank",
+    "none saved": "no_bank",     # row 102's own phrasing ("Show my bank details (none saved)")
+    "no billing": "no_billing_nike",
+    "no poc_email": "no_poc_email_nike",
+    "no march": "no_march_nike",
+    "0 records": "empty",
+}
 
 # Onboarding setup paths. Explicit for these 8 rows rather than inferred:
 # the flow is short, the inference rules that would cover it are fragile,
@@ -69,10 +79,13 @@ _ONBOARDING_SETUP: Dict[int, Tuple[str, ...]] = {
     3: ("Hi",),
     4: ("Hi",),
     5: ("Hi",),
-    # The implemented flow is name → EMAIL → company, not the name → company
-    # the sheet assumes. Answering the email step with "skip" completes
-    # onboarding outright (skip reuses the name as the company), so these
-    # two must supply a real address to reach the company step at all.
+    # The implemented flow is name -> EMAIL -> industry (P2-4,
+    # PLAN_OF_ACTION.md — the sheet's own expected-behavior text was
+    # corrected to match this; it used to describe a name -> company
+    # 2-step flow that doesn't exist). Answering the email step with
+    # "skip" completes onboarding outright (skip reuses the name as the
+    # industry), so these two must supply a real address to reach the
+    # industry step at all.
     6: ("Hi", "Darshit", "darshit@example.com"),
     7: ("Hi", "Darshit", "darshit@example.com"),
     8: ("Hi",),                             # Hindi name, at the name step
@@ -126,7 +139,18 @@ class MatrixRow:
 
     @property
     def has_data_precondition(self) -> bool:
-        return any(h in self.annotation for h in _PRECONDITION_HINTS)
+        return any(h in self.annotation for h in _PRECONDITION_VARIANTS)
+
+    @property
+    def precondition_variant(self) -> Optional[str]:
+        """The seed.py variant to use instead of the shared fixture, or
+        None for the ordinary shared-fixture rows (P2-4, PLAN_OF_ACTION.md).
+        First matching hint wins — annotations here are single-purpose, so
+        collisions aren't expected."""
+        for hint, variant in _PRECONDITION_VARIANTS.items():
+            if hint in self.annotation:
+                return variant
+        return None
 
     @property
     def needs_fresh_account(self) -> bool:

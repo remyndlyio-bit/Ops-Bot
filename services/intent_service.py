@@ -2524,6 +2524,31 @@ class IntentService:
         self._store_conversation(user_id, f"Job details: {summary}", response)
         return {"operation": "smart_capture_confirm", "response": response, "trigger_invoice": False, "invoice_data": {}}
 
+    def _handle_create_entry_request(self, user_id: str, message: str) -> Dict:
+        """Entry point for a confirmed CREATE_ENTRY request ("add a job",
+        "+Nike 10 Feb shoot 25k", ...). Splits a compound intent ("add a
+        job for Nike and send invoice") into the create step now and a
+        stashed suggested_next_action for after, then hands the (possibly
+        trimmed) message to smart capture.
+
+        Extracted (P0-1, PLAN_OF_ACTION.md) so the legacy add-job trigger
+        and flow_dispatcher.dispatch_idle's WRITE_CREATE branch share ONE
+        implementation instead of the v2 path dropping the compound-intent
+        split entirely (it was shadow-only — classified correctly, then
+        silently handed to legacy anyway, which only ran this check when
+        v2 was OFF)."""
+        first_part_msg = message
+        if len(message.split()) >= 6:  # only check if message is long enough
+            intents = self.gemini.decompose_compound_intent(message)
+            if intents and len(intents) > 1:
+                first_part_msg = intents[0]
+                suggested_next = intents[1]
+                logger.info(f"[COMPOUND] AI split: first='{first_part_msg}', next='{suggested_next}'")
+                self.memory.update_user_memory(user_id, {
+                    "suggested_next_action": suggested_next,
+                })
+        return self._start_smart_capture(user_id, first_part_msg)
+
     def _start_smart_capture(self, user_id: str, message: str) -> Dict:
         """
         AI Smart Capture: extract job fields from natural language.
@@ -4020,6 +4045,609 @@ class IntentService:
         self._turn_cache.resume_nudge = None
         return nudge
 
+    def _handle_invoice_retrieval_request(
+        self, user_id: str, message: str, msg_lower: str, data_user_id: str,
+        conversation_history: list, user_mem: Dict, logic,
+        _invoice_action_definite: bool,
+    ) -> Dict:
+        """Resolve and act on a confirmed invoice-retrieval/generation
+        request: bill-number lookup (checked BEFORE client-name extraction
+        so "bill BB2" is never mistaken for a client), pronoun stripping
+        ("them"/"it"/"this client"), a context-resolution ladder
+        (last_saved_job -> uscf_context -> last_intent) when no client was
+        named, fuzzy client matching against the DB, month resolution
+        (auto-picks the one available month, else prompts), the mandatory-
+        fields readiness gate, and the final PDF-trigger / email-prompt
+        response.
+
+        Extracted verbatim (P0-1, PLAN_OF_ACTION.md) from what used to be
+        inline legacy-only code so both the legacy keyword-detected path
+        AND flow_dispatcher.dispatch_idle's WRITE_INVOICE branch share ONE
+        implementation instead of the v2 path having none at all (it was
+        shadow-only -- classified correctly, then silently dropped).
+        `_invoice_action_definite` selects between direct regex extraction
+        (client/month/bill parsed straight from the message text) and a
+        parse_user_intent LLM call as a fallback when regex found nothing;
+        the v2 call site always passes True, since the classifier's own
+        WRITE_INVOICE verdict already IS that confidence check.
+        """
+        if _invoice_action_definite:
+            _direct_month = None
+            _direct_client = None
+            _direct_bill = None
+            _month_names = {
+                "january": 1, "february": 2, "march": 3, "april": 4,
+                "may": 5, "june": 6, "july": 7, "august": 8,
+                "september": 9, "october": 10, "november": 11, "december": 12,
+                "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
+                "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+            }
+            for _mn, _mv in _month_names.items():
+                if f" {_mn}" in msg_lower or msg_lower.endswith(_mn):
+                    _direct_month = _mv
+                    break
+            # Detect a bill/invoice number BEFORE client extraction so
+            # "Generate invoice for bill INV-001" doesn't treat "bill INV-001"
+            # as a client name. Matches: "bill INV-001", "bill no INV-001",
+            # "invoice INV-001", "#INV-001", "INV-001"/"INV001", or a bare
+            # alphanumeric code with no separator at all ("bill BB2") — the
+            # dash-required alternative alone missed short codes like that,
+            # so "Generate invoice for bill BB2" fell through to client-name
+            # extraction and answered "I couldn't find a client named 'Bill
+            # Bb2'" (P1-2, PLAN_OF_ACTION.md).
+            _bill_match = re.search(
+                r'\b(?:bill|invoice|inv)\s*(?:no\.?|number|#)?\s*#?\s*'
+                r'((?:inv[-\s]?)?\d{1,6}|[a-z]{1,5}[-]?\d{1,6})\b',
+                msg_lower, re.IGNORECASE,
+            )
+            # Only treat as a bill number if it actually looks like one
+            # (contains a digit and isn't just a plain month/year).
+            if _bill_match:
+                _cand = _bill_match.group(1).strip()
+                if re.search(r'\d', _cand) and not re.fullmatch(r'20\d{2}', _cand):
+                    # Normalise to the stored format, e.g. "inv-001" → "INV-001".
+                    _norm = _cand.upper().replace(" ", "")
+                    if _norm.isdigit():
+                        _direct_bill = _norm
+                    else:
+                        _direct_bill = re.sub(r'^INV-?', 'INV-', _norm)
+                    logger.info(f"[INVOICE_SHORTCUT] Detected bill number: {_direct_bill!r}")
+            # Extract client name only when no bill number was found.
+            if not _direct_bill:
+                _for_match = re.search(
+                    r'\bfor\s+(.+?)(?:\s+for\s+|\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*|$)',
+                    msg_lower, re.IGNORECASE
+                )
+                if _for_match:
+                    _cand_client = _for_match.group(1).strip().title()
+                    # Pronouns ("them", "it", "this client") are NOT client
+                    # names — leave _direct_client null so downstream context
+                    # resolution maps them to the remembered client.
+                    _PRONOUNS = {
+                        "them", "it", "this", "that", "this client", "that client",
+                        "the client", "him", "her", "they", "this one", "that one",
+                    }
+                    if _cand_client.lower() not in _PRONOUNS:
+                        _direct_client = _cand_client
+            if _direct_bill:
+                intent_result = {
+                    "operation": "ACTION_TRIGGER",
+                    "parameters": {"client_name": None, "month": None, "year": None, "bill_number": _direct_bill},
+                    "confidence": 0.97,
+                    "clarification_question": None,
+                }
+            elif _direct_client:
+                intent_result = {
+                    "operation": "ACTION_TRIGGER",
+                    "parameters": {"client_name": _direct_client, "month": None, "year": None},
+                    "confidence": 0.95,
+                    "clarification_question": None,
+                }
+                # Override month from regex
+                if _direct_month:
+                    intent_result["parameters"]["month"] = list(_month_names.keys())[
+                        list(_month_names.values()).index(_direct_month)].capitalize()
+                logger.info(f"[INVOICE_SHORTCUT] Direct extract: client={_direct_client!r} month={_direct_month}")
+            else:
+                schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
+                intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
+        else:
+            schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
+            intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
+        # Resilience: a definite invoice action ("generate invoice") must NOT fall
+        # through to the query pipeline just because the intent LLM flaked
+        # (GEMINI_ERROR). Synthesise a minimal ACTION_TRIGGER so downstream context
+        # resolution (last_saved_job / uscf_context / last_intent) still runs.
+        if _invoice_action_definite and intent_result.get("operation") == "GEMINI_ERROR":
+            logger.info("[INVOICE_SHORTCUT] parse_user_intent flaked on a definite invoice action — synthesising minimal intent for context resolution")
+            intent_result = {
+                "operation": "ACTION_TRIGGER",
+                "parameters": {
+                    "client_name": _direct_client,
+                    "month": (number_to_month_name(_direct_month) if _direct_month else None),
+                    "year": None,
+                    "bill_number": _direct_bill,
+                },
+                "confidence": 0.8,
+                "clarification_question": None,
+            }
+        params = intent_result.get("parameters", {})
+        # If the intent parser asked for clarification, surface that question
+        # — but only when the existing flow can't handle it. Missing month or
+        # client name is handled downstream with richer context (lists available
+        # months, fuzzy-matches typos like 'Samsun' → 'Samsung'), so we let
+        # those fall through. Other clarifications (e.g. "which items to keep")
+        # are surfaced directly to avoid silent invoice regeneration.
+        if intent_result.get("operation") == "NEED_CLARIFICATION":
+            clar_q = (intent_result.get("clarification_question") or "").strip()
+            clar_q_lower = clar_q.lower()
+            _handled_downstream = any(
+                kw in clar_q_lower for kw in ("month", "year", "client name", "client?", "which client")
+            )
+            if clar_q and not _handled_downstream:
+                self._store_conversation(user_id, message, clar_q)
+                return {"operation": "ACTION_TRIGGER", "response": clar_q, "trigger_invoice": False, "invoice_data": {}}
+
+        # AI confirmed the request is out of scope (not query/invoice/action) →
+        # use the feature-aware AI responder so we can humorously confirm what
+        # Remyndly does/doesn't do, grounded in REMYNDLY_FEATURES.md.
+        if intent_result.get("operation") == "UNKNOWN":
+            response = self.gemini.answer_feature_question(message, conversation_history=conversation_history)
+            if not response or not response.strip():
+                response = unsupported_feature_phrase(message[:80])
+            self._store_conversation(user_id, message, response)
+            return {"operation": "unsupported", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        if intent_result.get("operation") != "GEMINI_ERROR":
+            # Email-specific override: if user explicitly mentions sending over email,
+            # treat this as SEND_EMAIL instead of a generic ACTION_TRIGGER.
+            email_keywords = [
+                "email invoice",
+                "send invoice over email",
+                "send over email",
+                "mail the invoice",
+                "mail invoice",
+                "share invoice via email",
+                "forward invoice",
+                "send invoice to client",
+                "send it to client",
+                "send to client",
+                "send invoice to the client",
+            ]
+            if "email" in msg_lower or "e-mail" in msg_lower or "to client" in msg_lower or any(k in msg_lower for k in email_keywords):
+                intent_result["operation"] = "SEND_EMAIL"
+
+            client_name = (params.get("client_name") or "").strip()
+            # A pronoun is never a real client — clear it so context
+            # resolution (last_saved_job / uscf_context / last_intent) maps
+            # "them"/"it"/"this client" to the remembered client.
+            if client_name.lower() in (
+                "them", "it", "this", "that", "this client", "that client",
+                "the client", "him", "her", "they", "this one", "that one",
+            ):
+                client_name = ""
+            month_name = (params.get("month") or "").strip()
+            year_val = params.get("year")
+            bill_number = (params.get("bill_number") or "").strip() or None
+            month_num = month_name_to_number(month_name) if month_name else None
+
+            # Validate: if user's message contains an explicit year but LLM
+            # missed it, extract it directly from the message text.
+            if not year_val:
+                _year_match = re.search(r'\b(20\d{2})\b', message)
+                if _year_match:
+                    year_val = int(_year_match.group(1))
+                    logger.info(f"[INVOICE] LLM missed year; extracted {year_val} from message text")
+            if not year_val:
+                from datetime import datetime
+                year_val = datetime.now().year
+
+            # Fuzzy-match client_name against actual DB clients
+            # (Gemini often normalizes names, e.g. "Bridgestone12" → "Bridgestone")
+            if client_name:
+                safe_uid = data_user_id.replace("'", "''")
+                clients_sql = (
+                    f"SELECT DISTINCT client_name, brand_name, production_house FROM public.job_entries "
+                    f"WHERE user_id = '{safe_uid}' AND (\"isDeleted\" IS NOT TRUE)"
+                )
+                clients_result = self.supabase.execute_sql(clients_sql)
+                if clients_result.get("ok"):
+                    db_clients = []
+                    for r in (clients_result.get("rows") or []):
+                        for _f in ("client_name", "brand_name", "production_house"):
+                            _v = (r.get(_f) or "").strip() if r.get(_f) else ""
+                            if _v and _v.lower() != "none":
+                                db_clients.append(_v)
+                    # De-duplicate (case-insensitive)
+                    _seen = set()
+                    db_clients = [x for x in db_clients if not (x.lower() in _seen or _seen.add(x.lower()))]
+                    client_name = self._fuzzy_match_client_name(client_name, db_clients, message)
+
+            # Resolve "this job" / missing client from context
+            if not client_name and not bill_number:
+                # 1. Check last_saved_job (from smart capture)
+                last_job = user_mem.get("last_saved_job")
+                if last_job:
+                    client_name = last_job.get("db_client_name") or last_job.get("brand_name", "")
+                    if not month_name and last_job.get("job_date"):
+                        try:
+                            job_month = int(last_job["job_date"][5:7])
+                            month_name = number_to_month_name(job_month)
+                            month_num = job_month
+                            year_val = int(last_job["job_date"][:4])
+                        except (ValueError, IndexError):
+                            pass
+                    logger.info(f"[INVOICE] Resolved from last_saved_job: client={client_name}, month={month_name}")
+
+            if not client_name and not bill_number:
+                # 2. Check uscf_context (from recent query/update results)
+                ctx = user_mem.get("uscf_context", {})
+                last_row = ctx.get("last_row_data", {})
+                if last_row.get("client_name"):
+                    client_name = last_row["client_name"]
+                    logger.info(f"[INVOICE] Resolved from uscf_context: client={client_name}")
+                # 3. Check last_intent (from recent interactions)
+                elif user_mem.get("last_intent", {}).get("client_name"):
+                    client_name = user_mem["last_intent"]["client_name"]
+                    logger.info(f"[INVOICE] Resolved from last_intent: client={client_name}")
+
+            if not client_name and not bill_number:
+                # Save intent so follow-up can provide client name
+                op_name = intent_result.get("operation", "invoice")
+                self._save_last_intent(user_id, operation=op_name, entity="invoice",
+                                       month=month_name, year=year_val,
+                                       pending_clarification="client_name")
+                response = "I need a client name or bill number to find an invoice. For example: 'Send invoice for Garnier for March'."
+                self._store_conversation(user_id, message, response)
+                return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            # Validate client exists in DB before proceeding
+            # Search client_name, brand_name, and production_house (legacy)
+            if client_name and not bill_number:
+                safe_uid = data_user_id.replace("'", "''")
+                safe_cn = client_name.replace("'", "''")
+                check_sql = (
+                    f"SELECT DISTINCT client_name, brand_name, production_house FROM public.job_entries "
+                    f"WHERE user_id = '{safe_uid}' "
+                    f"AND (client_name ILIKE '%{safe_cn}%' OR brand_name ILIKE '%{safe_cn}%' OR production_house ILIKE '%{safe_cn}%') "
+                    f"AND (\"isDeleted\" IS NOT TRUE)"
+                )
+                check_result = self.supabase.execute_sql(check_sql)
+                # Fallback if production_house column doesn't exist
+                if not check_result.get("ok") and "production_house" in str(check_result.get("error", "")):
+                    check_sql = (
+                        f"SELECT DISTINCT client_name, brand_name FROM public.job_entries "
+                        f"WHERE user_id = '{safe_uid}' AND (client_name ILIKE '%{safe_cn}%' OR brand_name ILIKE '%{safe_cn}%') "
+                        f"AND (\"isDeleted\" IS NOT TRUE)"
+                    )
+                    check_result = self.supabase.execute_sql(check_sql)
+                # A row matches if ANY of client_name / brand_name / production_house
+                # is non-null — jobs added with only a brand (e.g. '+Sunrich ...')
+                # have client_name=NULL but brand_name='Sunrich' and must still be found.
+                matching_clients = []
+                for r in (check_result.get("rows") or []):
+                    for _f in ("client_name", "brand_name", "production_house"):
+                        _v = (r.get(_f) or "").strip() if r.get(_f) else ""
+                        if _v:
+                            matching_clients.append(_v)
+                            break
+                if not matching_clients:
+                    # No matching client — show available clients and stop
+                    all_clients_sql = (
+                        f"SELECT DISTINCT client_name FROM public.job_entries "
+                        f"WHERE user_id = '{safe_uid}' AND client_name IS NOT NULL "
+                        f"AND (\"isDeleted\" IS NOT TRUE) ORDER BY client_name"
+                    )
+                    all_result = self.supabase.execute_sql(all_clients_sql)
+                    available = [r["client_name"] for r in (all_result.get("rows") or []) if r.get("client_name")]
+                    if available:
+                        client_list = "\n".join(f"• {c}" for c in available)
+                        response = (
+                            f"I couldn't find a client named \"{client_name}\". "
+                            f"Please check for typos.\n\n"
+                            f"Your clients on record:\n{client_list}\n\n"
+                            f"Try again with the correct name."
+                        )
+                    else:
+                        response = f"I couldn't find a client named \"{client_name}\" and you don't have any job entries yet."
+                    logger.info(f"[INVOICE] Client '{client_name}' not found for user {user_id}")
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            if client_name and not month_num and not bill_number:
+                # Check if user explicitly asked to send via email
+                send_email = "email" in msg_lower or "e-mail" in msg_lower
+
+                # "Regenerate invoice for Nike" (no month named) should reuse
+                # the month from the LAST invoice generated for this same
+                # client instead of asking again — the user said "regenerate",
+                # not "generate a new one for a month I haven't told you
+                # about" (P1-2, PLAN_OF_ACTION.md).
+                if self._is_regenerate_request(message):
+                    _last = user_mem.get("last_intent") or {}
+                    if (_last.get("entity") == "invoice"
+                            and (_last.get("client_name") or "").strip().lower() == client_name.strip().lower()
+                            and _last.get("month")):
+                        try:
+                            _reused_month_num = month_name_to_number(_last["month"])
+                            if _reused_month_num:
+                                month_name = _last["month"]
+                                month_num = _reused_month_num
+                                year_val = _last.get("year") or year_val
+                                logger.info(
+                                    f"[INVOICE] Regenerate request reused last month "
+                                    f"{month_name} {year_val} for {client_name}"
+                                )
+                        except Exception as _e:
+                            logger.warning(f"[INVOICE] Could not reuse last_intent month for regenerate: {_e}")
+
+                if not month_num:
+                    months_result = self.supabase.get_available_months_for_client(client_name, user_id=data_user_id)
+                    _months = months_result.get("months") or []
+                    # If only one month exists for this client, auto-proceed without prompting.
+                    if months_result.get("ok") and len(_months) == 1:
+                        try:
+                            month_num = int(_months[0]["month"])
+                            year_val = int(_months[0]["year"])
+                            month_name = number_to_month_name(month_num)
+                            logger.info(f"[INVOICE] Single available month — auto-using {month_name} {year_val} for {client_name}")
+                        except (KeyError, ValueError, TypeError) as _e:
+                            logger.warning(f"[INVOICE] Could not auto-pick single month: {_e}")
+                    if months_result.get("ok") and _months and not month_num:
+                        month_options = "\n".join(f"• {m['label']}" for m in _months)
+                        response = f"I see you want an invoice for {client_name}. Which month?\n\n{month_options}\n\nReply with the month, e.g. 'Send invoice for {client_name} for March 2025'."
+                    elif not month_num:
+                        response = f"I see you want an invoice for {client_name}. Which month? For example: 'Send invoice for {client_name} for March'."
+                    # Only prompt the user when month is still unresolved.
+                    # If we auto-picked the single available month above, fall through
+                    # to invoice generation.
+                    if not month_num:
+                        # Save intent so follow-up "March" reconstructs to full query
+                        # Do NOT store inferred year — only store confirmed fields.
+                        op_name = "SEND_EMAIL" if send_email else intent_result.get("operation", "invoice")
+                        self._save_last_intent(user_id, operation=op_name, client_name=client_name,
+                                               entity="invoice",
+                                               pending_clarification="month")
+                        # Arm FlowMachine so the next reply routes to the invoice month handler
+                        self._arm_invoice_month_v2(user_id, client_name, send_email)
+                        self._store_conversation(user_id, message, response)
+                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+            if bill_number:
+                result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=data_user_id)
+            else:
+                result = self.supabase.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year_val, user_id=data_user_id)
+            if not result.get("ok"):
+                response = result.get("error", "I couldn't fetch invoice data. Please try again.")
+                self._store_conversation(user_id, message, response)
+                return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            rows = result.get("rows") or []
+            if not rows:
+                # Check what months actually have data for this client
+                hint = ""
+                if client_name:
+                    safe_client = client_name.replace("'", "''")
+                    safe_uid = data_user_id.replace("'", "''")
+                    avail_sql = (
+                        f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
+                        f"FROM public.job_entries "
+                        f"WHERE user_id = '{safe_uid}' "
+                        f"AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
+                        f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
+                    )
+                    avail = self.supabase.execute_sql(avail_sql)
+                    if not avail.get("ok") and "production_house" in str(avail.get("error", "")):
+                        avail_sql = (
+                            f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
+                            f"FROM public.job_entries "
+                            f"WHERE user_id = '{safe_uid}' AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%') "
+                            f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
+                        )
+                        avail = self.supabase.execute_sql(avail_sql)
+                    periods = [r["period"].strip() for r in (avail.get("rows") or [])]
+                    if periods:
+                        hint = f"\n\nI do have records for {client_name} in: {', '.join(periods)}."
+                    else:
+                        # No DATED records — but the client may still have rows
+                        # with a NULL job_date. Don't claim "no records at all"
+                        # without checking the actual row count first.
+                        _cnt_sql = (
+                            f"SELECT COUNT(*) AS cnt FROM public.job_entries "
+                            f"WHERE user_id = '{safe_uid}' "
+                            f"AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
+                            f"AND (\"isDeleted\" IS NOT TRUE)"
+                        )
+                        _cnt_res = self.supabase.execute_sql(_cnt_sql)
+                        _cnt = 0
+                        if _cnt_res.get("ok") and _cnt_res.get("rows"):
+                            try:
+                                _cnt = int(_cnt_res["rows"][0].get("cnt", 0))
+                            except (ValueError, TypeError):
+                                _cnt = 0
+                        if _cnt > 0:
+                            hint = (
+                                f"\n\nI have {_cnt} record{'s' if _cnt != 1 else ''} for {client_name}, "
+                                f"but none have a job date set, so I can't filter by month. "
+                                f"Try 'Generate invoice for {client_name}' without a month."
+                            )
+                        else:
+                            hint = f"\n\nI don't have any records for {client_name} at all."
+                if client_name and month_num:
+                    response = f"I found no jobs for {client_name} in {month_name or month_num} {year_val}.{hint}"
+                else:
+                    response = f"I don't see any records for {client_name or 'that bill'} in my records.{hint}"
+                # If exactly one alternate month is available, persist it so a short
+                # confirmation ("okay generate", "yes", "sure") can act on it.
+                if client_name and periods and len(periods) == 1:
+                    try:
+                        _alt = periods[0]  # e.g. "February  2026"
+                        _parts = _alt.split()
+                        _alt_month = _parts[0] if _parts else None
+                        _alt_year = int(_parts[-1]) if _parts and _parts[-1].isdigit() else year_val
+                        if _alt_month:
+                            # Preserve a SEND intent from the original message ("Send
+                            # ... invoice to client") -- without this, Case 0 of
+                            # _reconstruct_message always rewrote the later "Yes" into
+                            # "Generate invoice for X" regardless of whether the user
+                            # originally asked to send it, so the generate-only flow
+                            # never armed awaiting_send_confirmation and a subsequent
+                            # "No" (meant to decline the send) had nothing to decline
+                            # and fell through to the generic query pipeline.
+                            _alt_op = "SEND_EMAIL" if ("send" in msg_lower or "email" in msg_lower or "e-mail" in msg_lower) else "generate_invoice"
+                            self._save_last_intent(
+                                user_id,
+                                operation=_alt_op,
+                                client_name=client_name,
+                                month=_alt_month,
+                                year=_alt_year,
+                                entity="invoice",
+                                pending_clarification="confirm_alt_month",
+                            )
+                    except Exception as _e:
+                        logger.warning(f"[INVOICE] Could not persist alt-month context: {_e}")
+                self._store_conversation(user_id, message, response)
+                return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+            display_client = self._invoice_display_name(client_name, rows)
+            month_display = month_name
+            if not month_display and rows and rows[0].get("job_date"):
+                jd = str(rows[0]["job_date"])[:10]
+                if len(jd) >= 7:
+                    try:
+                        month_display = number_to_month_name(int(jd[5:7]))
+                    except (ValueError, TypeError):
+                        pass
+            if not month_display:
+                month_display = "Request"
+
+            # An invoice was already issued for these rows if any carries an
+            # invoice_date. Then "send me the invoice" is a RETRIEVAL — give
+            # the existing one back instead of re-running the new-invoice
+            # prompts, and word the acknowledgement as a lookup, not a build.
+            _already_invoiced = self._rows_already_invoiced(rows)
+            _ack = (
+                f"Pulling up your invoice for {display_client} ({month_display})…"
+                if _already_invoiced else
+                f"On it — putting your invoice for {display_client} ({month_display}) together…"
+            )
+            # Explicit "rebuild it" intent — only then bypass the cached PDF.
+            _force_regen = self._is_regenerate_request(message)
+            invoice_data = {
+                "client_name": display_client,
+                "month": month_display,
+                "bill_number": bill_number,
+                "year": year_val,
+                "force_regenerate": _force_regen,
+            }
+            if _force_regen:
+                logger.info(f"[INVOICE] User requested regeneration — bypassing cache for {display_client} {month_display} {year_val}")
+
+            # Extract poc_name and invoicer_name for email personalization
+            _inv_poc_name = ""
+            for _r in rows:
+                _v = (_r.get("poc_name") or "").strip()
+                if _v and _v.lower() != "none":
+                    _inv_poc_name = _v
+                    break
+            _inv_invoicer_name = ""
+            try:
+                _prof = self.supabase.get_user_profile(data_user_id)
+                if _prof.get("ok") and _prof.get("data"):
+                    _prefs = _prof["data"].get("preferences") or {}
+                    if isinstance(_prefs, str):
+                        import json as _json
+                        try:
+                            _prefs = _json.loads(_prefs)
+                        except Exception:
+                            _prefs = {}
+                    _inv_invoicer_name = _prefs.get("invoice_name") or _prof["data"].get("name") or ""
+            except Exception:
+                pass
+
+            # ── Mandatory-fields gate (new invoices only) ──────────────
+            # Prompt for any missing required field (client billing, POC
+            # name, job description, bank account, business address) and
+            # only proceed once the invoice is complete. Runs for BOTH the
+            # generate and the email paths; each field's handler re-enters
+            # the flow so the prompts chain until everything is present.
+            # Skipped when the invoice already exists — a retrieval should
+            # just hand back what was issued, not re-prompt for fields.
+            if not _already_invoiced:
+                _gate = self._invoice_readiness_check(user_id, data_user_id, invoice_data, rows)
+                if _gate is not None:
+                    return _gate
+
+            # Decide between generating/sending invoice via WhatsApp/Telegram vs email
+            if intent_result.get("operation") == "SEND_EMAIL":
+                poc_email = (rows[0].get("poc_email") or "").strip()
+                if not poc_email:
+                    row_ids = [r["id"] for r in rows if r.get("id")]
+                    response = (
+                        f"I have the invoice for {display_client} ({month_display}) ready, "
+                        f"but there's no contact email on file.\n\n"
+                        f"Please provide the client's email so I can send it:\n"
+                        f"Example: client@agency.com"
+                    )
+                    self._arm_poc_email_v2(user_id, display_client, {
+                        "client_name": display_client,
+                        "month": month_display,
+                        "year": year_val,
+                        "row_ids": row_ids,
+                        "poc_name": _inv_poc_name,
+                        "invoicer_name": _inv_invoicer_name,
+                    })
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+                # PDF delivery + email confirmation prompt are owned by
+                # main.py.process_and_send_invoice — don't duplicate them here.
+                invoice_data["send_to_client"] = True
+                trigger_invoice = True
+                response = _ack
+                self._store_conversation(user_id, message, response)
+                return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
+
+            # (All mandatory-field checks now run in _invoice_readiness_check above.)
+
+            # Default path: generate PDF, deliver via WhatsApp/Telegram, then
+            # automatically offer to email it to the POC. Two cases:
+            #   1) POC email on file  → ask "Should I email it to X?"
+            #   2) No POC email       → ask the user to provide one
+            trigger_invoice = True
+            self._save_last_intent(user_id, operation="generate_invoice",
+                                   client_name=display_client, month=month_display,
+                                   year=year_val, entity="invoice")
+
+            _row_ids = [r["id"] for r in rows if r.get("id")]
+            _auto_poc_email = ""
+            for _r in rows:
+                _e = (str(_r.get("poc_email") or "")).strip()
+                if _e and self._is_valid_email(_e):
+                    _auto_poc_email = _e
+                    break
+
+            if _auto_poc_email:
+                # PDF delivery + email confirmation prompt are owned by
+                # main.py.process_and_send_invoice — don't duplicate them here.
+                # Just acknowledge so the user has feedback while it's prepared.
+                response = _ack
+            else:
+                self._arm_poc_email_v2(user_id, display_client, {
+                    "client_name": display_client,
+                    "month": month_display,
+                    "year": year_val,
+                    "row_ids": _row_ids,
+                    "poc_name": _inv_poc_name,
+                    "invoicer_name": _inv_invoicer_name,
+                })
+                response = (
+                    f"{_ack}\n\n"
+                    f"Heads up: no client email on file. Reply with one (e.g. client@agency.com) "
+                    f"and I'll send it over, or 'skip' to keep it offline."
+                )
+
+            self._store_conversation(user_id, message, response)
+            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
+
     def process_request(self, user_id: str, message: str) -> Dict:
         """Public entry point — wraps _process_request_impl with WP-0
         telemetry (turn_ms, llm_calls, fallback rate) so every later work
@@ -4447,6 +5075,8 @@ class IntentService:
                                     intent_service=self,
                                     user_id=user_id,
                                     conversation_history=conversation_history,
+                                    data_user_id=data_user_id,
+                                    user_mem=user_mem,
                                 )
                                 if _result is not None:
                                     return _result
@@ -4540,18 +5170,7 @@ class IntentService:
                 is_add_job = any(t in msg_stripped.lower() for t in add_job_triggers)
                 is_plus = msg_stripped.startswith("+") and len(msg_stripped) > 1
                 if is_add_job or is_plus:
-                    # Check for compound intent using AI (e.g. "add a job and send invoice")
-                    first_part_msg = message
-                    if len(message.split()) >= 6:  # only check if message is long enough
-                        intents = self.gemini.decompose_compound_intent(message)
-                        if intents and len(intents) > 1:
-                            first_part_msg = intents[0]
-                            suggested_next = intents[1]
-                            logger.info(f"[COMPOUND] AI split: first='{first_part_msg}', next='{suggested_next}'")
-                            self.memory.update_user_memory(user_id, {
-                                "suggested_next_action": suggested_next,
-                            })
-                    return self._start_smart_capture(user_id, first_part_msg)
+                    return self._handle_create_entry_request(user_id, message)
 
             # NOTE: awaiting_job_input's legacy dispatch (including its
             # is_new_query_not_response escape-hatch LLM call) removed
@@ -5030,557 +5649,11 @@ class IntentService:
                 has_invoice_word = False
                 logger.info(f"[INVOICE_CHECK] v2 enabled, skipping legacy check")
             if is_retrieval:
-                # For definite invoice actions (generate/create/send + invoice word), skip
-                # parse_user_intent — it sometimes returns GEMINI_ERROR and silently falls
-                # through to the query pipeline. Instead extract client and month with a
-                # lightweight regex pass, then fall back to parse_user_intent only when that
-                # doesn't yield a client name.
-                if _invoice_action_definite:
-                    _direct_month = None
-                    _direct_client = None
-                    _direct_bill = None
-                    _month_names = {
-                        "january": 1, "february": 2, "march": 3, "april": 4,
-                        "may": 5, "june": 6, "july": 7, "august": 8,
-                        "september": 9, "october": 10, "november": 11, "december": 12,
-                        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
-                        "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-                    }
-                    for _mn, _mv in _month_names.items():
-                        if f" {_mn}" in msg_lower or msg_lower.endswith(_mn):
-                            _direct_month = _mv
-                            break
-                    # Detect a bill/invoice number BEFORE client extraction so
-                    # "Generate invoice for bill INV-001" doesn't treat "bill INV-001"
-                    # as a client name. Matches: "bill INV-001", "bill no INV-001",
-                    # "invoice INV-001", "#INV-001", or a bare "INV-001"/"INV001".
-                    _bill_match = re.search(
-                        r'\b(?:bill|invoice|inv)\s*(?:no\.?|number|#)?\s*#?\s*'
-                        r'((?:inv[-\s]?)?\d{1,6}|[a-z]{2,5}[-]\d{1,6})\b',
-                        msg_lower, re.IGNORECASE,
-                    )
-                    # Only treat as a bill number if it actually looks like one
-                    # (contains a digit and isn't just a plain month/year).
-                    if _bill_match:
-                        _cand = _bill_match.group(1).strip()
-                        if re.search(r'\d', _cand) and not re.fullmatch(r'20\d{2}', _cand):
-                            # Normalise to the stored format, e.g. "inv-001" → "INV-001".
-                            _norm = _cand.upper().replace(" ", "")
-                            if _norm.isdigit():
-                                _direct_bill = _norm
-                            else:
-                                _direct_bill = re.sub(r'^INV-?', 'INV-', _norm)
-                            logger.info(f"[INVOICE_SHORTCUT] Detected bill number: {_direct_bill!r}")
-                    # Extract client name only when no bill number was found.
-                    if not _direct_bill:
-                        _for_match = re.search(
-                            r'\bfor\s+(.+?)(?:\s+for\s+|\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*|$)',
-                            msg_lower, re.IGNORECASE
-                        )
-                        if _for_match:
-                            _cand_client = _for_match.group(1).strip().title()
-                            # Pronouns ("them", "it", "this client") are NOT client
-                            # names — leave _direct_client null so downstream context
-                            # resolution maps them to the remembered client.
-                            _PRONOUNS = {
-                                "them", "it", "this", "that", "this client", "that client",
-                                "the client", "him", "her", "they", "this one", "that one",
-                            }
-                            if _cand_client.lower() not in _PRONOUNS:
-                                _direct_client = _cand_client
-                    if _direct_bill:
-                        intent_result = {
-                            "operation": "ACTION_TRIGGER",
-                            "parameters": {"client_name": None, "month": None, "year": None, "bill_number": _direct_bill},
-                            "confidence": 0.97,
-                            "clarification_question": None,
-                        }
-                    elif _direct_client:
-                        intent_result = {
-                            "operation": "ACTION_TRIGGER",
-                            "parameters": {"client_name": _direct_client, "month": None, "year": None},
-                            "confidence": 0.95,
-                            "clarification_question": None,
-                        }
-                        # Override month from regex
-                        if _direct_month:
-                            intent_result["parameters"]["month"] = list(_month_names.keys())[
-                                list(_month_names.values()).index(_direct_month)].capitalize()
-                        logger.info(f"[INVOICE_SHORTCUT] Direct extract: client={_direct_client!r} month={_direct_month}")
-                    else:
-                        schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
-                        intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
-                else:
-                    schema_info = logic.get_schema_for_intent() if hasattr(logic, "get_schema_for_intent") else None
-                    intent_result = self.gemini.parse_user_intent(message, conversation_history=conversation_history, schema_info=schema_info)
-                # Resilience: a definite invoice action ("generate invoice") must NOT fall
-                # through to the query pipeline just because the intent LLM flaked
-                # (GEMINI_ERROR). Synthesise a minimal ACTION_TRIGGER so downstream context
-                # resolution (last_saved_job / uscf_context / last_intent) still runs.
-                if _invoice_action_definite and intent_result.get("operation") == "GEMINI_ERROR":
-                    logger.info("[INVOICE_SHORTCUT] parse_user_intent flaked on a definite invoice action — synthesising minimal intent for context resolution")
-                    intent_result = {
-                        "operation": "ACTION_TRIGGER",
-                        "parameters": {
-                            "client_name": _direct_client,
-                            "month": (number_to_month_name(_direct_month) if _direct_month else None),
-                            "year": None,
-                            "bill_number": _direct_bill,
-                        },
-                        "confidence": 0.8,
-                        "clarification_question": None,
-                    }
-                params = intent_result.get("parameters", {})
-                # If the intent parser asked for clarification, surface that question
-                # — but only when the existing flow can't handle it. Missing month or
-                # client name is handled downstream with richer context (lists available
-                # months, fuzzy-matches typos like 'Samsun' → 'Samsung'), so we let
-                # those fall through. Other clarifications (e.g. "which items to keep")
-                # are surfaced directly to avoid silent invoice regeneration.
-                if intent_result.get("operation") == "NEED_CLARIFICATION":
-                    clar_q = (intent_result.get("clarification_question") or "").strip()
-                    clar_q_lower = clar_q.lower()
-                    _handled_downstream = any(
-                        kw in clar_q_lower for kw in ("month", "year", "client name", "client?", "which client")
-                    )
-                    if clar_q and not _handled_downstream:
-                        self._store_conversation(user_id, message, clar_q)
-                        return {"operation": "ACTION_TRIGGER", "response": clar_q, "trigger_invoice": False, "invoice_data": {}}
-
-                # AI confirmed the request is out of scope (not query/invoice/action) →
-                # use the feature-aware AI responder so we can humorously confirm what
-                # Remyndly does/doesn't do, grounded in REMYNDLY_FEATURES.md.
-                if intent_result.get("operation") == "UNKNOWN":
-                    response = self.gemini.answer_feature_question(message, conversation_history=conversation_history)
-                    if not response or not response.strip():
-                        response = unsupported_feature_phrase(message[:80])
-                    self._store_conversation(user_id, message, response)
-                    return {"operation": "unsupported", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-                if intent_result.get("operation") != "GEMINI_ERROR":
-                    # Email-specific override: if user explicitly mentions sending over email,
-                    # treat this as SEND_EMAIL instead of a generic ACTION_TRIGGER.
-                    email_keywords = [
-                        "email invoice",
-                        "send invoice over email",
-                        "send over email",
-                        "mail the invoice",
-                        "mail invoice",
-                        "share invoice via email",
-                        "forward invoice",
-                        "send invoice to client",
-                        "send it to client",
-                        "send to client",
-                        "send invoice to the client",
-                    ]
-                    if "email" in msg_lower or "e-mail" in msg_lower or "to client" in msg_lower or any(k in msg_lower for k in email_keywords):
-                        intent_result["operation"] = "SEND_EMAIL"
-
-                    client_name = (params.get("client_name") or "").strip()
-                    # A pronoun is never a real client — clear it so context
-                    # resolution (last_saved_job / uscf_context / last_intent) maps
-                    # "them"/"it"/"this client" to the remembered client.
-                    if client_name.lower() in (
-                        "them", "it", "this", "that", "this client", "that client",
-                        "the client", "him", "her", "they", "this one", "that one",
-                    ):
-                        client_name = ""
-                    month_name = (params.get("month") or "").strip()
-                    year_val = params.get("year")
-                    bill_number = (params.get("bill_number") or "").strip() or None
-                    month_num = month_name_to_number(month_name) if month_name else None
-
-                    # Validate: if user's message contains an explicit year but LLM
-                    # missed it, extract it directly from the message text.
-                    if not year_val:
-                        _year_match = re.search(r'\b(20\d{2})\b', message)
-                        if _year_match:
-                            year_val = int(_year_match.group(1))
-                            logger.info(f"[INVOICE] LLM missed year; extracted {year_val} from message text")
-                    if not year_val:
-                        from datetime import datetime
-                        year_val = datetime.now().year
-
-                    # Fuzzy-match client_name against actual DB clients
-                    # (Gemini often normalizes names, e.g. "Bridgestone12" → "Bridgestone")
-                    if client_name:
-                        safe_uid = data_user_id.replace("'", "''")
-                        clients_sql = (
-                            f"SELECT DISTINCT client_name, brand_name, production_house FROM public.job_entries "
-                            f"WHERE user_id = '{safe_uid}' AND (\"isDeleted\" IS NOT TRUE)"
-                        )
-                        clients_result = self.supabase.execute_sql(clients_sql)
-                        if clients_result.get("ok"):
-                            db_clients = []
-                            for r in (clients_result.get("rows") or []):
-                                for _f in ("client_name", "brand_name", "production_house"):
-                                    _v = (r.get(_f) or "").strip() if r.get(_f) else ""
-                                    if _v and _v.lower() != "none":
-                                        db_clients.append(_v)
-                            # De-duplicate (case-insensitive)
-                            _seen = set()
-                            db_clients = [x for x in db_clients if not (x.lower() in _seen or _seen.add(x.lower()))]
-                            client_name = self._fuzzy_match_client_name(client_name, db_clients, message)
-
-                    # Resolve "this job" / missing client from context
-                    if not client_name and not bill_number:
-                        # 1. Check last_saved_job (from smart capture)
-                        last_job = user_mem.get("last_saved_job")
-                        if last_job:
-                            client_name = last_job.get("db_client_name") or last_job.get("brand_name", "")
-                            if not month_name and last_job.get("job_date"):
-                                try:
-                                    job_month = int(last_job["job_date"][5:7])
-                                    month_name = number_to_month_name(job_month)
-                                    month_num = job_month
-                                    year_val = int(last_job["job_date"][:4])
-                                except (ValueError, IndexError):
-                                    pass
-                            logger.info(f"[INVOICE] Resolved from last_saved_job: client={client_name}, month={month_name}")
-
-                    if not client_name and not bill_number:
-                        # 2. Check uscf_context (from recent query/update results)
-                        ctx = user_mem.get("uscf_context", {})
-                        last_row = ctx.get("last_row_data", {})
-                        if last_row.get("client_name"):
-                            client_name = last_row["client_name"]
-                            logger.info(f"[INVOICE] Resolved from uscf_context: client={client_name}")
-                        # 3. Check last_intent (from recent interactions)
-                        elif user_mem.get("last_intent", {}).get("client_name"):
-                            client_name = user_mem["last_intent"]["client_name"]
-                            logger.info(f"[INVOICE] Resolved from last_intent: client={client_name}")
-
-                    if not client_name and not bill_number:
-                        # Save intent so follow-up can provide client name
-                        op_name = intent_result.get("operation", "invoice")
-                        self._save_last_intent(user_id, operation=op_name, entity="invoice",
-                                               month=month_name, year=year_val,
-                                               pending_clarification="client_name")
-                        response = "I need a client name or bill number to find an invoice. For example: 'Send invoice for Garnier for March'."
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-                    # Validate client exists in DB before proceeding
-                    # Search client_name, brand_name, and production_house (legacy)
-                    if client_name and not bill_number:
-                        safe_uid = data_user_id.replace("'", "''")
-                        safe_cn = client_name.replace("'", "''")
-                        check_sql = (
-                            f"SELECT DISTINCT client_name, brand_name, production_house FROM public.job_entries "
-                            f"WHERE user_id = '{safe_uid}' "
-                            f"AND (client_name ILIKE '%{safe_cn}%' OR brand_name ILIKE '%{safe_cn}%' OR production_house ILIKE '%{safe_cn}%') "
-                            f"AND (\"isDeleted\" IS NOT TRUE)"
-                        )
-                        check_result = self.supabase.execute_sql(check_sql)
-                        # Fallback if production_house column doesn't exist
-                        if not check_result.get("ok") and "production_house" in str(check_result.get("error", "")):
-                            check_sql = (
-                                f"SELECT DISTINCT client_name, brand_name FROM public.job_entries "
-                                f"WHERE user_id = '{safe_uid}' AND (client_name ILIKE '%{safe_cn}%' OR brand_name ILIKE '%{safe_cn}%') "
-                                f"AND (\"isDeleted\" IS NOT TRUE)"
-                            )
-                            check_result = self.supabase.execute_sql(check_sql)
-                        # A row matches if ANY of client_name / brand_name / production_house
-                        # is non-null — jobs added with only a brand (e.g. '+Sunrich ...')
-                        # have client_name=NULL but brand_name='Sunrich' and must still be found.
-                        matching_clients = []
-                        for r in (check_result.get("rows") or []):
-                            for _f in ("client_name", "brand_name", "production_house"):
-                                _v = (r.get(_f) or "").strip() if r.get(_f) else ""
-                                if _v:
-                                    matching_clients.append(_v)
-                                    break
-                        if not matching_clients:
-                            # No matching client — show available clients and stop
-                            all_clients_sql = (
-                                f"SELECT DISTINCT client_name FROM public.job_entries "
-                                f"WHERE user_id = '{safe_uid}' AND client_name IS NOT NULL "
-                                f"AND (\"isDeleted\" IS NOT TRUE) ORDER BY client_name"
-                            )
-                            all_result = self.supabase.execute_sql(all_clients_sql)
-                            available = [r["client_name"] for r in (all_result.get("rows") or []) if r.get("client_name")]
-                            if available:
-                                client_list = "\n".join(f"• {c}" for c in available)
-                                response = (
-                                    f"I couldn't find a client named \"{client_name}\". "
-                                    f"Please check for typos.\n\n"
-                                    f"Your clients on record:\n{client_list}\n\n"
-                                    f"Try again with the correct name."
-                                )
-                            else:
-                                response = f"I couldn't find a client named \"{client_name}\" and you don't have any job entries yet."
-                            logger.info(f"[INVOICE] Client '{client_name}' not found for user {user_id}")
-                            self._store_conversation(user_id, message, response)
-                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-                    if client_name and not month_num and not bill_number:
-                        # Check if user explicitly asked to send via email
-                        send_email = "email" in msg_lower or "e-mail" in msg_lower
-                        months_result = self.supabase.get_available_months_for_client(client_name, user_id=data_user_id)
-                        _months = months_result.get("months") or []
-                        # If only one month exists for this client, auto-proceed without prompting.
-                        if months_result.get("ok") and len(_months) == 1:
-                            try:
-                                month_num = int(_months[0]["month"])
-                                year_val = int(_months[0]["year"])
-                                month_name = number_to_month_name(month_num)
-                                logger.info(f"[INVOICE] Single available month — auto-using {month_name} {year_val} for {client_name}")
-                            except (KeyError, ValueError, TypeError) as _e:
-                                logger.warning(f"[INVOICE] Could not auto-pick single month: {_e}")
-                        if months_result.get("ok") and _months and not month_num:
-                            month_options = "\n".join(f"• {m['label']}" for m in _months)
-                            response = f"I see you want an invoice for {client_name}. Which month?\n\n{month_options}\n\nReply with the month, e.g. 'Send invoice for {client_name} for March 2025'."
-                        elif not month_num:
-                            response = f"I see you want an invoice for {client_name}. Which month? For example: 'Send invoice for {client_name} for March'."
-                        # Only prompt the user when month is still unresolved.
-                        # If we auto-picked the single available month above, fall through
-                        # to invoice generation.
-                        if not month_num:
-                            # Save intent so follow-up "March" reconstructs to full query
-                            # Do NOT store inferred year — only store confirmed fields.
-                            op_name = "SEND_EMAIL" if send_email else intent_result.get("operation", "invoice")
-                            self._save_last_intent(user_id, operation=op_name, client_name=client_name,
-                                                   entity="invoice",
-                                                   pending_clarification="month")
-                            # Arm FlowMachine so the next reply routes to the invoice month handler
-                            self._arm_invoice_month_v2(user_id, client_name, send_email)
-                            self._store_conversation(user_id, message, response)
-                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-                    if bill_number:
-                        result = self.supabase.fetch_job_entries_for_invoice(client_name="", bill_no=bill_number, user_id=data_user_id)
-                    else:
-                        result = self.supabase.fetch_job_entries_for_invoice(client_name=client_name, month=month_num, year=year_val, user_id=data_user_id)
-                    if not result.get("ok"):
-                        response = result.get("error", "I couldn't fetch invoice data. Please try again.")
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                    rows = result.get("rows") or []
-                    if not rows:
-                        # Check what months actually have data for this client
-                        hint = ""
-                        if client_name:
-                            safe_client = client_name.replace("'", "''")
-                            safe_uid = data_user_id.replace("'", "''")
-                            avail_sql = (
-                                f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
-                                f"FROM public.job_entries "
-                                f"WHERE user_id = '{safe_uid}' "
-                                f"AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
-                                f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
-                            )
-                            avail = self.supabase.execute_sql(avail_sql)
-                            if not avail.get("ok") and "production_house" in str(avail.get("error", "")):
-                                avail_sql = (
-                                    f"SELECT DISTINCT TO_CHAR(job_date, 'Month YYYY') AS period "
-                                    f"FROM public.job_entries "
-                                    f"WHERE user_id = '{safe_uid}' AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%') "
-                                    f"AND job_date IS NOT NULL AND (\"isDeleted\" IS NOT TRUE) ORDER BY period"
-                                )
-                                avail = self.supabase.execute_sql(avail_sql)
-                            periods = [r["period"].strip() for r in (avail.get("rows") or [])]
-                            if periods:
-                                hint = f"\n\nI do have records for {client_name} in: {', '.join(periods)}."
-                            else:
-                                # No DATED records — but the client may still have rows
-                                # with a NULL job_date. Don't claim "no records at all"
-                                # without checking the actual row count first.
-                                _cnt_sql = (
-                                    f"SELECT COUNT(*) AS cnt FROM public.job_entries "
-                                    f"WHERE user_id = '{safe_uid}' "
-                                    f"AND (client_name ILIKE '%{safe_client}%' OR brand_name ILIKE '%{safe_client}%' OR production_house ILIKE '%{safe_client}%') "
-                                    f"AND (\"isDeleted\" IS NOT TRUE)"
-                                )
-                                _cnt_res = self.supabase.execute_sql(_cnt_sql)
-                                _cnt = 0
-                                if _cnt_res.get("ok") and _cnt_res.get("rows"):
-                                    try:
-                                        _cnt = int(_cnt_res["rows"][0].get("cnt", 0))
-                                    except (ValueError, TypeError):
-                                        _cnt = 0
-                                if _cnt > 0:
-                                    hint = (
-                                        f"\n\nI have {_cnt} record{'s' if _cnt != 1 else ''} for {client_name}, "
-                                        f"but none have a job date set, so I can't filter by month. "
-                                        f"Try 'Generate invoice for {client_name}' without a month."
-                                    )
-                                else:
-                                    hint = f"\n\nI don't have any records for {client_name} at all."
-                        if client_name and month_num:
-                            response = f"I found no jobs for {client_name} in {month_name or month_num} {year_val}.{hint}"
-                        else:
-                            response = f"I don't see any records for {client_name or 'that bill'} in my records.{hint}"
-                        # If exactly one alternate month is available, persist it so a short
-                        # confirmation ("okay generate", "yes", "sure") can act on it.
-                        if client_name and periods and len(periods) == 1:
-                            try:
-                                _alt = periods[0]  # e.g. "February  2026"
-                                _parts = _alt.split()
-                                _alt_month = _parts[0] if _parts else None
-                                _alt_year = int(_parts[-1]) if _parts and _parts[-1].isdigit() else year_val
-                                if _alt_month:
-                                    # Preserve a SEND intent from the original message ("Send
-                                    # ... invoice to client") -- without this, Case 0 of
-                                    # _reconstruct_message always rewrote the later "Yes" into
-                                    # "Generate invoice for X" regardless of whether the user
-                                    # originally asked to send it, so the generate-only flow
-                                    # never armed awaiting_send_confirmation and a subsequent
-                                    # "No" (meant to decline the send) had nothing to decline
-                                    # and fell through to the generic query pipeline.
-                                    _alt_op = "SEND_EMAIL" if ("send" in msg_lower or "email" in msg_lower or "e-mail" in msg_lower) else "generate_invoice"
-                                    self._save_last_intent(
-                                        user_id,
-                                        operation=_alt_op,
-                                        client_name=client_name,
-                                        month=_alt_month,
-                                        year=_alt_year,
-                                        entity="invoice",
-                                        pending_clarification="confirm_alt_month",
-                                    )
-                            except Exception as _e:
-                                logger.warning(f"[INVOICE] Could not persist alt-month context: {_e}")
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-                    display_client = self._invoice_display_name(client_name, rows)
-                    month_display = month_name
-                    if not month_display and rows and rows[0].get("job_date"):
-                        jd = str(rows[0]["job_date"])[:10]
-                        if len(jd) >= 7:
-                            try:
-                                month_display = number_to_month_name(int(jd[5:7]))
-                            except (ValueError, TypeError):
-                                pass
-                    if not month_display:
-                        month_display = "Request"
-
-                    # An invoice was already issued for these rows if any carries an
-                    # invoice_date. Then "send me the invoice" is a RETRIEVAL — give
-                    # the existing one back instead of re-running the new-invoice
-                    # prompts, and word the acknowledgement as a lookup, not a build.
-                    _already_invoiced = self._rows_already_invoiced(rows)
-                    _ack = (
-                        f"Pulling up your invoice for {display_client} ({month_display})…"
-                        if _already_invoiced else
-                        f"On it — putting your invoice for {display_client} ({month_display}) together…"
-                    )
-                    # Explicit "rebuild it" intent — only then bypass the cached PDF.
-                    _force_regen = self._is_regenerate_request(message)
-                    invoice_data = {
-                        "client_name": display_client,
-                        "month": month_display,
-                        "bill_number": bill_number,
-                        "year": year_val,
-                        "force_regenerate": _force_regen,
-                    }
-                    if _force_regen:
-                        logger.info(f"[INVOICE] User requested regeneration — bypassing cache for {display_client} {month_display} {year_val}")
-
-                    # Extract poc_name and invoicer_name for email personalization
-                    _inv_poc_name = ""
-                    for _r in rows:
-                        _v = (_r.get("poc_name") or "").strip()
-                        if _v and _v.lower() != "none":
-                            _inv_poc_name = _v
-                            break
-                    _inv_invoicer_name = ""
-                    try:
-                        _prof = self.supabase.get_user_profile(data_user_id)
-                        if _prof.get("ok") and _prof.get("data"):
-                            _prefs = _prof["data"].get("preferences") or {}
-                            if isinstance(_prefs, str):
-                                import json as _json
-                                try:
-                                    _prefs = _json.loads(_prefs)
-                                except Exception:
-                                    _prefs = {}
-                            _inv_invoicer_name = _prefs.get("invoice_name") or _prof["data"].get("name") or ""
-                    except Exception:
-                        pass
-
-                    # ── Mandatory-fields gate (new invoices only) ──────────────
-                    # Prompt for any missing required field (client billing, POC
-                    # name, job description, bank account, business address) and
-                    # only proceed once the invoice is complete. Runs for BOTH the
-                    # generate and the email paths; each field's handler re-enters
-                    # the flow so the prompts chain until everything is present.
-                    # Skipped when the invoice already exists — a retrieval should
-                    # just hand back what was issued, not re-prompt for fields.
-                    if not _already_invoiced:
-                        _gate = self._invoice_readiness_check(user_id, data_user_id, invoice_data, rows)
-                        if _gate is not None:
-                            return _gate
-
-                    # Decide between generating/sending invoice via WhatsApp/Telegram vs email
-                    if intent_result.get("operation") == "SEND_EMAIL":
-                        poc_email = (rows[0].get("poc_email") or "").strip()
-                        if not poc_email:
-                            row_ids = [r["id"] for r in rows if r.get("id")]
-                            response = (
-                                f"I have the invoice for {display_client} ({month_display}) ready, "
-                                f"but there's no contact email on file.\n\n"
-                                f"Please provide the client's email so I can send it:\n"
-                                f"Example: client@agency.com"
-                            )
-                            self._arm_poc_email_v2(user_id, display_client, {
-                                "client_name": display_client,
-                                "month": month_display,
-                                "year": year_val,
-                                "row_ids": row_ids,
-                                "poc_name": _inv_poc_name,
-                                "invoicer_name": _inv_invoicer_name,
-                            })
-                            self._store_conversation(user_id, message, response)
-                            return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": False, "invoice_data": {}}
-
-                        # PDF delivery + email confirmation prompt are owned by
-                        # main.py.process_and_send_invoice — don't duplicate them here.
-                        invoice_data["send_to_client"] = True
-                        trigger_invoice = True
-                        response = _ack
-                        self._store_conversation(user_id, message, response)
-                        return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
-
-                    # (All mandatory-field checks now run in _invoice_readiness_check above.)
-
-                    # Default path: generate PDF, deliver via WhatsApp/Telegram, then
-                    # automatically offer to email it to the POC. Two cases:
-                    #   1) POC email on file  → ask "Should I email it to X?"
-                    #   2) No POC email       → ask the user to provide one
-                    trigger_invoice = True
-                    self._save_last_intent(user_id, operation="generate_invoice",
-                                           client_name=display_client, month=month_display,
-                                           year=year_val, entity="invoice")
-
-                    _row_ids = [r["id"] for r in rows if r.get("id")]
-                    _auto_poc_email = ""
-                    for _r in rows:
-                        _e = (str(_r.get("poc_email") or "")).strip()
-                        if _e and self._is_valid_email(_e):
-                            _auto_poc_email = _e
-                            break
-
-                    if _auto_poc_email:
-                        # PDF delivery + email confirmation prompt are owned by
-                        # main.py.process_and_send_invoice — don't duplicate them here.
-                        # Just acknowledge so the user has feedback while it's prepared.
-                        response = _ack
-                    else:
-                        self._arm_poc_email_v2(user_id, display_client, {
-                            "client_name": display_client,
-                            "month": month_display,
-                            "year": year_val,
-                            "row_ids": _row_ids,
-                            "poc_name": _inv_poc_name,
-                            "invoicer_name": _inv_invoicer_name,
-                        })
-                        response = (
-                            f"{_ack}\n\n"
-                            f"Heads up: no client email on file. Reply with one (e.g. client@agency.com) "
-                            f"and I'll send it over, or 'skip' to keep it offline."
-                        )
-
-                    self._store_conversation(user_id, message, response)
-                    return {"operation": "ACTION_TRIGGER", "response": response, "trigger_invoice": trigger_invoice, "invoice_data": invoice_data}
+                return self._handle_invoice_retrieval_request(
+                    user_id, message, msg_lower, data_user_id,
+                    conversation_history, user_mem, logic,
+                    _invoice_action_definite,
+                )
 
             # 3. Overdue / payment followup (keyword-based; data from Supabase)
             overdue_keywords = ["overdue", "due date", "passed due", "past due", "late payment", "follow up", "followup", "payment followup", "payment status"]
@@ -7446,10 +7519,17 @@ class IntentService:
             if raw_name.lower() in ("skip", "n/a"):
                 name = "User"
                 self.supabase.upsert_user_profile(user_id, platform, {"name": name})
+                # P2-4 (PLAN_OF_ACTION.md): this used to say "What's your
+                # company or industry?" — but with `name` now set, the NEXT
+                # message is evaluated against Step 2 (email), not industry.
+                # An honest answer to the old prompt ("Video Production")
+                # got rejected with "I need a valid email address" — the
+                # prompt text and the actual next validation step had
+                # drifted apart. Matches Step 1's own non-skip prompt text
+                # (below) so both paths ask for the same next thing.
                 response = (
                     "No problem! I'll refer to you as 'User' for now — you can change it anytime.\n\n"
-                    "What's your company or industry? (e.g. Video Production, Photography, Design)\n"
-                    "Type 'skip' to skip this too."
+                    "What's your email address? (used on invoices and for communication)"
                 )
                 self._store_conversation(user_id, message, response)
                 return {"operation": "onboarding_name", "response": response, "trigger_invoice": False, "invoice_data": {}}

@@ -340,6 +340,58 @@ def _seed_once(uid: str) -> str:
     return uid
 
 
+# P2-4 (PLAN_OF_ACTION.md): the shared fixture ALWAYS has bank details,
+# ALWAYS gives Nike full billing/POC-email/April+March data — because other
+# rows in the same sheet need exactly that to test the "everything present"
+# path. A handful of DIFFERENT rows assert the opposite precondition ("no
+# bank saved", "no billing info", "no poc_email", "no March data") in their
+# own annotation. Run against the shared fixture, those preconditions never
+# actually hold, so the row measures the fixture instead of the bot — the
+# same class of problem the fixture itself exists to prevent for everything
+# else. Each variant starts from the same base fixture, then removes
+# exactly the one thing its precondition is about.
+SEED_VARIANTS = ("no_bank", "no_billing_nike", "no_poc_email_nike", "no_march_nike", "empty")
+
+
+def seed_variant(variant: str, user_id: Optional[str] = None) -> str:
+    """Seed the base fixture, then knock out exactly one precondition.
+
+    Not merged into seed() itself — the base fixture is the ONE dataset
+    every other scenario in the sheet was written against; a variant must
+    never become the default by accident.
+    """
+    if variant not in SEED_VARIANTS:
+        raise ValueError(f"unknown seed variant {variant!r} — expected one of {SEED_VARIANTS}")
+    uid = seed(user_id)
+    conn = _connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if variant == "no_bank":
+                    cur.execute("DELETE FROM public.user_config WHERE user_id = %s", (uid,))
+                elif variant == "no_billing_nike":
+                    cur.execute(
+                        "UPDATE public.job_entries SET client_billing_details = NULL "
+                        "WHERE user_id = %s AND client_name = 'Nike'", (uid,),
+                    )
+                elif variant == "no_poc_email_nike":
+                    cur.execute(
+                        "UPDATE public.job_entries SET poc_email = NULL "
+                        "WHERE user_id = %s AND client_name = 'Nike'", (uid,),
+                    )
+                elif variant == "no_march_nike":
+                    cur.execute(
+                        "DELETE FROM public.job_entries WHERE user_id = %s "
+                        "AND client_name = 'Nike' AND job_date >= %s AND job_date < %s",
+                        (uid, f"{_APRIL_YEAR}-03-01", f"{_APRIL_YEAR}-04-01"),
+                    )
+                elif variant == "empty":
+                    cur.execute("DELETE FROM public.job_entries WHERE user_id = %s", (uid,))
+    finally:
+        conn.close()
+    return uid
+
+
 def teardown(user_id: str) -> None:
     """Delete every row belonging to a synthetic e2e user.
 

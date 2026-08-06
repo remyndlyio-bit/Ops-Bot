@@ -61,6 +61,23 @@ class TestStateHints:
         has to say so rather than count it as a product defect."""
         assert _row("Generate invoice for Nike April (no bank saved)").has_data_precondition
 
+    @pytest.mark.parametrize("message,variant", [
+        ("Generate invoice for Nike April (no bank saved)", "no_bank"),
+        ("Generate invoice for Nike April (no billing info)", "no_billing_nike"),
+        ("Send invoice for Nike (no poc_email)", "no_poc_email_nike"),
+        ("Generate invoice for Nike March (no March data)", "no_march_nike"),
+        ("Show my jobs (0 records)", "empty"),
+    ])
+    def test_precondition_rows_map_to_the_matching_seed_variant(self, message, variant):
+        """P2-4 (PLAN_OF_ACTION.md): each precondition hint must route to
+        the seed.py variant that actually removes the one thing it's
+        about — mapping the wrong one (or none) means the row runs
+        against a fixture that still contradicts its own premise."""
+        assert _row(message).precondition_variant == variant
+
+    def test_ordinary_row_has_no_precondition_variant(self):
+        assert _row("Show my jobs").precondition_variant is None
+
 
 class TestManualRows:
     """The defect that cost a whole run: rows that are ONLY an annotation

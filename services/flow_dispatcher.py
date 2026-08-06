@@ -34,6 +34,8 @@ def dispatch_idle(
     intent_service,
     user_id: str,
     conversation_history,
+    data_user_id: str,
+    user_mem: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     """
     Returns a process_request-shaped dict if v2 handled the message,
@@ -44,9 +46,20 @@ def dispatch_idle(
       - FEATURE_QUESTION
       - UNKNOWN (low-confidence or off-topic)
 
-    Shadow-only (returns None, legacy handles):
-      - READ_QUERY, READ_AGGREGATE
+    Owned (P0-1, PLAN_OF_ACTION.md — Week 2): a classified WRITE_* verdict
+    used to be dropped here entirely — logged for telemetry, then always
+    handed to legacy, which itself only ran its OWN write-trigger checks
+    when v2 was OFF. Net effect: with FLOW_MACHINE_V2 on, "add a job",
+    "mark this paid", and "generate invoice for Nike" had no owner at all
+    until legacy's un-gated fallback checks (delete only) or the query
+    pipeline caught them by accident. Each branch below reuses the exact
+    same handler the legacy trigger calls, so behaviour is identical to
+    the legacy path minus the keyword-list detection step:
       - WRITE_CREATE, WRITE_UPDATE, WRITE_DELETE, WRITE_INVOICE
+
+    Shadow-only (returns None, legacy handles):
+      - READ_QUERY, READ_AGGREGATE — the query pipeline stays legacy-owned
+        for now; only write intents move in this pass.
     """
     intent = verdict["intent"]
     raw = verdict["raw_message"]
@@ -119,11 +132,59 @@ def dispatch_idle(
             "invoice_data": {},
         }
 
+    # ── WRITE_CREATE ───────────────────────────────────────────────────
+    if intent == "WRITE_CREATE":
+        note_route("v2_write_create")
+        try:
+            return intent_service._handle_create_entry_request(user_id, raw)
+        except Exception as e:
+            logger.warning(f"[V2_DISPATCH] WRITE_CREATE error, falling back to legacy: {e}")
+            return SHADOW_ONLY
+
+    # ── WRITE_UPDATE ───────────────────────────────────────────────────
+    if intent == "WRITE_UPDATE":
+        note_route("v2_write_update")
+        try:
+            result = intent_service._handle_modify_intent(user_id, raw, user_mem)
+            # _handle_modify_intent returns None when it found no field/value
+            # to act on AND no row in context — the same "nothing to do here,
+            # let the real pipeline have a go" contract every other SHADOW_ONLY
+            # branch already relies on.
+            return result if result is not None else SHADOW_ONLY
+        except Exception as e:
+            logger.warning(f"[V2_DISPATCH] WRITE_UPDATE error, falling back to legacy: {e}")
+            return SHADOW_ONLY
+
+    # ── WRITE_DELETE ───────────────────────────────────────────────────
+    if intent == "WRITE_DELETE":
+        note_route("v2_write_delete")
+        try:
+            return intent_service._handle_soft_delete(
+                user_id, raw, data_user_id, conversation_history,
+            )
+        except Exception as e:
+            logger.warning(f"[V2_DISPATCH] WRITE_DELETE error, falling back to legacy: {e}")
+            return SHADOW_ONLY
+
+    # ── WRITE_INVOICE ──────────────────────────────────────────────────
+    if intent == "WRITE_INVOICE":
+        note_route("v2_write_invoice")
+        try:
+            return intent_service._handle_invoice_retrieval_request(
+                user_id, raw, raw.strip().lower(), data_user_id,
+                conversation_history, user_mem, None,
+                True,  # the classifier's own WRITE_INVOICE verdict IS the confidence check
+            )
+        except Exception as e:
+            logger.warning(f"[V2_DISPATCH] WRITE_INVOICE error, falling back to legacy: {e}")
+            return SHADOW_ONLY
+
     # ── Everything else — shadow only ─────────────────────────────────
-    # Read/write intents still flow through the existing cascade. We've
-    # already logged the verdict in classifier.classify, so we get a
-    # production telemetry trail of "what would v2 have decided" vs
-    # "what the legacy code actually did", without behaviour change.
+    # READ_QUERY / READ_AGGREGATE still flow through the existing query
+    # pipeline cascade. We've already logged the verdict in
+    # classifier.classify, so we get a production telemetry trail of "what
+    # would v2 have decided" vs "what the legacy code actually did",
+    # without behaviour change for reads.
     return SHADOW_ONLY
 
 

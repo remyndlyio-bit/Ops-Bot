@@ -21,7 +21,20 @@ import re
 from typing import Iterable, Tuple
 
 # ── message-side detectors (closed, schema-bounded vocabularies) ─────────────
-_UNPAID = r"unpaid|not\s+paid|pending|outstanding|overdue|owe[sd]?|owing|baki|baaki"
+# "baki"/"baaki" (Hindi "remaining/pending") is genuinely ambiguous in this
+# domain — "payment baki" means UNPAID, but "invoice bhejna baki" means NOT
+# YET SENT, a different column entirely (bill_sent, not paid). The negative
+# lookbehind excludes "baki"/"baaki" here specifically when it directly
+# follows "bhejna"/"bhejni" (send-pending), so that reading is left for
+# _DISPATCH_RE below instead of also (wrongly) demanding a `paid` predicate
+# in the SQL (P1-3, PLAN_OF_ACTION.md — "Kiska invoice bhejna baki hai" was
+# rejected by this guard even after the router grew a bill_sent route,
+# because bare "baki" satisfied _STATUS_RE and the route's SQL has no
+# `paid` filter to reflect it).
+_UNPAID = (
+    r"unpaid|not\s+paid|pending|outstanding|overdue|owe[sd]?|owing|"
+    r"(?<!bhejna\s)(?<!bhejni\s)baki|(?<!bhejna\s)(?<!bhejni\s)baaki"
+)
 _STATUS_RE = re.compile(rf"\b(?:{_UNPAID}|paid|cleared|received|settled)\b")
 
 # bill_sent (invoice dispatch) status — a SEPARATE qualifier from paid/unpaid.
@@ -43,7 +56,8 @@ _INVOICE_NOUN = r"invoic(?:e|es|ed|ing)|bill(?:s|ed)?"
 _DISPATCH_VERB = (
     r"sent|raised|gone\s+out|yet\s+to|"
     r"pending\s+to\s+(?:be\s+)?(?:send|sent|go|raise|raised)|"
-    r"still\s+(?:need|have)\s+to|haven'?t|not\s+(?:yet\s+)?(?:sent|raised|gone|out)"
+    r"still\s+(?:need|have)\s+to|haven'?t|not\s+(?:yet\s+)?(?:sent|raised|gone|out)|"
+    r"bhejna\s+baki|bhejni\s+baki"
 )
 _DISPATCH_RE = re.compile(
     rf"\b(?:{_INVOICE_NOUN})\b.{{0,25}}\b(?:{_DISPATCH_VERB})\b"
@@ -107,6 +121,16 @@ _NOT_CLIENT = {
     "largest", "top", "bottom", "best", "worst", "single", "typical", "big",
     "small", "high", "low", "least", "profitable", "good", "bad", "next",
     "previous", "upcoming", "one", "average",
+    # Hindi/Hinglish question words and pronouns — without these, "kiska
+    # invoice bhejna baki hai" (whose invoice is pending to send) mis-fires
+    # _NOUN_RE into treating "kiska" itself as the client name, since it
+    # sits directly before "invoice" the same way a real client name would
+    # (P1-3, PLAN_OF_ACTION.md).
+    "kiska", "kiski", "kiske", "kaunsa", "kaunsi", "kaunse", "kitna", "kitni",
+    "kitne", "kya", "koi", "kaun", "kab", "kahan", "kaise", "kyun", "kyu",
+    # English question words — the same mis-fire in English: "which invoices
+    # are not sent yet" captured "which" as the client name before this.
+    "which", "what", "who", "whose",
 }
 
 

@@ -41,6 +41,33 @@ from tests.e2e import matrix as matrix_mod
 from tests.e2e import seed as seed_mod
 
 
+def _run_config_fingerprint() -> list:
+    """(label, value) pairs identifying which dispatch config this run
+    actually exercised. P2-4 (PLAN_OF_ACTION.md): a prior run's 62.5%
+    baseline was graded with FLOW_MACHINE_V2 unset (legacy path) while
+    production's default was assumed to be v2-on — nothing in the workbook
+    itself recorded which one actually ran, so the number was silently
+    ambiguous. Every run's workbook now carries this fingerprint."""
+    v2_raw = (os.getenv("FLOW_MACHINE_V2", "") or "").strip()
+    v2_display = v2_raw if v2_raw else "(unset — legacy dispatch for every user)"
+    try:
+        import subprocess
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        ).stdout.strip() or "(unknown)"
+    except Exception:
+        commit = "(unknown)"
+    return [
+        ("Run timestamp", datetime.now().isoformat(timespec="seconds")),
+        ("FLOW_MACHINE_V2", v2_display),
+        ("STRICT_PLAN_VALIDATION", os.getenv("STRICT_PLAN_VALIDATION", "1 (default)")),
+        ("KNOWLEDGE_BOOK", os.getenv("KNOWLEDGE_BOOK", "0 (default, off)")),
+        ("Git commit", commit),
+    ]
+
+
 def _reset_memory(svc, uid: str) -> None:
     try:
         from utils.memory_service import _DEFAULT
@@ -79,6 +106,13 @@ def run(rows, service, gemini, sink=None):
     current_category = None
     uid = None
     seeded_uid = None
+    # P2-4 (PLAN_OF_ACTION.md): precondition rows ("no bank saved", "no
+    # billing info", ...) get their OWN dedicated fixture user instead of
+    # the shared one — the shared fixture always has bank details and full
+    # Nike billing/POC data by design, so those preconditions could never
+    # actually hold against it. Tracked separately from seeded_uid so a
+    # variant seed never clobbers the shared fixture other rows depend on.
+    variant_uids: list = []
 
     for row in rows:
         if row.category != current_category:
@@ -111,6 +145,14 @@ def run(rows, service, gemini, sink=None):
             for msg in row.setup_messages:
                 service.process_request(uid, msg)
                 setup_trace.append(msg)
+        elif row.precondition_variant:
+            # A fresh variant user EVERY time (not reused across rows) — a
+            # row asserting "no bank saved" must never accidentally run
+            # against another precondition row's already-mutated fixture.
+            variant_uid = seed_mod.seed_variant(row.precondition_variant)
+            variant_uids.append(variant_uid)
+            uid = variant_uid
+            _reset_memory(service, uid)
         else:
             if seeded_uid is None:
                 seeded_uid = seed_mod.seed()
@@ -136,9 +178,16 @@ def run(rows, service, gemini, sink=None):
                                 row.expected, actual)
             verdict, reason = g["verdict"], g["reason"]
 
-        if row.has_data_precondition:
+        if row.has_data_precondition and not row.precondition_variant:
+            # P2-4 (PLAN_OF_ACTION.md): every _PRECONDITION_VARIANTS hint
+            # now gets a dedicated fixture (see seed_mod.seed_variant) where
+            # the precondition genuinely holds — this hedge only fires for
+            # a hint that somehow matched has_data_precondition without a
+            # mapped variant, which shouldn't happen but must not silently
+            # mis-blame the bot if it ever does.
             reason = (reason + "  [row asserts a data precondition "
-                      f"({row.annotation}) the fixture may not meet]").strip()
+                      f"({row.annotation}) with no seed variant mapped for "
+                      "it — the fixture may not meet it]").strip()
 
         results.append({
             "num": row.num, "category": row.category, "scenario": row.scenario,
@@ -153,6 +202,13 @@ def run(rows, service, gemini, sink=None):
 
     if seeded_uid:
         seed_mod.teardown(seeded_uid)
+    for variant_uid in variant_uids:
+        try:
+            seed_mod.teardown(variant_uid)
+        except Exception as e:
+            # A failed teardown on one variant user must not lose the
+            # results of an otherwise-complete run.
+            print(f"  ! teardown failed for {variant_uid}: {e}", flush=True)
     return results
 
 
@@ -194,9 +250,24 @@ def write_workbook(results, path: str) -> None:
 
     # Per-category summary — mirrors the Summary sheet in the source workbook.
     ws2 = wb.create_sheet("Summary")
+
+    # Run-config fingerprint (P2-4, PLAN_OF_ACTION.md): every prior run's
+    # score was silently ambiguous about which dispatch brain it measured —
+    # the 62.5% baseline turned out to have been graded with FLOW_MACHINE_V2
+    # OFF (legacy path), not the production-default config, and nothing in
+    # the workbook itself would have told you that. Recorded here so a
+    # score can never again be read without knowing what it actually ran
+    # against.
+    _fingerprint = _run_config_fingerprint()
+    for label, value in _fingerprint:
+        ws2.append([label, value])
+    for row in ws2.iter_rows(min_row=1, max_row=len(_fingerprint)):
+        row[0].font = Font(bold=True)
+    ws2.append([])
+
     ws2.append(["Category", "Total", "Pass", "Fail", "Unclear", "Manual",
                 "Pass % (of graded)"])
-    for c in ws2[1]:
+    for c in ws2[ws2.max_row]:
         c.font = Font(bold=True)
 
     def _counts(rs):
@@ -273,6 +344,16 @@ def main() -> int:
     ap.add_argument("--limit", type=int, help="first N rows — harness smoke test")
     ap.add_argument("--out", default=None, help="output .xlsx path")
     args = ap.parse_args()
+
+    # P2-4 (PLAN_OF_ACTION.md): announce the config every run measures, up
+    # front — not just in the workbook after the fact. A run against the
+    # wrong FLOW_MACHINE_V2 state is easy to kick off by accident (it's an
+    # ambient env var, not a flag this script takes) and expensive to
+    # discover after 148 rows of paid AI calls.
+    print("Run config:")
+    for label, value in _run_config_fingerprint():
+        print(f"  {label}: {value}")
+    print()
 
     from tests.conftest import has_real_ai_key, has_real_db_url
     if not has_real_ai_key():

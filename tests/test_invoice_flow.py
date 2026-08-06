@@ -987,3 +987,233 @@ class TestInvoiceTriggerSynonyms:
     ])
     def test_not_a_regenerate(self, msg):
         assert self._regen(msg) is False
+
+
+class TestInvoiceRetrievalBillNumberExtraction:
+    """P1-2 (PLAN_OF_ACTION.md): a bill/invoice number must be detected
+    BEFORE client-name extraction runs, and that detection must catch a
+    bare alphanumeric code with no separator ("bill BB2"), not just a
+    dash-separated one ("INV-001") — the dash-only regex was the actual
+    bug behind "Generate invoice for bill BB2" answering "I couldn't find
+    a client named 'Bill Bb2'"."""
+
+    def _svc(self):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.supabase = MagicMock()
+        svc.memory = MagicMock()
+        svc.gemini = MagicMock()
+        svc.memory.get_user_memory.return_value = {}
+        svc.supabase.fetch_job_entries_for_invoice.return_value = {"ok": False, "error": "no bill found"}
+        return svc
+
+    def test_bare_alphanumeric_bill_code_routes_to_bill_lookup(self):
+        svc = self._svc()
+        svc._handle_invoice_retrieval_request(
+            "u1", "Generate invoice for bill BB2", "generate invoice for bill bb2",
+            "u1", [], {}, None, True,
+        )
+        svc.supabase.fetch_job_entries_for_invoice.assert_called_once()
+        kwargs = svc.supabase.fetch_job_entries_for_invoice.call_args.kwargs
+        assert kwargs.get("bill_no") == "BB2"
+        assert kwargs.get("client_name") == "", (
+            "a detected bill number must suppress client-name lookup entirely"
+        )
+        # No client-search SQL should have run either — the bill path never
+        # touches execute_sql for a client match.
+        svc.supabase.execute_sql.assert_not_called()
+
+    def test_dash_separated_bill_number_still_works(self):
+        svc = self._svc()
+        svc._handle_invoice_retrieval_request(
+            "u1", "Send invoice INV-001", "send invoice inv-001",
+            "u1", [], {}, None, True,
+        )
+        kwargs = svc.supabase.fetch_job_entries_for_invoice.call_args.kwargs
+        assert kwargs.get("bill_no") == "INV-001"
+
+    def test_bill_number_with_explicit_label_still_works(self):
+        svc = self._svc()
+        svc._handle_invoice_retrieval_request(
+            "u1", "Generate invoice for bill no. 42", "generate invoice for bill no. 42",
+            "u1", [], {}, None, True,
+        )
+        kwargs = svc.supabase.fetch_job_entries_for_invoice.call_args.kwargs
+        assert kwargs.get("bill_no") == "42"
+
+    def test_plain_client_name_request_unaffected(self):
+        """Guard against over-broadening: an ordinary client-name request
+        must still resolve as a client, not get misread as a bill code."""
+        svc = self._svc()
+        svc.supabase.execute_sql.return_value = {
+            "ok": True,
+            "rows": [{"client_name": "Nike", "brand_name": None, "production_house": None}],
+        }
+        svc._handle_invoice_retrieval_request(
+            "u1", "Generate invoice for Nike April", "generate invoice for nike april",
+            "u1", [], {}, None, True,
+        )
+        kwargs = svc.supabase.fetch_job_entries_for_invoice.call_args.kwargs
+        assert kwargs.get("bill_no") is None
+        assert kwargs.get("client_name") == "Nike"
+
+
+class TestInvoiceRegenerateReusesLastMonth:
+    """P1-2 (PLAN_OF_ACTION.md): "Regenerate invoice for Nike" with no month
+    named must reuse the month from the last invoice generated for that SAME
+    client instead of asking "which month?" — the user said "regenerate",
+    not "generate a new one for a month I haven't told you about"."""
+
+    def _svc(self, last_intent=None):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.supabase = MagicMock()
+        svc.memory = MagicMock()
+        svc.gemini = MagicMock()
+        svc.memory.get_user_memory.return_value = {"last_intent": last_intent} if last_intent else {}
+        svc.supabase.execute_sql.return_value = {
+            "ok": True,
+            "rows": [{"client_name": "Nike", "brand_name": None, "production_house": None}],
+        }
+        svc.supabase.fetch_job_entries_for_invoice.return_value = {
+            "ok": True,
+            "rows": [{"id": "r1", "client_name": "Nike", "job_date": "2026-04-10",
+                      "client_billing_details": "Nike India", "poc_name": "Karan",
+                      "poc_email": "karan@nike.test", "job_description_details": "shoot",
+                      "fees": 25000, "invoice_date": None}],
+        }
+        svc.supabase.get_user_bank_details.return_value = {"ok": True, "data": {"bank_account_number": "1"}}
+        svc.supabase.get_user_profile.return_value = {
+            "ok": True, "data": {"name": "D", "preferences": {"invoice_address": "12 MG Road"}},
+        }
+        return svc
+
+    def test_reuses_last_months_client_and_month_without_prompting(self):
+        svc = self._svc(last_intent={
+            "entity": "invoice", "client_name": "Nike", "month": "April", "year": 2026,
+            "operation": "generate_invoice",
+        })
+        user_mem = svc.memory.get_user_memory("u1")
+        result = svc._handle_invoice_retrieval_request(
+            "u1", "Regenerate invoice for Nike", "regenerate invoice for nike",
+            "u1", [], user_mem, None, True,
+        )
+        svc.supabase.get_available_months_for_client.assert_not_called()
+        assert "which month" not in (result.get("response") or "").lower()
+        kwargs = svc.supabase.fetch_job_entries_for_invoice.call_args.kwargs
+        assert kwargs.get("month") == 4
+        assert kwargs.get("year") == 2026
+        assert result.get("invoice_data", {}).get("force_regenerate") is True
+
+    def test_different_client_in_last_intent_does_not_leak_month(self):
+        """Regenerate for Nike must not reuse a month cached for a
+        DIFFERENT client's last invoice."""
+        svc = self._svc(last_intent={
+            "entity": "invoice", "client_name": "Bridgestone", "month": "March", "year": 2026,
+            "operation": "generate_invoice",
+        })
+        user_mem = svc.memory.get_user_memory("u1")
+        svc._handle_invoice_retrieval_request(
+            "u1", "Regenerate invoice for Nike", "regenerate invoice for nike",
+            "u1", [], user_mem, None, True,
+        )
+        svc.supabase.get_available_months_for_client.assert_called_once()
+
+    def test_plain_generate_does_not_reuse_last_month(self):
+        """Only an explicit regenerate phrase triggers the reuse — a plain
+        'generate invoice for Nike' with a fresh last_intent must still ask
+        which month rather than silently assuming the last one."""
+        svc = self._svc(last_intent={
+            "entity": "invoice", "client_name": "Nike", "month": "April", "year": 2026,
+            "operation": "generate_invoice",
+        })
+        user_mem = svc.memory.get_user_memory("u1")
+        svc._handle_invoice_retrieval_request(
+            "u1", "Generate invoice for Nike", "generate invoice for nike",
+            "u1", [], user_mem, None, True,
+        )
+        svc.supabase.get_available_months_for_client.assert_called_once()
+
+
+class TestInvoicePronounAndBareRequestContextResolution:
+    """P1-2 (PLAN_OF_ACTION.md): "Generate invoice for them" / a bare
+    "Generate invoice" (after discussing a client) must resolve the client
+    from context (last_saved_job -> uscf_context -> last_intent) instead of
+    asking for a name — or worse, treating a pronoun/the verb phrase itself
+    as a literal client name. This logic already existed in the legacy
+    cascade; P0-1's dispatch_idle wiring is what makes it reachable at all
+    when FLOW_MACHINE_V2 is on (previously WRITE_INVOICE was shadow-only,
+    so v2 never reached ANY of this — that's the "I couldn't find a client
+    named 'Generate Invoice'" class of bug)."""
+
+    def _svc(self):
+        from unittest.mock import patch, MagicMock
+        with patch("services.intent_service.GeminiService"), patch("services.intent_service.ResendEmailService"), \
+             patch("services.intent_service.SupabaseService"), patch("services.intent_service.MemoryService"):
+            from services.intent_service import IntentService
+            svc = IntentService()
+        svc.supabase = MagicMock()
+        svc.memory = MagicMock()
+        svc.gemini = MagicMock()
+        svc.supabase.execute_sql.return_value = {
+            "ok": True,
+            "rows": [{"client_name": "Nike", "brand_name": None, "production_house": None}],
+        }
+        svc.supabase.get_available_months_for_client.return_value = {"ok": False}
+        return svc
+
+    def test_pronoun_resolves_from_uscf_context(self):
+        svc = self._svc()
+        # A naive LLM extraction that (wrongly) captured the pronoun itself —
+        # the pronoun-stripping check must clear this before the context
+        # ladder ever runs.
+        svc.gemini.parse_user_intent.return_value = {
+            "operation": "ACTION_TRIGGER",
+            "parameters": {"client_name": "them", "month": None, "year": None},
+            "confidence": 0.7, "clarification_question": None,
+        }
+        user_mem = {"uscf_context": {"last_row_data": {"client_name": "Nike"}}}
+        result = svc._handle_invoice_retrieval_request(
+            "u1", "Generate invoice for them", "generate invoice for them",
+            "u1", [], user_mem, None, False,  # not a "definite" regex match -> LLM path
+        )
+        response = (result.get("response") or "").lower()
+        assert "i need a client name" not in response
+        assert "couldn't find a client" not in response
+        assert "nike" in response, f"expected the resolved client (Nike) to appear: {response!r}"
+
+    def test_bare_generate_invoice_resolves_from_last_saved_job(self):
+        svc = self._svc()
+        svc.gemini.parse_user_intent.return_value = {
+            "operation": "ACTION_TRIGGER",
+            "parameters": {"client_name": None, "month": None, "year": None},
+            "confidence": 0.6, "clarification_question": None,
+        }
+        user_mem = {"last_saved_job": {"db_client_name": "Nike", "job_date": "2026-04-10"}}
+        result = svc._handle_invoice_retrieval_request(
+            "u1", "Generate invoice", "generate invoice",
+            "u1", [], user_mem, None, False,
+        )
+        assert "i need a client name" not in (result.get("response") or "").lower()
+
+    def test_no_context_at_all_still_asks_for_a_client(self):
+        """Guard: when there's genuinely nothing to resolve from, the bot
+        must still ask rather than guessing — this isn't about silencing
+        the clarification, only about not misfiring when context exists."""
+        svc = self._svc()
+        svc.gemini.parse_user_intent.return_value = {
+            "operation": "ACTION_TRIGGER",
+            "parameters": {"client_name": None, "month": None, "year": None},
+            "confidence": 0.5, "clarification_question": None,
+        }
+        result = svc._handle_invoice_retrieval_request(
+            "u1", "Generate invoice", "generate invoice",
+            "u1", [], {}, None, False,
+        )
+        assert "client name or bill number" in (result.get("response") or "").lower()

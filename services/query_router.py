@@ -48,6 +48,13 @@ NOT_DELETED = '("isDeleted" IS NOT TRUE)'
 CLIENT_EXPR = "COALESCE(NULLIF(client_name,''),NULLIF(brand_name,''),NULLIF(production_house,''))"
 PAID_TRUE = "LOWER(COALESCE(paid,'')) IN ('true','t','yes','1','paid')"
 PAID_FALSE = "(paid IS NULL OR TRIM(COALESCE(paid,''))='' OR LOWER(paid) NOT IN ('true','t','yes','1','paid'))"
+# Mirrors services/columns/bill_sent.py's truthy-token set — bill_sent is a
+# SEPARATE signal from paid (has the invoice been emailed at all, not
+# whether it's been paid for).
+BILL_NOT_SENT = (
+    "(bill_sent IS NULL OR TRIM(COALESCE(bill_sent,''))='' "
+    "OR LOWER(bill_sent) NOT IN ('true','t','yes','1','sent','y','paid'))"
+)
 
 
 def _base(uid: str) -> str:
@@ -150,7 +157,17 @@ def _route_client_owes(msg: str, uid: str) -> Optional[RoutedQuery]:
 
 def _route_clients_paid_list(msg: str, uid: str) -> Optional[RoutedQuery]:
     """"Which clients have paid / haven't paid?" — list names, not a count."""
-    if not re.search(rf'\b(which|what|list|show|name)\b.{{0,30}}\b{_CLIENT_WORD}\b', msg):
+    # "kiska"/"kaunsa" (Hindi "whose"/"which") already MEANS "which client" on
+    # their own — unlike "which/what/list/show", which need an explicit noun
+    # ("which clients") to mean that. Checked as an independent alternative
+    # rather than folded into the same ".{0,30}\bCLIENT_WORD\b" requirement,
+    # so "Kiska payment baki hai" (no "client(s)" word anywhere in it) still
+    # qualifies (P1-3, PLAN_OF_ACTION.md).
+    _has_trigger = (
+        re.search(rf'\b(which|what|list|show|name)\b.{{0,30}}\b{_CLIENT_WORD}\b', msg)
+        or re.search(r'\b(kiska|kaunsa)\b', msg)
+    )
+    if not _has_trigger:
         return None
     if re.search(rf'\b{_COUNT_WORD}\b', msg):
         return None
@@ -324,9 +341,31 @@ def _route_last_job(msg: str, uid: str) -> Optional[RoutedQuery]:
     return RoutedQuery("last_job", sql, ROWS)
 
 
+def _route_bill_not_sent(msg: str, uid: str) -> Optional[RoutedQuery]:
+    """"Invoices not sent yet" / "kiska invoice bhejna baki hai" — jobs
+    where the invoice has never been emailed. Distinct from PAID_FALSE
+    (payment status): this is bill_sent, "has it even gone out yet".
+
+    P1-3 (PLAN_OF_ACTION.md): no route covered this shape at all before —
+    in ANY language — so it always fell to the LLM planner. Added
+    alongside the Hindi/Hinglish coverage pass because the matrix's own
+    example of this shape ("Kiska invoice bhejna baki hai") is Hinglish,
+    but the gap itself was language-independent.
+    """
+    if not re.search(
+        r'\binvoice[s]?\b.{0,20}\b(not\s+(?:yet\s+)?sent|yet\s+to\s+(?:be\s+)?send|pending\s+to\s+send)\b'
+        r'|\b(?:invoice[s]?\s+)?(?:bhejna|bhejni)\s+baki\b'
+        r'|\bbaki\b.{0,25}\binvoice\b',
+        msg,
+    ):
+        return None
+    sql = f"{_base(uid)} AND {BILL_NOT_SENT} ORDER BY job_date DESC NULLS LAST LIMIT 25"
+    return RoutedQuery("bill_not_sent_list", sql, ROWS)
+
+
 def _route_unpaid_list(msg: str, uid: str) -> Optional[RoutedQuery]:
     """"Unpaid / pending / outstanding" — list of unpaid jobs."""
-    if not re.search(r'\b(unpaid|pending|not\s+paid|outstanding)\b', msg):
+    if not re.search(r'\b(unpaid|pending|not\s+paid|outstanding|baki|baaki)\b', msg):
         return None
     # "which clients unpaid" is handled by the client-list route earlier.
     sql = f"{_base(uid)} AND {PAID_FALSE} ORDER BY job_date DESC NULLS LAST LIMIT 25"
@@ -360,6 +399,7 @@ _ROUTES: List[Callable[[str, str], Optional[RoutedQuery]]] = [
     _route_hinglish_earnings,
     _route_date_lookup,
     _route_last_job,
+    _route_bill_not_sent,
     _route_unpaid_list,
     _route_list_jobs,
 ]

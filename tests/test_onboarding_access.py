@@ -229,16 +229,37 @@ class TestNewUserRouting:
 
 
 class TestOnboardingNameStep:
-    def test_skip_uses_generic_name_and_jumps_to_industry(self):
-        """Skipping the name step goes straight to the industry prompt (email
-        is skipped too when there's no name to personalise it with) — confirmed
-        by reading _continue_onboarding directly, not assumed."""
+    def test_skip_uses_generic_name_and_asks_for_email(self):
+        """P2-4 (PLAN_OF_ACTION.md): this used to assert the skip-response
+        asked for "industry" — matching the PROMPT TEXT, which was itself
+        the bug. Once `name` is set, _continue_onboarding's own step order
+        (`elif not prefs.get("invoice_email")`) evaluates the NEXT message
+        as Step 2 (email), not industry — so the old prompt text was lying
+        about what came next, and an honest industry answer ("Video
+        Production") got rejected with "I need a valid email address."
+        Confirmed live (see the paired end-to-end test below) before fixing
+        the response text to match reality instead of the other way round."""
         svc = _make_svc()
         svc.supabase.upsert_user_profile.return_value = {"ok": True}
         result = svc._continue_onboarding("u1", "skip", {"platform": "whatsapp"})
         assert result["operation"] == "onboarding_name"
         assert svc.supabase.upsert_user_profile.call_args.args[2]["name"] == "User"
-        assert "industry" in result["response"].lower()
+        assert "email" in result["response"].lower()
+        assert "industry" not in result["response"].lower()
+
+    def test_skip_then_email_step_actually_accepts_an_email(self):
+        """End-to-end regression for the bug above: after skipping the name,
+        the VERY NEXT message must be validated as an email (matching the
+        prompt), not silently expect an industry the validator would then
+        reject."""
+        svc = _make_svc()
+        svc.supabase.upsert_user_profile.return_value = {"ok": True}
+        svc._continue_onboarding("u1", "skip", {"platform": "whatsapp"})
+        profile_after_skip = {"platform": "whatsapp", "name": "User"}
+        result = svc._continue_onboarding("u1", "darshit@example.com", profile_after_skip)
+        assert result["operation"] == "onboarding_email"
+        saved_prefs = svc.supabase.upsert_user_profile.call_args.args[2]["preferences"]
+        assert saved_prefs["invoice_email"] == "darshit@example.com"
 
     @pytest.mark.parametrize("msg", ["hi", "hello", "hey", "good morning", "namaste"])
     def test_greeting_only_does_not_get_saved_as_name(self, msg):

@@ -96,6 +96,64 @@ class TestRouteSelection:
         assert r and r.name == "hinglish_earnings" and r.render == AGGREGATE
 
 
+# ── P1-3 (PLAN_OF_ACTION.md): Hindi/Hinglish route coverage ──────────────────
+
+class TestBillNotSentRoute:
+    """"Invoices not sent yet" — a bill_sent gap that had NO route at all in
+    ANY language before this (row 23 in the Intent Test Matrix: 'Kiska
+    invoice bhejna baki hai')."""
+
+    def test_hindi_bhejna_baki(self):
+        r = _route("Kiska invoice bhejna baki hai")
+        assert r and r.name == "bill_not_sent_list" and r.render == ROWS
+        assert "bill_sent" in r.sql.lower()
+
+    def test_hindi_bhejni_baki(self):
+        r = _route("Kiska invoice bhejni baki hai")
+        assert r and r.name == "bill_not_sent_list"
+
+    def test_english_not_sent_yet(self):
+        r = _route("Which invoices are not sent yet")
+        assert r and r.name == "bill_not_sent_list"
+
+    def test_english_pending_to_send(self):
+        r = _route("show invoices pending to send")
+        assert r and r.name == "bill_not_sent_list"
+
+    @pytest.mark.parametrize("msg", [
+        "Nike ka invoice bhejo April ka",       # WRITE — send it now, not a query
+        "generate invoice for nike",            # WRITE
+        "Nike ka April ka invoice bhejo",       # WRITE
+        "invoice banao Nike ke liye",           # WRITE
+        "send invoice for garnier",             # WRITE
+        "Kiska payment baki hai",               # a DIFFERENT qualifier (paid, not bill_sent)
+    ])
+    def test_does_not_hijack_write_or_payment_phrasings(self, msg):
+        r = _route(msg)
+        assert r is None or r.name != "bill_not_sent_list"
+
+
+class TestClientsPaidListHindiTrigger:
+    """"Kiska payment baki hai" (whose payment is pending) — "kiska" alone
+    already means "which client" in Hindi, unlike "which/what/list/show",
+    which need an explicit noun ("which clients") to mean that."""
+
+    def test_kiska_payment_baki(self):
+        r = _route("Kiska payment baki hai")
+        assert r and r.name == "clients_paid_list" and r.render == CLIENT_LIST
+        assert r.meta.get("status") == "unpaid"
+
+    def test_kaunsa_client_paid(self):
+        r = _route("Kaunsa client ne paid kiya")
+        assert r and r.name == "clients_paid_list"
+
+    def test_kiska_without_payment_vocab_does_not_match(self):
+        """"kiska" alone unlocks the gate, but wants_paid/wants_unpaid must
+        still gate the actual route — no payment vocabulary means no match."""
+        r = _route("Kiska number hai yeh")
+        assert r is None or r.name != "clients_paid_list"
+
+
 # ── The headline bug class: "highest paying job" must sort by FEES ──────────
 
 class TestTopBottomJob:
