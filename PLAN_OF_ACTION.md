@@ -460,6 +460,32 @@ more embedded early-return branches (invoice confirmation, ledger, follow-up,
 value-fork, clarification, disambiguation) to preserve exactly. Budget it as its own
 week (Week 5) rather than folding it into Week 4's list above.
 
+**Week 5.3 result (2026-08-06)**: ran the full 148-row matrix against a real DB and a
+real AI_KEY with `FLOW_MACHINE_V2=true` (`tests/e2e/matrix_results_20260806_1717.xlsx`).
+131/144 rows graded before the AI_KEY died mid-run (see the urgent note below) —
+77 PASS / 38 FAIL / 13 UNCLEAR (the last 13, all in Edge Cases/Cross-Platform, are
+UNCLEAR only because the key died, not a real result). 60.2% of graded, roughly in
+line with the original 62.5% baseline — and notably, CLAUDE.md's documented Bug 1
+(planner refuses aggregate queries) and Bug 2 (unfiltered COUNT crash) both now PASS.
+
+Read every one of the 38 FAIL reasons by hand: all trace to pre-existing product/LLM
+behavior gaps that exist independent of dispatch routing — missed client filters,
+context-continuity misses on follow-ups, invoice-flow parsing, bill_sent-vs-paid
+semantic confusion. None show the failure mode Week 5.2's own docstring flagged as a
+risk (dispatch_idle skipping a steps-0-3 pre-check legacy would have caught). Since
+Week 5.1 extracted the query logic verbatim, that's expected — Week 5 never claimed to
+fix query bugs, only to route them through v2 correctly. **Read-query parity via
+dispatch_idle is confirmed**; P3-3 (dead-code deletion) is next in line, pending the
+canary-window discipline it deserves given today's mixed run quality.
+
+**Urgent, unrelated finding**: the AI_KEY in this shell died mid-run
+(`401 - {"error":{"message":"User not found.","code":401}}` from OpenRouter) and is
+still dead as of a fresh direct check right after. If this is the same key configured
+in Railway's production environment, the live bot cannot make ANY AI call right now —
+classification, query planning, invoice generation, all of it. Needs a new OpenRouter
+key rotated into Railway's `AI_KEY` immediately; this is separate from and more urgent
+than anything else in this document.
+
 ---
 
 ## 7. Expected Outcomes
