@@ -11,6 +11,10 @@ process_request cascade) so each WRITE_* branch's wiring is verified in
 isolation: the right handler gets called with the right arguments, a
 None/falling-through result correctly shadows to legacy, and an exception
 never propagates out of the dispatcher.
+
+Week 5.2 (PLAN_OF_ACTION.md §9) adds the same coverage for READ_QUERY /
+READ_AGGREGATE, which used to be unconditionally shadow-only here — see
+TestReadQueryDispatch below.
 """
 
 import os
@@ -214,22 +218,51 @@ class TestWriteInvoiceDispatch:
         assert result is SHADOW_ONLY
 
 
-class TestReadIntentsStillShadowOnly:
-    """Sanity check that this pass didn't accidentally widen scope — reads
-    stay legacy-owned for now."""
+class TestReadQueryDispatch:
+    """Week 5.2 (PLAN_OF_ACTION.md §9): READ_QUERY/READ_AGGREGATE used to be
+    unconditionally shadow-only here — the query pipeline stayed 100%
+    legacy even with v2 "on" globally. Now routes to the method Week 5.1
+    extracted from legacy's own step 4, the same shape as every WRITE_*
+    branch above."""
 
-    def test_read_query_still_shadow_only(self):
+    def test_read_query_routes_to_handle_query_request(self):
         svc = _make_svc()
+        svc._handle_query_request = MagicMock(
+            return_value={"operation": "query", "response": "5 jobs found",
+                          "trigger_invoice": False, "invoice_data": {}}
+        )
+        history = [{"role": "user", "content": "hi"}]
+        user_mem = {"uscf_context": {"last_row_data": {"id": "a"}}}
         verdict = _verdict("READ_QUERY", "show my jobs")
+        result = dispatch_idle(
+            verdict, intent_service=svc, user_id="u1",
+            conversation_history=history, data_user_id="linked_u1", user_mem=user_mem,
+        )
+        svc._handle_query_request.assert_called_once_with(
+            "u1", "show my jobs", "linked_u1", history, user_mem,
+        )
+        assert result["response"] == "5 jobs found"
+
+    def test_read_aggregate_routes_to_handle_query_request(self):
+        svc = _make_svc()
+        svc._handle_query_request = MagicMock(
+            return_value={"operation": "query", "response": "₹5,00,000",
+                          "trigger_invoice": False, "invoice_data": {}}
+        )
+        verdict = _verdict("READ_AGGREGATE", "total earnings this month")
         result = dispatch_idle(
             verdict, intent_service=svc, user_id="u1",
             conversation_history=[], data_user_id="u1", user_mem={},
         )
-        assert result is SHADOW_ONLY
+        svc._handle_query_request.assert_called_once_with(
+            "u1", "total earnings this month", "u1", [], {},
+        )
+        assert result["response"] == "₹5,00,000"
 
-    def test_read_aggregate_still_shadow_only(self):
+    def test_exception_falls_through_to_shadow(self):
         svc = _make_svc()
-        verdict = _verdict("READ_AGGREGATE", "total earnings this month")
+        svc._handle_query_request = MagicMock(side_effect=Exception("boom"))
+        verdict = _verdict("READ_QUERY", "show my jobs")
         result = dispatch_idle(
             verdict, intent_service=svc, user_id="u1",
             conversation_history=[], data_user_id="u1", user_mem={},
@@ -328,3 +361,19 @@ class TestEndToEndProcessRequestReachesWriteHandlers:
             result = svc.process_request("u1", "Generate invoice for Nike April")
         svc._handle_invoice_retrieval_request.assert_called_once()
         assert result["trigger_invoice"] is True
+
+    def test_read_query_verdict_reaches_handle_query_request(self):
+        """Week 5.2: proves the full chain reaches the extracted query
+        method under v2 at idle, not just that dispatch_idle's own branch
+        is individually correct."""
+        svc = self._svc()
+        svc._handle_query_request = MagicMock(return_value={
+            "operation": "query", "response": "5 jobs found",
+            "trigger_invoice": False, "invoice_data": {},
+        })
+        verdict = _verdict("READ_QUERY", "show my jobs")
+        with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=True), \
+             self._verdict_patch(verdict):
+            result = svc.process_request("u1", "show my jobs")
+        svc._handle_query_request.assert_called_once()
+        assert result["response"] == "5 jobs found"

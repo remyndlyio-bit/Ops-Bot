@@ -7,9 +7,9 @@ Routes a classified Verdict to either:
   (b) the legacy code path, by returning SHADOW_ONLY. The caller then
       proceeds with the existing cascade as if v2 wasn't there.
 
-Session 1 only owns the LEAF paths. Read/write intents fall through to the
-legacy pipeline so we get verdict telemetry without changing destructive
-behaviour. Sessions 2 and 3 will progressively take over those branches.
+Session 1 only owned the LEAF paths; write intents were wired up in Week 2
+(P0-1) and reads in Week 5.2 (PLAN_OF_ACTION.md §9) — see dispatch_idle's
+own docstring below for the current ownership map.
 """
 
 from __future__ import annotations
@@ -57,9 +57,16 @@ def dispatch_idle(
     the legacy path minus the keyword-list detection step:
       - WRITE_CREATE, WRITE_UPDATE, WRITE_DELETE, WRITE_INVOICE
 
-    Shadow-only (returns None, legacy handles):
-      - READ_QUERY, READ_AGGREGATE — the query pipeline stays legacy-owned
-        for now; only write intents move in this pass.
+    Owned (Week 5.2, PLAN_OF_ACTION.md §9): READ_QUERY / READ_AGGREGATE used
+    to be unconditionally shadow-only — the query pipeline (the single
+    most-used path in the app) stayed 100% legacy even with v2 "on"
+    globally. Week 5.1 extracted that pipeline into
+    intent_service._handle_query_request; this branch calls the exact same
+    method the legacy cascade's own step 4 calls, so behaviour is identical
+    minus the steps-0-3 pre-checks (form/small-talk/modify/delete/invoice-
+    retrieval detection) the classifier has already ruled out by emitting
+    this verdict in the first place — the same trade-off every WRITE_*
+    branch above already makes.
     """
     intent = verdict["intent"]
     raw = verdict["raw_message"]
@@ -179,12 +186,18 @@ def dispatch_idle(
             logger.warning(f"[V2_DISPATCH] WRITE_INVOICE error, falling back to legacy: {e}")
             return SHADOW_ONLY
 
+    # ── READ_QUERY / READ_AGGREGATE ──────────────────────────────────────
+    if intent in ("READ_QUERY", "READ_AGGREGATE"):
+        note_route("v2_read_query")
+        try:
+            return intent_service._handle_query_request(
+                user_id, raw, data_user_id, conversation_history, user_mem,
+            )
+        except Exception as e:
+            logger.warning(f"[V2_DISPATCH] READ_QUERY/READ_AGGREGATE error, falling back to legacy: {e}")
+            return SHADOW_ONLY
+
     # ── Everything else — shadow only ─────────────────────────────────
-    # READ_QUERY / READ_AGGREGATE still flow through the existing query
-    # pipeline cascade. We've already logged the verdict in
-    # classifier.classify, so we get a production telemetry trail of "what
-    # would v2 have decided" vs "what the legacy code actually did",
-    # without behaviour change for reads.
     return SHADOW_ONLY
 
 
