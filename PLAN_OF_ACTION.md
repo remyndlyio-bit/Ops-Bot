@@ -484,7 +484,25 @@ still dead as of a fresh direct check right after. If this is the same key confi
 in Railway's production environment, the live bot cannot make ANY AI call right now —
 classification, query planning, invoice generation, all of it. Needs a new OpenRouter
 key rotated into Railway's `AI_KEY` immediately; this is separate from and more urgent
-than anything else in this document.
+than anything else in this document. **Resolved 2026-08-07** — key rotated locally;
+see the clean re-run below. Railway's copy still needs the same rotation separately.
+
+**Week 5.3 clean re-run (2026-08-07)**: with the rotated key, the full 148-row matrix
+ran to completion with zero interruptions
+(`tests/e2e/matrix_results_20260807_2253.xlsx`) — all 128 gradeable rows graded, 20
+MANUAL as expected. **86 PASS / 40 FAIL / 2 UNCLEAR — 67.2% of graded**, up from the
+original 62.5% baseline and from the prior partial run's 60.2%. The 2 UNCLEAR rows are
+grader-side ambiguity (judge couldn't verify without more context), not bot failures.
+
+Checked every FAIL in the two categories most relevant to Week 5.2's dispatch_idle
+wiring (Queries - Jobs, Queries - Payments, 8 rows total): identical failure set to
+the interrupted run's analysis above — same pre-existing context-continuity and
+bill_sent-vs-paid gaps, plus one more confirmed false-fail from the grader (row 51,
+"What did I do on 10 April?" — judge complained about "2026 instead of the current
+year," but 2026 IS the current year; `[2 of 3 votes]`, same split-judge pattern as the
+row-27 false-fail identified earlier). **Read-query parity via dispatch_idle stands
+confirmed on a complete, uninterrupted run** — supersedes the partial-run result above
+as the definitive Week 5.3 evidence.
 
 **P3-3 re-scoped (2026-08-06)**: tracing `_process_request_impl` past the v2 dispatch
 block (`intent_service.py:4977-5132`) shows the legacy keyword cascade (steps 0a-4)
