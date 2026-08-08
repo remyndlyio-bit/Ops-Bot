@@ -2329,6 +2329,9 @@ class IntentService:
             for k, v in new_data.items():
                 if v is not None:
                     extracted[k] = v
+            # If the user provided a job_date, clear the defaulted flag (P0-C)
+            if new_data.get("job_date"):
+                extracted.pop("_job_date_defaulted", None)
 
         # Also catch a bare email-looking token the user typed even if Gemini missed it
         if not invalid_email_attempt:

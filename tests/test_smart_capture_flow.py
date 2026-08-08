@@ -288,6 +288,31 @@ class TestSmartCaptureDefaultedDateDisclosure:
         saved_record = svc.supabase.insert_job_entry.call_args.args[0]
         assert "_job_date_defaulted" not in saved_record
 
+    def test_missing_fields_clears_defaulted_marker_when_user_provides_date(self):
+        """P0-C: when defaulted date flag is set (from _extract_and_confirm),
+        and the user provides a date in the missing-fields response, the flag
+        must be cleared so the confirmation doesn't show the misleading caveat.
+        """
+        svc = _make_svc()
+        svc.gemini.extract_job_fields.side_effect = [
+            # First call: extraction from "add Nike" → missing job_description (required)
+            {"brand_name": "Nike"},
+            # Second call: extraction from "10 April, dubbing" in missing-fields path
+            {"job_date": "2026-04-10", "job_description_details": "dubbing"},
+        ]
+        # Start with extraction that defaults the date (no date in original message)
+        extract_result = svc._extract_and_confirm("u1", "add a job for Nike")
+        assert extract_result["operation"] == "smart_capture_missing"
+        # Verify the defaulted flag was set
+        form = svc.memory.start_form.call_args.kwargs["form_override"]
+        assert form["values"].get("_job_date_defaulted") is True
+
+        # Now handle the missing-fields response with an actual date
+        result = svc._handle_smart_capture_missing("u1", "10 April, dubbing", form)
+        # After providing a date, should NOT show the "today" caveat
+        assert "today" not in result["response"].lower()
+        assert "2026-04-10" in result["response"]
+
 
 class TestSmartCaptureConfirm:
     VALUES = {"brand_name": "Nike", "fees": 25000, "paid": "Yes"}
