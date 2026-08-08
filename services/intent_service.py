@@ -2655,9 +2655,29 @@ class IntentService:
             "pending_invoice_send_email": None,
         })
 
+        msg_lower = message.strip().lower()
+
+        # P0-B containment: escape the month-await when user provides email/skip/cancel
+        # instead of getting stuck in "couldn't detect a month" loop
+        if msg_lower in ("skip", "cancel", "nevermind", "never mind"):
+            response = "Cancelled 👍 What else can I help with?"
+            self._store_conversation(user_id, message, response)
+            return {"operation": "cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
+        # Detect email-shaped reply (user providing a poc_email when we asked for month)
+        if "@" in message and " " not in message.strip():
+            if self._is_valid_email(message.strip()):
+                # User provided an email when we asked for month — likely meant to send invoice
+                # but the email-collection flow never armed. Graceful exit.
+                response = (
+                    f"Got it, I'll save that email ({message.strip()}). "
+                    f"To send an invoice, please say: 'Send invoice for [client] for [month]'"
+                )
+                self._store_conversation(user_id, message, response)
+                return {"operation": "email_provided_instead_of_month", "response": response, "trigger_invoice": False, "invoice_data": {}}
+
         # Extract month from user reply
         month_name = None
-        msg_lower = message.strip().lower()
         _MONTHS = {
             "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
             "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
