@@ -5223,18 +5223,28 @@ class IntentService:
             # legacy awaiting_name_change / awaiting_link_id flags exist to
             # check here.
 
-            # 0b4b. A bare cancel/stop word with NOTHING pending to cancel (every
-            # awaiting_*/pending_disambiguation/form check above already had its
-            # own chance to consume it) must not fall through to the AI query
-            # planner. Live bug: "cancel" reached the planner, which pulled
-            # "id": "2" out of the PREVIOUS turn's disambiguation-pick reply
-            # ("2") still sitting in conversation_history and generated
-            # `UPDATE ... WHERE id = 2` — a raw integer against a UUID column,
-            # crashing 3x with "operator does not exist: uuid = integer"
-            # before falling back to a generic error message. There is
-            # nothing here for "cancel" to mean except "never mind."
+            # 0b4b. Universal cancel — if ANYTHING is pending, clear it; else no-op.
+            # With FLOW_MACHINE_V2 on, pending state lives in multiple places
+            # (FlowMachine, form_state, legacy awaiting_* flags), so the assumption
+            # "upstream checks already consumed cancel" is false. Check all sources.
             if msg_lower in ("cancel", "stop", "nevermind", "never mind", "nvm", "abort", "quit", "exit"):
-                logger.info(f"[ROUTE] no_op_cancel claimed message: {message[:60]!r}")
+                from services.flow_machine import FLOW_IDLE
+                _something_pending = (
+                    self.memory.get_form_state(user_id)
+                    or user_mem.get("pending_disambiguation")
+                    or user_mem.get("pending_send_invoice")
+                    or (self.flow_machine.current_flow(user_id) != FLOW_IDLE)
+                    or any(user_mem.get(k) for k in user_mem if str(k).startswith("awaiting_"))
+                )
+                if _something_pending:
+                    logger.info(f"[ROUTE] cancel claimed message (state found): {message[:60]!r}")
+                    note_route("cancel")
+                    self._clear_flow_state(user_id)
+                    response = "Cancelled 👍 What else can I help with?"
+                    self._store_conversation(user_id, message, response)
+                    return {"operation": "cancelled", "response": response, "trigger_invoice": False, "invoice_data": {}}
+                # No state found — genuinely nothing to cancel
+                logger.info(f"[ROUTE] no_op_cancel claimed message (nothing pending): {message[:60]!r}")
                 note_route("no_op_cancel")
                 response = "👍 Nothing pending to cancel. Let me know if you need anything else."
                 self._store_conversation(user_id, message, response)

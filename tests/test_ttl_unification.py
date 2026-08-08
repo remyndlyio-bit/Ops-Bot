@@ -293,7 +293,8 @@ class TestTTLExpiryRunsRegardlessOfV2Flag:
         seed = {"flow_v2": {"flow": FLOW_BANK_DETAILS, "context": {}, "started_at": fresh, "stack": []}}
         svc = self._svc(seed)
         with patch("services.intent_service._flow_machine_v2_enabled_for", return_value=False):
-            svc.process_request("u1", "cancel")
+            # Send a non-cancel message so the TTL check runs without the cancel logic clearing it
+            svc.process_request("u1", "what is my balance?")
         assert svc.flow_machine.current_flow("u1") == FLOW_BANK_DETAILS, (
             "a fresh (non-stale) flow must survive the TTL check untouched"
         )
